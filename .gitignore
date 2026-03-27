@@ -1,0 +1,71 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+backend/.env
+frontend/.env.local
+
+# ── Python / FastAPI ──────────────────────────────────────────────────────────
+backend/.venv/
+backend/venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+node_modules/
+.npm
+
+# ── Flutter / Dart ────────────────────────────────────────────────────────────
+mobile/frontline_app/.dart_tool/
+mobile/frontline_app/build/
+mobile/frontline_app/.flutter-plugins
+mobile/frontline_app/.flutter-plugins-dependencies
+mobile/frontline_app/.packages
+mobile/frontline_app/android/.gradle/
+mobile/frontline_app/ios/Pods/
+mobile/frontline_app/ios/.symlinks/
+mobile/frontline_app/**/*.g.dart
+# Keep pubspec.lock (reproducible builds)
+
+# ── Hive local DB ─────────────────────────────────────────────────────────────
+*.hive
+*.lock.hive
+hive_boxes/
+
+# ── Supabase ──────────────────────────────────────────────────────────────────
+supabase/.branches/
+supabase/.temp/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── Claude Code (local only) ──────────────────────────────────────────────────
+.claude/settings.local.json
+
+# ── Playwright ────────────────────────────────────────────────────────────────
+frontend/playwright-report/
+frontend/test-results/

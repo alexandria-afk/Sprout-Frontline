@@ -1,0 +1,1 @@
+bash scripts/setup-dev.sh alexandria@sprout.ph "Alex Gentry"

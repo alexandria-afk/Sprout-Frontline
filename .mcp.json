@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "design-system-next": {
+      "command": "npx",
+      "args": ["mcp-design-system-next@latest"]
+    }
+  }
+}

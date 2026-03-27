@@ -1,0 +1,82 @@
+-- Seed reports_to for all sample users (logical org hierarchy)
+
+-- Super Admin → self
+UPDATE profiles SET reports_to = '405d1108-a39b-414a-848f-c157b9ef8c2e'
+  WHERE id = '405d1108-a39b-414a-848f-c157b9ef8c2e';
+
+-- Admins → Super Admin
+UPDATE profiles SET reports_to = '405d1108-a39b-414a-848f-c157b9ef8c2e'
+  WHERE id = '67e3842d-9f34-4c3f-bf2e-fb3bb1128112';
+
+-- Managers → Super Admin
+UPDATE profiles SET reports_to = '405d1108-a39b-414a-848f-c157b9ef8c2e'
+  WHERE id IN (
+    'b0000001-0000-0000-0000-000000000001',
+    'b0000001-0000-0000-0000-000000000003',
+    'b0000001-0000-0000-0000-000000000004'
+  );
+
+-- Jose Cruz → Branch Admin
+UPDATE profiles SET reports_to = '67e3842d-9f34-4c3f-bf2e-fb3bb1128112'
+  WHERE id = 'b0000001-0000-0000-0000-000000000002';
+
+-- Rosa Mendoza → Jose Cruz
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000002'
+  WHERE id = 'b0000001-0000-0000-0000-000000000005';
+
+-- Generic Manager → Ana Reyes
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000003'
+  WHERE id = '22daa328-e6d9-4f60-b71d-65e4aa070992';
+
+-- Location 001 staff → Maria Santos
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000001'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000015',
+    'b0000002-0000-0000-0000-000000000016',
+    'fd917d79-38a5-4935-a9e3-4e9e024b26d2',
+    'b0000002-0000-0000-0000-000000000001',
+    'b0000002-0000-0000-0000-000000000002',
+    'b0000002-0000-0000-0000-000000000003',
+    '58acd6c5-410a-4e9a-837d-5da05ce3c58b'
+  );
+
+-- Location 002 staff → Jose Cruz
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000002'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000004',
+    'b0000002-0000-0000-0000-000000000020',
+    'b0000002-0000-0000-0000-000000000005'
+  );
+
+-- Location 002 staff → Rosa Mendoza
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000005'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000017',
+    'b0000002-0000-0000-0000-000000000006'
+  );
+
+-- Location 003 staff → Ana Reyes
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000003'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000018',
+    'b0000002-0000-0000-0000-000000000008',
+    'b0000002-0000-0000-0000-000000000009'
+  );
+
+-- Location 003 staff → Manager
+UPDATE profiles SET reports_to = '22daa328-e6d9-4f60-b71d-65e4aa070992'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000021',
+    'b0000002-0000-0000-0000-000000000010',
+    'b0000002-0000-0000-0000-000000000007'
+  );
+
+-- Location 004 staff → Carlo Dela Cruz
+UPDATE profiles SET reports_to = 'b0000001-0000-0000-0000-000000000004'
+  WHERE id IN (
+    'b0000002-0000-0000-0000-000000000011',
+    'b0000002-0000-0000-0000-000000000014',
+    'b0000002-0000-0000-0000-000000000019',
+    'b0000002-0000-0000-0000-000000000013',
+    'b0000002-0000-0000-0000-000000000012'
+  );
