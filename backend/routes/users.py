@@ -2,7 +2,7 @@ from uuid import UUID
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from dependencies import get_current_user, require_admin, require_manager_or_above, paginate
-from models.users import CreateUserRequest, UpdateUserRequest
+from models.users import CreateUserRequest, UpdateUserRequest, PositionSuggestion
 from services.user_service import UserService
 
 router = APIRouter()
@@ -51,6 +51,15 @@ async def create_user(
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await UserService.create_user(body, org_id)
+
+
+@router.get("/positions", response_model=list[PositionSuggestion])
+async def list_positions(
+    search: str = Query(default=""),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    return await UserService.get_distinct_positions(org_id=org_id, search=search)
 
 
 @router.get("/{user_id}")

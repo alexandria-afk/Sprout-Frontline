@@ -155,7 +155,7 @@ export default function WorkflowBuilderPage() {
         try {
           if (signal.cancelled) return;
           const firstStage = await addStage(def.id, {
-            name: "Starting Form",
+            name: "Trigger",
             action_type: "fill_form",
             stage_order: 1,
             is_final: true,
@@ -623,7 +623,7 @@ export default function WorkflowBuilderPage() {
                               >
                                 {isStartingStage && (
                                   <div className="px-3 pt-2 pb-0.5 flex items-center justify-between gap-2">
-                                    <span className="text-[9px] font-bold text-blue-500 uppercase tracking-wider shrink-0">Starting Form</span>
+                                    <span className="text-[9px] font-bold text-blue-500 uppercase tracking-wider shrink-0">Trigger</span>
                                     {["form_submitted","audit_submitted","issue_created","incident_created"].includes(triggerType) && (
                                       triggerConfig.form_template_id
                                         ? <span className="text-[9px] text-dark/50 truncate font-medium">

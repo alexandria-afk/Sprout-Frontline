@@ -22,10 +22,10 @@ router = APIRouter()
 
 class CreateRepairGuideRequest(BaseModel):
     title: str
-    description: Optional[str] = None
+    guide_type: str = "text"  # pdf, video, audio, text
     asset_id: Optional[str] = None
     category_id: Optional[str] = None
-    steps: Optional[str] = None  # Markdown or plain text steps
+    content: Optional[str] = None  # Markdown or plain text content
     file_name: Optional[str] = None  # Original file name for storage
     file_content_base64: Optional[str] = None  # Base64-encoded file content
     file_content_type: Optional[str] = None  # MIME type of the file
@@ -46,7 +46,9 @@ async def create_guide(
     db = get_supabase()
 
     file_url = None
-    storage_path = None
+
+    # Derive guide_type from file content type if uploading
+    guide_type = body.guide_type or "text"
 
     # Upload file to Supabase Storage if base64 content provided
     if body.file_content_base64:
@@ -69,6 +71,15 @@ async def create_guide(
 
         content_type = body.file_content_type or "application/octet-stream"
 
+        # Infer guide_type from MIME if not explicitly set
+        if body.guide_type == "text":
+            if "pdf" in content_type:
+                guide_type = "pdf"
+            elif content_type.startswith("video/"):
+                guide_type = "video"
+            elif content_type.startswith("audio/"):
+                guide_type = "audio"
+
         try:
             db.storage.from_("repair-guides").upload(
                 storage_path,
@@ -87,19 +98,16 @@ async def create_guide(
     data = {
         "organisation_id": org_id,
         "title": body.title,
+        "guide_type": guide_type,
     }
-    if body.description is not None:
-        data["description"] = body.description
     if body.asset_id is not None:
         data["asset_id"] = body.asset_id
     if body.category_id is not None:
         data["category_id"] = body.category_id
-    if body.steps is not None:
-        data["steps"] = body.steps
+    if body.content is not None:
+        data["content"] = body.content
     if file_url is not None:
         data["file_url"] = file_url
-    if storage_path is not None:
-        data["storage_path"] = storage_path
 
     resp = db.table("repair_guides").insert(data).execute()
     if not resp.data:
@@ -122,7 +130,7 @@ async def list_guides(
 
     query = (
         db.table("repair_guides")
-        .select("id, title, description, asset_id, category_id, steps, file_url, storage_path, created_at, "
+        .select("id, title, guide_type, asset_id, category_id, content, file_url, created_at, "
                 "assets(name), issue_categories(name)", count="exact")
         .eq("organisation_id", org_id)
         .eq("is_deleted", False)
@@ -157,18 +165,7 @@ async def get_guide(
     if not resp.data:
         raise HTTPException(status_code=404, detail="Repair guide not found")
 
-    guide = resp.data[0]
-
-    # Generate a signed URL (1 hour expiry) if a storage_path is stored
-    storage_path = guide.get("storage_path")
-    if storage_path:
-        try:
-            signed = db.storage.from_("repair-guides").create_signed_url(storage_path, 3600)
-            guide["signed_url"] = signed.get("signedURL") or signed.get("signed_url") or guide.get("file_url")
-        except Exception:
-            guide["signed_url"] = guide.get("file_url")
-
-    return guide
+    return resp.data[0]
 
 
 @router.delete("/{guide_id}")

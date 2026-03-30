@@ -5,12 +5,14 @@ import { useRouter } from "next/navigation";
 import {
   GraduationCap, BookOpen, CheckCircle2, Clock, Trophy, Plus,
   ChevronRight, Sparkles, AlertCircle, Search, Pencil, Trash2,
-  Send, UserPlus, Upload, FileText, Loader2,
+  Send, UserPlus, Upload, FileText, Loader2, Globe, X, ChevronDown,
+  Brain, TrendingUp, AlertTriangle,
 } from "lucide-react";
 import { createClient } from "@/services/supabase/client";
 import {
   getMyEnrollments, listManagedCourses, getLmsAnalytics,
-  publishCourse, deleteCourse,
+  publishCourse, deleteCourse, translateCourse, getKnowledgeGaps, getLearningPath,
+  listPublishedCourses,
   type Course, type CourseEnrollment, type LmsAnalytics,
 } from "@/services/lms";
 import { EnrollStaffModal } from "./courses/_components/EnrollStaffModal";
@@ -24,19 +26,97 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }>
   failed:       { bg: "bg-red-100",           text: "text-red-600",        label: "Failed" },
 };
 
+// ── Knowledge gap severity styles ─────────────────────────────────────────────
+const GAP_SEVERITY: Record<string, { bg: string; text: string; border: string; icon: typeof AlertTriangle }> = {
+  high:   { bg: "bg-red-50",    text: "text-red-600",    border: "border-red-100",   icon: AlertTriangle },
+  medium: { bg: "bg-amber-50",  text: "text-amber-600",  border: "border-amber-100", icon: AlertCircle },
+  low:    { bg: "bg-emerald-50",text: "text-emerald-600",border: "border-emerald-100",icon: CheckCircle2 },
+};
+
 // ── Staff: My Training ────────────────────────────────────────────────────────
-function MyTraining({ name }: { name: string }) {
+function MyTraining({ name, userRole }: { name: string; userRole: string }) {
   const router = useRouter();
   const [enrollments, setEnrollments] = useState<CourseEnrollment[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Knowledge gaps state
+  const [gaps, setGaps] = useState<Array<{ topic: string; description: string; severity: "low" | "medium" | "high"; recommended_action: string }>>([]);
+  const [gapsLoading, setGapsLoading] = useState(false);
+  const [gapsError, setGapsError] = useState("");
+  const [gapsDismissed, setGapsDismissed] = useState(false);
+
+  // Learning path state
+  const [learningPath, setLearningPath] = useState<Array<{ course_id: string; reason: string; priority: number }>>([]);
+  const [pathLoading, setPathLoading] = useState(false);
+  const [pathError, setPathError] = useState("");
+  const [pathDismissed, setPathDismissed] = useState(false);
+  const [availableCourses, setAvailableCourses] = useState<Course[]>([]);
+
   useEffect(() => {
-    getMyEnrollments().then(setEnrollments).catch(() => setEnrollments([])).finally(() => setLoading(false));
-  }, []);
+    getMyEnrollments().then(data => {
+      setEnrollments(data);
+
+      // Fetch available courses for learning path
+      listPublishedCourses({ page_size: 50 })
+        .then(res => setAvailableCourses(res.items))
+        .catch(() => {});
+
+      // Auto-trigger learning path if we have enrollments
+      if (data.length > 0) {
+        const completed = data.filter(e => e.status === "passed").map(e => e.courses?.title ?? "");
+        const scores: Record<string, number> = {};
+        data.filter(e => e.score !== null).forEach(e => {
+          if (e.courses?.title && e.score !== null) scores[e.courses.title] = e.score!;
+        });
+        setPathLoading(true);
+        listPublishedCourses({ page_size: 50 })
+          .then(res => {
+            setAvailableCourses(res.items);
+            return getLearningPath({
+              role: userRole,
+              completed_courses: completed.filter(Boolean),
+              quiz_scores: scores,
+              available_courses: res.items.map(c => ({ id: c.id, title: c.title, type: c.is_mandatory ? "mandatory" : "elective" })),
+            });
+          })
+          .then(res => setLearningPath(res.recommended))
+          .catch(() => setPathError("Could not load learning path."))
+          .finally(() => setPathLoading(false));
+      }
+    }).catch(() => setEnrollments([]))
+      .finally(() => setLoading(false));
+  }, [userRole]);
+
+  function analyseGaps() {
+    // Collect wrong answers from failed enrollments (use course titles as proxies since detail data isn't in the list)
+    const failedEnrollments = enrollments.filter(e => e.status === "failed" && e.courses);
+    if (failedEnrollments.length === 0) {
+      setGaps([]);
+      return;
+    }
+    setGapsLoading(true);
+    setGapsError("");
+    // Build synthetic wrong-answer entries based on failed courses and score
+    const wrongAnswers = failedEnrollments.map(e => ({
+      question: `Quiz for: ${e.courses?.title ?? "Unknown course"}`,
+      chosen: "Incorrect answer",
+      correct: "Correct answer",
+      course_title: e.courses?.title ?? "Unknown",
+    }));
+    getKnowledgeGaps({ wrong_answers: wrongAnswers })
+      .then(res => setGaps(res.gaps))
+      .catch(e => setGapsError((e as Error).message || "Analysis failed. Try again."))
+      .finally(() => setGapsLoading(false));
+  }
 
   const inProgress = enrollments.filter(e => e.status === "in_progress");
   const notStarted = enrollments.filter(e => e.status === "not_started");
   const passed     = enrollments.filter(e => e.status === "passed");
+  const failed     = enrollments.filter(e => e.status === "failed");
+
+  // Map course_id to enrollment for linking recommended courses
+  const enrollmentByCourseId: Record<string, CourseEnrollment> = {};
+  enrollments.forEach(e => { if (e.course_id) enrollmentByCourseId[e.course_id] = e; });
 
   return (
     <div className="flex flex-col gap-4 md:gap-6">
@@ -66,6 +146,71 @@ function MyTraining({ name }: { name: string }) {
               <p className="text-xs text-dark-secondary">{label}</p>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* ── AI Learning Path ─────────────────────────────────────────────────── */}
+      {!loading && !pathDismissed && enrollments.length > 0 && (
+        <div className="bg-white rounded-xl border border-surface-border overflow-hidden">
+          <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-border">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-100 to-purple-100 flex items-center justify-center shrink-0">
+              <TrendingUp className="w-4 h-4 text-violet-600" />
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center gap-1.5">
+                <p className="text-sm font-bold text-dark">Your Learning Path</p>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gradient-to-r from-violet-100 to-purple-100 text-violet-600">✨ AI</span>
+              </div>
+              <p className="text-xs text-dark-secondary">Personalised recommendations based on your progress</p>
+            </div>
+            <button onClick={() => setPathDismissed(true)} className="p-1 rounded-lg hover:bg-gray-100 text-dark/30 transition-colors">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="p-4">
+            {pathLoading ? (
+              <div className="flex items-center gap-3 py-4 px-2">
+                <Loader2 className="w-4 h-4 text-violet-500 animate-spin shrink-0" />
+                <p className="text-sm text-dark-secondary">Building your personalised learning path…</p>
+              </div>
+            ) : pathError ? (
+              <div className="flex items-center gap-3 text-sm text-dark-secondary py-2 px-1">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{pathError}</span>
+                <button onClick={() => setPathError("")} className="ml-auto text-xs text-sprout-purple hover:underline">Retry</button>
+              </div>
+            ) : learningPath.length === 0 ? (
+              <p className="text-sm text-dark-secondary text-center py-4">No recommendations yet — keep completing courses to get personalised suggestions.</p>
+            ) : (
+              <div className="space-y-2">
+                {learningPath.slice(0, 5).map((rec, i) => {
+                  const course = availableCourses.find(c => c.id === rec.course_id);
+                  const enrollment = enrollmentByCourseId[rec.course_id];
+                  const title = course?.title ?? "Course";
+                  return (
+                    <button
+                      key={rec.course_id}
+                      onClick={() => enrollment ? router.push(`/dashboard/training/learn/${enrollment.id}`) : undefined}
+                      className={clsx(
+                        "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl border text-left transition-all",
+                        enrollment ? "hover:border-sprout-purple/30 hover:bg-violet-50/30 border-surface-border" : "border-surface-border cursor-default"
+                      )}
+                    >
+                      <div className="w-6 h-6 rounded-full bg-gradient-to-br from-violet-100 to-purple-100 flex items-center justify-center shrink-0">
+                        <span className="text-[10px] font-bold text-violet-600">{i + 1}</span>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-dark truncate">{title}</p>
+                        <p className="text-xs text-dark-secondary truncate">{rec.reason}</p>
+                      </div>
+                      {enrollment && <ChevronRight className="w-3.5 h-3.5 text-dark/30 shrink-0" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -99,6 +244,89 @@ function MyTraining({ name }: { name: string }) {
               {passed.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
             </>
           )}
+          {failed.length > 0 && (
+            <>
+              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">Needs Retry</p>
+              {failed.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Knowledge Gaps ───────────────────────────────────────────────────── */}
+      {!loading && !gapsDismissed && enrollments.length > 0 && (
+        <div className="bg-white rounded-xl border border-surface-border overflow-hidden">
+          <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-border">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-red-50 to-amber-50 flex items-center justify-center shrink-0">
+              <Brain className="w-4 h-4 text-amber-600" />
+            </div>
+            <div className="flex-1">
+              <div className="flex items-center gap-1.5">
+                <p className="text-sm font-bold text-dark">Knowledge Gaps</p>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gradient-to-r from-violet-100 to-purple-100 text-violet-600">✨ AI</span>
+              </div>
+              <p className="text-xs text-dark-secondary">Areas where you may need more practice</p>
+            </div>
+            <button onClick={() => setGapsDismissed(true)} className="p-1 rounded-lg hover:bg-gray-100 text-dark/30 transition-colors">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="p-4">
+            {gapsLoading ? (
+              <div className="flex items-center gap-3 py-4 px-2">
+                <Loader2 className="w-4 h-4 text-amber-500 animate-spin shrink-0" />
+                <p className="text-sm text-dark-secondary">Analysing your quiz results…</p>
+              </div>
+            ) : gapsError ? (
+              <div className="flex items-center gap-3 text-sm text-dark-secondary py-2 px-1">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>{gapsError}</span>
+                <button onClick={() => { setGapsError(""); analyseGaps(); }} className="ml-auto text-xs text-sprout-purple hover:underline">Retry</button>
+              </div>
+            ) : gaps.length > 0 ? (
+              <div className="space-y-2">
+                {gaps.map((gap, i) => {
+                  const s = GAP_SEVERITY[gap.severity] ?? GAP_SEVERITY.low;
+                  const SIcon = s.icon;
+                  return (
+                    <div key={i} className={clsx("flex gap-3 p-3 rounded-xl border", s.bg, s.border)}>
+                      <SIcon className={clsx("w-4 h-4 mt-0.5 shrink-0", s.text)} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                          <span className={clsx("text-xs font-bold", s.text)}>{gap.topic}</span>
+                          <span className={clsx("text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full border", s.bg, s.border, s.text)}>
+                            {gap.severity}
+                          </span>
+                        </div>
+                        <p className="text-xs text-dark-secondary leading-relaxed">{gap.description}</p>
+                        {gap.recommended_action && (
+                          <p className="text-[11px] text-dark/60 mt-1">
+                            <span className="font-semibold">Tip: </span>{gap.recommended_action}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-4">
+                {failed.length === 0 ? (
+                  <p className="text-sm text-dark-secondary">No failed courses — great work! Gaps appear after a failed quiz attempt.</p>
+                ) : (
+                  <button
+                    onClick={analyseGaps}
+                    className="flex items-center gap-2 mx-auto px-4 py-2 rounded-xl text-sm font-semibold text-violet-700 border-2 border-transparent transition-all hover:shadow-sm"
+                    style={{ background: "linear-gradient(white, white) padding-box, linear-gradient(135deg, #9333EA 0%, #6366F1 100%) border-box" }}
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-violet-600" />
+                    Analyse my gaps
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -161,6 +389,12 @@ function TrainingOverview() {
   const [justCreatedId, setJustCreatedId] = useState<string | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Translation
+  const [translateCourseTarget, setTranslateCourseTarget] = useState<Course | null>(null);
+  const [translateLang, setTranslateLang] = useState("Filipino");
+  const [translating, setTranslating] = useState(false);
+  const [translateSuccess, setTranslateSuccess] = useState<{ courseTitle: string; lang: string } | null>(null);
+
   // Load analytics once
   useEffect(() => {
     getLmsAnalytics()
@@ -209,6 +443,36 @@ function TrainingOverview() {
     if (!confirm("Delete this course?")) return;
     setDeleting(id);
     try { await deleteCourse(id); loadCourses(); } finally { setDeleting(null); }
+  }
+
+  async function handleTranslate() {
+    if (!translateCourseTarget) return;
+    setTranslating(true);
+    try {
+      await translateCourse({
+        course_id: translateCourseTarget.id,
+        target_language: translateLang,
+        content: {
+          title: translateCourseTarget.title,
+          modules: (translateCourseTarget.course_modules ?? []).map(m => ({
+            title: m.title,
+            slides: (m.course_slides ?? []).map(s => ({ title: s.title, body: s.body })),
+            quiz_questions: (m.quiz_questions ?? []).map(q => ({
+              question: q.question,
+              options: q.options.map(o => o.text),
+              explanation: q.explanation,
+            })),
+          })),
+        },
+      });
+      setTranslateSuccess({ courseTitle: translateCourseTarget.title, lang: translateLang });
+      setTranslateCourseTarget(null);
+      loadCourses();
+    } catch (e) {
+      alert("Translation failed: " + (e as Error).message);
+    } finally {
+      setTranslating(false);
+    }
   }
 
   return (
@@ -393,6 +657,13 @@ function TrainingOverview() {
                             <UserPlus className="w-3.5 h-3.5" />
                           </button>
                         )}
+                        <button
+                          onClick={() => { setTranslateCourseTarget(course); setTranslateLang("Filipino"); }}
+                          className="p-1.5 rounded-lg hover:bg-violet-50 text-violet-500 transition-colors"
+                          title="Translate course"
+                        >
+                          <Globe className="w-3.5 h-3.5" />
+                        </button>
                         {!course.is_published && !course.was_published && (
                           <button onClick={() => handlePublish(course.id)} disabled={publishing === course.id}
                             className="p-1.5 rounded-lg hover:bg-sprout-green/10 text-sprout-green transition-colors disabled:opacity-40" title="Publish">
@@ -425,6 +696,75 @@ function TrainingOverview() {
           onClose={() => setEnrollModal(null)}
           onDone={loadCourses}
         />
+      )}
+
+      {/* ── Translate modal ──────────────────────────────────────────────────── */}
+      {translateCourseTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 space-y-5">
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-100 to-purple-100 flex items-center justify-center shrink-0">
+                <Globe className="w-4 h-4 text-violet-600" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h2 className="text-base font-bold text-dark">Translate Course</h2>
+                <p className="text-xs text-dark-secondary mt-0.5 truncate">"{translateCourseTarget.title}"</p>
+              </div>
+              <button onClick={() => setTranslateCourseTarget(null)} className="p-1 rounded-lg hover:bg-gray-100 text-dark/30 transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div>
+              <label className="text-xs font-semibold text-dark-secondary uppercase tracking-wide mb-1.5 block">Target Language</label>
+              <div className="relative">
+                <select
+                  value={translateLang}
+                  onChange={e => setTranslateLang(e.target.value)}
+                  className="w-full px-3 py-2.5 border border-surface-border rounded-xl text-sm bg-white focus:outline-none focus:border-violet-400 transition-colors appearance-none pr-8"
+                >
+                  {["English", "Filipino", "Spanish", "Mandarin", "Arabic", "Hindi", "Indonesian", "Thai"].map(lang => (
+                    <option key={lang} value={lang}>{lang}</option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-dark/40 pointer-events-none" />
+              </div>
+            </div>
+
+            <p className="text-xs text-dark-secondary bg-violet-50 rounded-xl px-3 py-2.5 leading-relaxed">
+              A translated copy of this course will be created. The original remains unchanged.
+            </p>
+
+            <div className="flex items-center justify-end gap-3">
+              <button onClick={() => setTranslateCourseTarget(null)}
+                className="px-4 py-2 border border-surface-border rounded-xl text-sm font-medium text-dark hover:bg-gray-50 transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleTranslate} disabled={translating}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white disabled:opacity-50 transition-colors"
+                style={{ background: "linear-gradient(135deg, #9333EA 0%, #6366F1 100%)" }}>
+                {translating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                {translating ? "Translating…" : "Translate"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Translation success toast ──────────────────────────────────────── */}
+      {translateSuccess && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 bg-white border border-surface-border rounded-2xl shadow-xl px-5 py-3.5 max-w-sm">
+          <div className="w-8 h-8 rounded-xl bg-sprout-green/10 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-4 h-4 text-sprout-green" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-dark">Translation complete</p>
+            <p className="text-xs text-dark-secondary truncate">New course created in {translateSuccess.lang}</p>
+          </div>
+          <button onClick={() => setTranslateSuccess(null)} className="p-1 rounded-lg hover:bg-gray-100 text-dark/30 transition-colors shrink-0">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
       )}
     </div>
   );
@@ -463,7 +803,7 @@ export default function TrainingPage() {
 
   return (
     <div className="p-4 md:p-6">
-      {role === "staff" ? <MyTraining name={name} /> : <TrainingOverview />}
+      {role === "staff" ? <MyTraining name={name} userRole={role} /> : <TrainingOverview />}
     </div>
   );
 }

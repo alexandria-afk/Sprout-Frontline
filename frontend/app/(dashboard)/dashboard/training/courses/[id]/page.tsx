@@ -13,7 +13,7 @@ import {
 } from "@hello-pangea/dnd";
 import {
   getCourse, updateCourse, publishCourse, unpublishCourse, getEnrollmentStats,
-  saveCourseStructure, duplicateCourse,
+  saveCourseStructure, duplicateCourse, generateQuiz,
   type Course, type CourseModule, type CourseSlide, type QuizQuestion, type QuizOption,
 } from "@/services/lms";
 import { apiFetch } from "@/services/api/client";
@@ -301,19 +301,155 @@ function QuestionEditor({
   );
 }
 
+// ── AI Quiz Generation Modal ───────────────────────────────────────────────────
+
+function AiQuizModal({
+  onClose,
+  onAccept,
+  courseId,
+  slidesContent,
+}: {
+  onClose: () => void;
+  onAccept: (questions: LocalQuestion[]) => void;
+  courseId: string;
+  slidesContent: string[];
+}) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [questions, setQuestions] = useState<Array<{
+    question: string;
+    options: string[];
+    correct_index: number;
+    explanation: string;
+  }>>([]);
+
+  useEffect(() => {
+    generateQuiz({ course_id: courseId, slides_content: slidesContent, num_questions: 5 })
+      .then(res => setQuestions(res.questions))
+      .catch(e => setError((e as Error).message || "Failed to generate questions."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  function handleAccept() {
+    const converted: LocalQuestion[] = questions.map((q, i) => ({
+      _id: uid(),
+      question: q.question,
+      question_type: "multiple_choice",
+      options: q.options.map((text, idx) => ({
+        id: String.fromCharCode(97 + idx), // a, b, c, d
+        text,
+        is_correct: idx === q.correct_index,
+      })),
+      explanation: q.explanation ?? "",
+      display_order: i,
+    }));
+    onAccept(converted);
+    onClose();
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-xl max-h-[85vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-surface-border shrink-0">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-100 to-purple-100 flex items-center justify-center">
+            <Sparkles className="w-4 h-4 text-violet-600" />
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-bold text-dark">AI-Generated Quiz Questions</p>
+            <p className="text-xs text-dark-secondary">Based on your course slide content</p>
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-dark-secondary transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-10 gap-3">
+              <Loader2 className="w-6 h-6 text-violet-500 animate-spin" />
+              <p className="text-sm text-dark-secondary">Generating questions from your slides…</p>
+            </div>
+          ) : error ? (
+            <div className="flex items-center gap-3 bg-red-50 border border-red-100 rounded-xl p-4">
+              <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+              <p className="text-sm text-red-600">{error}</p>
+            </div>
+          ) : questions.length === 0 ? (
+            <p className="text-sm text-dark-secondary text-center py-8">No questions generated. Try adding more slide content.</p>
+          ) : (
+            questions.map((q, i) => (
+              <div key={i} className="border border-surface-border rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-gradient-to-r from-violet-50/60 to-purple-50/60 border-b border-surface-border">
+                  <span className="text-[10px] font-bold text-violet-600 uppercase tracking-wide">Question {i + 1}</span>
+                </div>
+                <div className="p-4 space-y-2.5">
+                  <p className="text-sm font-medium text-dark">{q.question}</p>
+                  <div className="space-y-1.5">
+                    {q.options.map((opt, oi) => (
+                      <div key={oi} className={clsx(
+                        "flex items-center gap-2 px-3 py-2 rounded-lg text-sm",
+                        oi === q.correct_index
+                          ? "bg-sprout-green/5 border border-sprout-green/30 text-dark"
+                          : "bg-gray-50 text-dark-secondary"
+                      )}>
+                        {oi === q.correct_index
+                          ? <Check className="w-3.5 h-3.5 text-sprout-green shrink-0" />
+                          : <span className="w-3.5 h-3.5 shrink-0" />}
+                        {opt}
+                      </div>
+                    ))}
+                  </div>
+                  {q.explanation && (
+                    <p className="text-[11px] text-dark-secondary bg-gray-50 rounded-lg px-3 py-2 leading-relaxed">
+                      <span className="font-semibold text-dark">Explanation: </span>{q.explanation}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Footer */}
+        {!loading && !error && questions.length > 0 && (
+          <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-surface-border shrink-0">
+            <button onClick={onClose}
+              className="px-4 py-2 border border-surface-border rounded-xl text-sm font-medium text-dark hover:bg-gray-50 transition-colors">
+              Dismiss
+            </button>
+            <button onClick={handleAccept}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-colors"
+              style={{ background: "linear-gradient(135deg, #9333EA 0%, #6366F1 100%)" }}>
+              <Check className="w-3.5 h-3.5" />
+              Add all {questions.length} questions
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Module Editor (right panel) ────────────────────────────────────────────────
 
 function ModuleEditorPanel({
   module: mod,
   onChange,
+  courseId,
+  allModules,
 }: {
   module: LocalModule;
   onChange: (m: LocalModule) => void;
+  courseId: string;
+  allModules: LocalModule[];
 }) {
   const meta = MODULE_META[mod.module_type];
   const Icon = meta.icon;
 
   const [uploadingModuleId, setUploadingModuleId] = useState<string | null>(null);
+  const [showAiQuizModal, setShowAiQuizModal] = useState(false);
 
   async function handleModuleFileUpload(
     moduleId: string,
@@ -407,6 +543,12 @@ function ModuleEditorPanel({
       onChange({ ...mod, questions: arr.map((q, i) => ({ ...q, display_order: i })) });
     };
 
+    // Collect all slide bodies from all slide-type modules for AI generation
+    const allSlideBodies = allModules
+      .filter(m => m.module_type === "slides")
+      .flatMap(m => m.slides.map(s => [s.title, s.body].filter(Boolean).join(" — ")))
+      .filter(Boolean);
+
     return (
       <div className="space-y-4">
         <div>
@@ -423,11 +565,41 @@ function ModuleEditorPanel({
               onMoveDown={() => moveQuestion(i, 1)}
             />
           ))}
-          <button onClick={addQuestion}
-            className="w-full py-2.5 border-2 border-dashed border-surface-border rounded-xl text-sm font-medium text-dark-secondary hover:border-amber-400 hover:text-amber-600 transition-colors flex items-center justify-center gap-2">
-            <Plus className="w-4 h-4" /> Add Question
-          </button>
+          <div className="flex gap-2">
+            <button onClick={addQuestion}
+              className="flex-1 py-2.5 border-2 border-dashed border-surface-border rounded-xl text-sm font-medium text-dark-secondary hover:border-amber-400 hover:text-amber-600 transition-colors flex items-center justify-center gap-2">
+              <Plus className="w-4 h-4" /> Add Question
+            </button>
+            <button
+              onClick={() => setShowAiQuizModal(true)}
+              disabled={allSlideBodies.length === 0}
+              title={allSlideBodies.length === 0 ? "Add slide content first to generate questions" : "Generate questions with AI"}
+              className="flex items-center gap-1.5 px-4 py-2.5 border-2 border-transparent rounded-xl text-sm font-semibold text-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all hover:shadow-sm"
+              style={{ background: "linear-gradient(white, white) padding-box, linear-gradient(135deg, #9333EA 0%, #6366F1 100%) border-box" }}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-violet-600" />
+              Generate with AI
+            </button>
+          </div>
         </div>
+
+        {showAiQuizModal && (
+          <AiQuizModal
+            courseId={courseId}
+            slidesContent={allSlideBodies}
+            onClose={() => setShowAiQuizModal(false)}
+            onAccept={generated => {
+              const startOrder = mod.questions.length;
+              onChange({
+                ...mod,
+                questions: [
+                  ...mod.questions,
+                  ...generated.map((q, i) => ({ ...q, display_order: startOrder + i })),
+                ],
+              });
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -651,7 +823,7 @@ export default function CourseBuilderPage() {
       if (modules.length > 0 && !course.is_published) {
         const validationError = validateModules();
         if (validationError) { setError(validationError); return false; }
-        await saveCourseStructure(courseId, modules.map((m, i) => ({
+        const saved = await saveCourseStructure(courseId, modules.map((m, i) => ({
           title: m.title,
           module_type: m.module_type,
           content_url: m.content_url || undefined,
@@ -667,6 +839,18 @@ export default function CourseBuilderPage() {
             display_order: j,
           })),
         })));
+        // Sync local module state from server response to ensure IDs & slides are up-to-date
+        if (saved?.course_modules) {
+          const synced = (saved.course_modules)
+            .sort((a, b) => a.display_order - b.display_order)
+            .map(moduleToLocal);
+          setModules(synced);
+          // Keep selection on the same display_order position as before
+          const currentMod = modules.find(m => m._id === selectedModuleId);
+          const targetOrder = currentMod?.display_order ?? 0;
+          const newSelected = synced.find(m => m.display_order === targetOrder) ?? synced[0];
+          if (newSelected) setSelectedModuleId(newSelected._id);
+        }
       }
 
       setDirty(false);
@@ -964,6 +1148,8 @@ export default function CourseBuilderPage() {
               <ModuleEditorPanel
                 module={selectedModule}
                 onChange={updated => updateModule(selectedModule._id, updated)}
+                courseId={courseId}
+                allModules={modules}
               />
             </div>
           ) : (

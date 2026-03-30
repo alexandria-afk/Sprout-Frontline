@@ -190,3 +190,39 @@ export function getIssuesByLocation(): Promise<Array<{ location_id: string; loca
 export function getRecurringIssues(page = 1, pageSize = 20): Promise<{ data: Issue[]; total: number }> {
   return apiFetch(`/api/v1/issues/dashboard/recurring?page=${page}&page_size=${pageSize}`);
 }
+
+// ── AI ────────────────────────────────────────────────────────────────────────
+
+export function classifyIssue(body: {
+  title: string;
+  description: string;
+  available_categories: { id: string; name: string }[];
+}): Promise<{
+  type: "issue" | "incident";
+  category_id: string;
+  priority: string;
+  suggested_title: string;
+  is_safety_risk: boolean;
+  reasoning: string;
+}> {
+  return apiFetch("/api/v1/ai/classify-issue", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function analysePhoto(body: {
+  image_url: string;
+  description: string;
+}): Promise<{
+  safety_hazard_detected: boolean;
+  hazard_description: string | null;
+  suggested_priority: string;
+  confidence: number;
+  ai_description: string;
+}> {
+  return apiFetch("/api/v1/ai/analyse-photo", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}

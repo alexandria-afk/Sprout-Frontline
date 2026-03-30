@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Trophy, Download } from "lucide-react";
+import { ArrowLeft, Trophy, Download, Users, Star, TrendingUp, Award } from "lucide-react";
 import { clsx } from "clsx";
 import { getOrgLeaderboard } from "@/services/gamification";
 import type { LeaderboardEntry } from "@/services/gamification";
@@ -43,6 +43,7 @@ export default function SafetyLeaderboardReportPage() {
     entries.length
       ? Math.round(entries.reduce((s, e) => s + e.score, 0) / entries.length)
       : 0;
+  const totalBadges = entries.reduce((s, e) => s + (e.badges?.length ?? 0), 0);
 
   function rankEmoji(rank: number) {
     if (rank === 1) return "🥇";
@@ -95,19 +96,21 @@ export default function SafetyLeaderboardReportPage() {
       ) : (
         <>
           {/* Summary cards */}
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-2xl font-bold text-dark">{entries.length}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Participants</p>
-            </div>
-            <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-2xl font-bold text-yellow-500">{topScore}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Top Score</p>
-            </div>
-            <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-2xl font-bold text-dark">{avgScore}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Avg Score</p>
-            </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { label: "Participants",   value: entries.length, icon: Users,      bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+              { label: "Top Score",      value: topScore,       icon: Trophy,     bg: "bg-yellow-50",        color: "text-yellow-500"   },
+              { label: "Avg Score",      value: avgScore,       icon: TrendingUp, bg: "bg-blue-50",          color: "text-blue-600"     },
+              { label: "Badges Awarded", value: totalBadges,    icon: Award,      bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+            ].map(({ label, value, icon: Icon, bg, color }) => (
+              <div key={label} className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2 hover:border-yellow-300/60 hover:shadow-sm transition-all">
+                <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                  <Icon className={clsx("w-4 h-4", color)} />
+                </div>
+                <p className="text-xl md:text-2xl font-bold text-dark">{value}</p>
+                <p className="text-xs text-dark-secondary">{label}</p>
+              </div>
+            ))}
           </div>
 
           {/* Podium (top 3) */}

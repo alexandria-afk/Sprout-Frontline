@@ -326,7 +326,7 @@ class LmsService:
 
                 raw = client.messages.create(
                     model="claude-haiku-4-5",
-                    max_tokens=4096,
+                    max_tokens=8192,
                     system=_COURSE_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_content}],
                 ).content[0].text.strip()
@@ -337,6 +337,13 @@ class LmsService:
                     if raw.startswith("json"):
                         raw = raw[4:]
                     raw = raw.rsplit("```", 1)[0].strip()
+
+                # Extract JSON robustly — find the outermost { ... } block
+                # in case Claude prepended/appended stray text
+                start = raw.find("{")
+                end = raw.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    raw = raw[start:end + 1]
 
                 course_json = json.loads(raw)
 
@@ -674,6 +681,9 @@ class LmsService:
                         "display_order": q.get("display_order", j),
                         "is_deleted": False,
                     }).execute()
+
+        # Return the full updated course so the frontend can sync state
+        return await LmsService.get_course(course_id, org_id)
 
     @staticmethod
     async def get_enrollment_with_progress(enrollment_id: str, user_id: str):

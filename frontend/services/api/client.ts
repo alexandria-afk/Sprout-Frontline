@@ -32,7 +32,13 @@ export async function apiFetch<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body?.detail || body?.message || `HTTP ${res.status}`);
+    const err = new Error(body?.detail || body?.message || `HTTP ${res.status}`);
+    (err as Error & { status: number }).status = res.status;
+    throw err;
+  }
+
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as unknown as T;
   }
 
   return res.json() as Promise<T>;

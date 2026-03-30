@@ -156,6 +156,36 @@ async def get_audit_trail(
         except Exception:
             pass
 
+    # ── 5. Onboarding provisioning events ────────────────────────────────────
+    if entity_type is None:
+        try:
+            res = (
+                db.table("onboarding_sessions")
+                .select("id, completed_at, launch_progress, company_name, industry_code")
+                .eq("organisation_id", org_id)
+                .eq("status", "completed")
+                .execute()
+            )
+            for row in res.data or []:
+                progress = row.get("launch_progress") or {}
+                steps = progress.get("steps_completed") or []
+                company = row.get("company_name") or "your company"
+                description = f"Workspace provisioned for {company}: {', '.join(steps[:5])}" if steps else f"Workspace provisioned for {company}"
+                events.append({
+                    "id": _safe_str(row.get("id")),
+                    "event_type": "workspace_provisioned",
+                    "entity_type": "onboarding",
+                    "entity_id": _safe_str(row.get("id")),
+                    "entity_title": f"Workspace — {company}",
+                    "actor_name": "Onboarding Wizard",
+                    "actor_id": "",
+                    "description": description,
+                    "timestamp": _safe_str(row.get("completed_at")),
+                    "metadata": {"steps_completed": steps},
+                })
+        except Exception:
+            pass
+
     # ── Merge, sort, paginate ─────────────────────────────────────────────────
     events.sort(key=lambda e: e["timestamp"] or "", reverse=True)
 

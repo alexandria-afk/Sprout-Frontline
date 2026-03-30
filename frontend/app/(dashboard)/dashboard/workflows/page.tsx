@@ -21,6 +21,8 @@ import {
   Lock,
   ShieldAlert,
   Siren,
+  CheckCircle2,
+  Activity,
 } from "lucide-react";
 import { clsx } from "clsx";
 import {
@@ -167,6 +169,35 @@ export default function WorkflowsPage() {
           </button>
         )}
       </div>
+
+      {/* Stat cards */}
+      {!loading && (() => {
+        const totalCount   = NATIVE_WORKFLOWS.length + definitions.length;
+        const activeCount  = NATIVE_WORKFLOWS.length + definitions.filter(d => d.is_active).length;
+        const runningCount = runningIds.size;
+        const cards = [
+          { label: "Total Workflows", value: totalCount,   icon: GitBranch,    bg: "bg-sprout-purple/10", color: "text-sprout-purple", onClick: () => {} },
+          { label: "Active",          value: activeCount,  icon: CheckCircle2, bg: "bg-sprout-green/10",  color: "text-sprout-green",  onClick: () => {} },
+          { label: "Running Now",     value: runningCount, icon: Activity,     bg: "bg-blue-50",          color: "text-blue-600",      onClick: () => router.push("/dashboard/workflows/instances") },
+        ];
+        return (
+          <div className="grid grid-cols-3 gap-3">
+            {cards.map(({ label, value, icon: Icon, bg, color, onClick }) => (
+              <button
+                key={label}
+                onClick={onClick}
+                className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2 text-left hover:border-sprout-purple/30 hover:shadow-sm transition-all"
+              >
+                <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                  <Icon className={clsx("w-4 h-4", color)} />
+                </div>
+                <p className="text-xl md:text-2xl font-bold text-dark">{value}</p>
+                <p className="text-xs text-dark-secondary">{label}</p>
+              </button>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Tab strip */}
       <div className="flex gap-1 border-b border-[#E8EDF2]">

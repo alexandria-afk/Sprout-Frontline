@@ -289,3 +289,48 @@ export interface EnrollmentWithProgress {
 export async function getEnrollmentWithProgress(enrollmentId: string) {
   return apiFetch<EnrollmentWithProgress>(`/api/v1/lms/enrollments/${enrollmentId}`);
 }
+
+// ── AI endpoints ──────────────────────────────────────────────────────────────
+
+export function generateQuiz(body: {
+  course_id: string;
+  slides_content: string[];
+  num_questions?: number;
+}): Promise<{ questions: Array<{ question: string; options: string[]; correct_index: number; explanation: string }> }> {
+  return apiFetch("/api/v1/ai/generate-quiz", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function translateCourse(body: {
+  course_id: string;
+  target_language: string;
+  content: object;
+}): Promise<object> {
+  return apiFetch("/api/v1/ai/translate-course", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function getKnowledgeGaps(body: {
+  wrong_answers: Array<{ question: string; chosen: string; correct: string; course_title: string }>;
+}): Promise<{ gaps: Array<{ topic: string; description: string; severity: "low" | "medium" | "high"; recommended_action: string }> }> {
+  return apiFetch("/api/v1/ai/knowledge-gaps", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function getLearningPath(body: {
+  role: string;
+  completed_courses: string[];
+  quiz_scores: Record<string, number>;
+  available_courses: Array<{ id: string; title: string; type: string }>;
+}): Promise<{ recommended: Array<{ course_id: string; reason: string; priority: number }> }> {
+  return apiFetch("/api/v1/ai/learning-path", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}

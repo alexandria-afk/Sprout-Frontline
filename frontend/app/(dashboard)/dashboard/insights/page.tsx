@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   BarChart2, RefreshCw, X, ChevronRight, ClipboardList, AlertOctagon,
   Users, BookOpen, CheckSquare, Trophy, Lightbulb, Sparkles,
@@ -430,6 +431,15 @@ export default function InsightsPage() {
       {tab === "analytics" && (
         <div className="space-y-4">
 
+          {/* ── Sample data notice ────────────────────────────────────────── */}
+          <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
+            <span className="text-amber-500 text-lg shrink-0">📊</span>
+            <div>
+              <p className="text-sm font-semibold text-amber-800">Frontline is still collecting your data</p>
+              <p className="text-xs text-amber-700 mt-0.5">The charts below show <strong>sample data</strong> as a preview of what you&apos;ll see once your team starts using the platform. Real data will appear automatically as activity is recorded.</p>
+            </div>
+          </div>
+
           {/* ── Filter bar ────────────────────────────────────────────────── */}
           <div className="bg-white rounded-2xl border border-surface-border p-4 flex flex-col gap-3">
 
@@ -591,14 +601,18 @@ export default function InsightsPage() {
                 </div>
                 <div className="flex flex-col gap-1">
                   {group.reports.map(rep => (
-                    <button key={rep.label} onClick={() => !rep.soon && router.push(rep.href)} disabled={rep.soon}
-                      className={clsx("flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors text-left w-full",
-                        rep.soon ? "text-dark/30 cursor-default" : "text-dark/70 hover:bg-gray-50 hover:text-dark")}>
-                      <span>{rep.label}</span>
-                      {rep.soon
-                        ? <span className="text-[10px] bg-gray-100 text-dark/40 px-1.5 py-0.5 rounded-full font-normal">Soon</span>
-                        : <ChevronRight className="w-3.5 h-3.5 text-dark/30"/>}
-                    </button>
+                    rep.soon ? (
+                      <div key={rep.label} className="flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium text-dark/30 cursor-default">
+                        <span>{rep.label}</span>
+                        <span className="text-[10px] bg-gray-100 text-dark/40 px-1.5 py-0.5 rounded-full font-normal">Soon</span>
+                      </div>
+                    ) : (
+                      <Link key={rep.label} href={rep.href}
+                        className="flex items-center justify-between px-3 py-2 rounded-lg text-xs font-medium transition-colors text-dark/70 hover:bg-gray-50 hover:text-dark">
+                        <span>{rep.label}</span>
+                        <ChevronRight className="w-3.5 h-3.5 text-dark/30"/>
+                      </Link>
+                    )
                   ))}
                 </div>
               </div>

@@ -2,7 +2,8 @@ import csv
 import io
 from uuid import UUID
 from fastapi import HTTPException
-from models.users import CreateUserRequest, UpdateUserRequest, ProfileResponse
+from collections import Counter
+from models.users import CreateUserRequest, UpdateUserRequest, ProfileResponse, PositionSuggestion
 from models.base import PaginatedResponse
 from services.supabase_client import get_supabase
 from config import settings
@@ -111,6 +112,8 @@ class UserService:
             profile_data["phone_number"] = body.phone_number
         if body.reports_to:
             profile_data["reports_to"] = str(body.reports_to)
+        if body.position:
+            profile_data["position"] = body.position
 
         try:
             profile_response = supabase.table("profiles").insert(profile_data).execute()
@@ -173,6 +176,8 @@ class UserService:
             updates["language"] = body.language
         if body.reports_to is not None:
             updates["reports_to"] = str(body.reports_to)
+        if body.position is not None:
+            updates["position"] = body.position if body.position else None
 
         if not updates:
             return ProfileResponse(**existing.data[0])
@@ -247,13 +252,24 @@ class UserService:
                 body = CreateUserRequest(
                     email=email,
                     full_name=row.get("full_name", "").strip(),
-                    role=row.get("role", "staff").strip(),
-                    location_id=row.get("location_id") or None,
+                    role=row.get("role", "staff").strip() or "staff",
+                    location_id=row.get("location_id", "").strip() or None,
+                    phone_number=row.get("phone_number", "").strip() or None,
+                    position=row.get("position", "").strip() or None,
                 )
                 profile = await UserService.create_user(body, org_id)
                 successes.append({"row": row_num, "email": email, "user_id": str(profile.id)})
             except Exception as e:
-                failures.append({"row": row_num, "email": email, "error": str(e)})
+                err_str = str(e).lower()
+                if "duplicate" in err_str or "already exists" in err_str or "unique" in err_str:
+                    user_error = "Email already exists in the system"
+                elif "violates" in err_str or "constraint" in err_str or "foreign key" in err_str:
+                    user_error = "Invalid data — check role and location values"
+                elif "invalid" in err_str and "role" in err_str:
+                    user_error = "Invalid role — must be staff, manager, or admin"
+                else:
+                    user_error = "Failed to create user"
+                failures.append({"row": row_num, "email": email, "error": user_error})
 
         return {"successes": successes, "failures": failures}
 
@@ -275,6 +291,28 @@ class UserService:
             raise HTTPException(status_code=404, detail="Profile not found")
 
         return ProfileResponse(**response.data[0])
+
+    @staticmethod
+    async def get_distinct_positions(org_id: str, search: str = "") -> list[PositionSuggestion]:
+        supabase = get_supabase()
+        try:
+            resp = (
+                supabase.table("profiles")
+                .select("position")
+                .eq("organisation_id", str(org_id))
+                .eq("is_deleted", False)
+                .not_.is_("position", "null")
+                .execute()
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        counts = Counter(row["position"] for row in resp.data if row.get("position"))
+        results = [PositionSuggestion(position=p, count=c) for p, c in counts.items()]
+        if search:
+            q = search.lower()
+            results = [r for r in results if q in r.position.lower()]
+        return sorted(results, key=lambda x: -x.count)
 
 
 def _generate_temp_password() -> str:

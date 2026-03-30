@@ -6,6 +6,7 @@ export interface CreateUserPayload {
   email: string;
   full_name: string;
   role: string;
+  position?: string | null;
   location_id?: string;
   phone_number?: string;
   reports_to?: string;
@@ -14,6 +15,7 @@ export interface CreateUserPayload {
 export interface UpdateUserPayload {
   full_name?: string;
   role?: string;
+  position?: string | null;
   location_id?: string;
   phone_number?: string;
   is_active?: boolean;
@@ -73,6 +75,9 @@ export interface Location {
   id: string;
   name: string;
   address?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  geo_fence_radius_meters?: number;
 }
 
 export async function listLocations(): Promise<Location[]> {
@@ -89,7 +94,7 @@ async function getOrgId(): Promise<string | undefined> {
   return data.session?.user?.app_metadata?.organisation_id as string | undefined;
 }
 
-export async function createLocation(payload: { name: string; address?: string }): Promise<Location> {
+export async function createLocation(payload: { name: string; address?: string; latitude?: number | null; longitude?: number | null; geo_fence_radius_meters?: number }): Promise<Location> {
   const orgId = await getOrgId();
   if (!orgId) throw new Error("Not authenticated");
   return apiFetch<Location>(`/api/v1/organisations/${orgId}/locations`, {
@@ -98,7 +103,7 @@ export async function createLocation(payload: { name: string; address?: string }
   });
 }
 
-export async function updateLocation(id: string, payload: { name?: string; address?: string }): Promise<Location> {
+export async function updateLocation(id: string, payload: { name?: string; address?: string; latitude?: number | null; longitude?: number | null; geo_fence_radius_meters?: number }): Promise<Location> {
   const orgId = await getOrgId();
   if (!orgId) throw new Error("Not authenticated");
   return apiFetch<Location>(`/api/v1/organisations/${orgId}/locations/${id}`, {
@@ -111,6 +116,11 @@ export async function deleteLocation(id: string): Promise<void> {
   const orgId = await getOrgId();
   if (!orgId) throw new Error("Not authenticated");
   await apiFetch(`/api/v1/organisations/${orgId}/locations/${id}`, { method: "DELETE" });
+}
+
+export async function listPositions(search = ""): Promise<{ position: string; count: number }[]> {
+  const qs = search ? `?search=${encodeURIComponent(search)}` : "";
+  return apiFetch<{ position: string; count: number }[]>(`/api/v1/users/positions${qs}`);
 }
 
 export async function bulkImportUsers(file: File): Promise<ApiResponse<BulkImportResult>> {

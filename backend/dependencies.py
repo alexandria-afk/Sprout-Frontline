@@ -1,8 +1,12 @@
 import jwt
 from jwt import PyJWKClient
+from datetime import timedelta
 from fastapi import Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from config import settings
+
+# Local dev Supabase container clock can lag host by up to 2 hours
+_JWT_LEEWAY = timedelta(hours=12)
 
 security = HTTPBearer()
 
@@ -46,6 +50,7 @@ async def get_current_user(
                 settings.supabase_jwt_secret,
                 algorithms=["HS256"],
                 audience="authenticated",
+                leeway=_JWT_LEEWAY,
             )
         else:
             signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -54,37 +59,41 @@ async def get_current_user(
                 signing_key.key,
                 algorithms=["ES256", "RS256"],
                 audience="authenticated",
+                leeway=_JWT_LEEWAY,
             )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
-    # Enrich from DB profile if app_metadata is incomplete (invite token timing issue)
+    # Always enrich from profiles table so organisation_id and role are consistent
+    # regardless of JWT token refresh state. The JWT's app_metadata can lag after
+    # Supabase silently refreshes the access token mid-session, causing org_id
+    # mismatches between calls (e.g. createSession vs getLaunchProgress → 403).
+    # Profiles are looked up by user UUID (PK) so this is a fast indexed query.
     app_meta = payload.get("app_metadata") or {}
-    if not app_meta.get("organisation_id") or not app_meta.get("role"):
-        user_id = payload.get("sub")
-        if user_id:
-            try:
-                from services.supabase_client import get_supabase
-                sb = get_supabase()
-                profile = (
-                    sb.table("profiles")
-                    .select("organisation_id, role")
-                    .eq("id", user_id)
-                    .eq("is_deleted", False)
-                    .maybe_single()
-                    .execute()
-                )
-                if profile.data:
-                    app_meta = {
-                        **app_meta,
-                        "organisation_id": str(profile.data["organisation_id"]),
-                        "role": profile.data["role"],
-                    }
-                    payload = {**payload, "app_metadata": app_meta}
-            except Exception:
-                pass  # If DB lookup fails, proceed with whatever is in the token
+    user_id = payload.get("sub")
+    if user_id:
+        try:
+            from services.supabase_client import get_supabase
+            sb = get_supabase()
+            profile = (
+                sb.table("profiles")
+                .select("organisation_id, role")
+                .eq("id", user_id)
+                .eq("is_deleted", False)
+                .maybe_single()
+                .execute()
+            )
+            if profile.data:
+                app_meta = {
+                    **app_meta,
+                    "organisation_id": str(profile.data["organisation_id"]),
+                    "role": profile.data["role"],
+                }
+                payload = {**payload, "app_metadata": app_meta}
+        except Exception:
+            pass  # Fall back to JWT values if DB lookup fails
 
     return payload
 

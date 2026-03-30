@@ -8,6 +8,7 @@ import {
   MapPin, Clock, RefreshCw, User, MessageSquare, Flag, ShieldAlert,
   CheckCircle2, ChevronRight, Paperclip, Tag, Calendar,
   Send, ClipboardList, XCircle, Wrench, ImagePlus, Camera, Download, Circle,
+  Sparkles, CheckCircle,
 } from "lucide-react";
 import {
   DragDropContext, Droppable, Draggable, type DropResult,
@@ -21,13 +22,15 @@ import {
   updateIssueStatus,
   addIssueComment,
   uploadIssueAttachments,
+  classifyIssue,
+  analysePhoto,
 } from "@/services/issues";
 import { listUsers } from "@/services/users";
 import { listAssets } from "@/services/maintenance";
 import type { Asset } from "@/types";
 import {
   listTasks, updateTaskStatus, addAssignee, removeAssignee,
-  postMessage, getTask, markTaskRead,
+  postMessage, getTask, markTaskRead, taskSummary,
 } from "@/services/tasks";
 import { createClient } from "@/services/supabase/client";
 import { CreateTaskModal } from "@/components/tasks/CreateTaskModal";
@@ -39,6 +42,7 @@ import type {
   Task,
   TaskPriority,
   TaskStatus,
+  TaskSummary,
 } from "@/types";
 import { friendlyError } from "@/lib/errors";
 
@@ -1730,6 +1734,19 @@ function ReportProblemModal({
   const [error, setError] = useState("");
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
+  // AI state
+  const [aiClassifying, setAiClassifying] = useState(false);
+  const [aiSuggestion, setAiSuggestion] = useState<{
+    category_id: string; priority: string; suggested_title: string;
+    is_safety_risk: boolean; reasoning: string;
+  } | null>(null);
+  const [aiError, setAiError] = useState("");
+  const [aiPhotoAnalysing, setAiPhotoAnalysing] = useState(false);
+  const [aiPhotoResult, setAiPhotoResult] = useState<{
+    safety_hazard_detected: boolean; hazard_description: string | null;
+    suggested_priority: string; ai_description: string;
+  } | null>(null);
+
   const photoInputRef = useRef<HTMLInputElement>(null);
 
   // Load assets at user's location
@@ -1755,9 +1772,45 @@ function ReportProblemModal({
 
   function handlePhotoChange(file: File) {
     setPhotoFile(file);
+    setAiPhotoResult(null);
     const reader = new FileReader();
-    reader.onload = (e) => setPhotoPreview(e.target?.result as string);
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      setPhotoPreview(dataUrl);
+      // Auto-analyse photo with AI
+      setAiPhotoAnalysing(true);
+      analysePhoto({ image_url: dataUrl, description: description })
+        .then((res) => setAiPhotoResult(res))
+        .catch(() => {/* non-fatal */})
+        .finally(() => setAiPhotoAnalysing(false));
+    };
     reader.readAsDataURL(file);
+  }
+
+  async function handleAiClassify() {
+    if (!title.trim() || !description.trim()) return;
+    setAiClassifying(true);
+    setAiError("");
+    setAiSuggestion(null);
+    try {
+      const result = await classifyIssue({
+        title: title.trim(),
+        description: description.trim(),
+        available_categories: categories.map((c) => ({ id: c.id, name: c.name })),
+      });
+      setAiSuggestion(result);
+    } catch {
+      setAiError("AI classification failed. Please try again.");
+    } finally {
+      setAiClassifying(false);
+    }
+  }
+
+  function acceptAiSuggestion() {
+    if (!aiSuggestion) return;
+    if (aiSuggestion.category_id) setCategoryId(aiSuggestion.category_id);
+    if (aiSuggestion.is_safety_risk) setSafetyRisk("yes");
+    setAiSuggestion(null);
   }
 
   // Determine priority: use category default, escalate to "high" if safety risk
@@ -1837,6 +1890,84 @@ function ReportProblemModal({
             {validationErrors.title && <p className="text-xs text-red-500">{validationErrors.title}</p>}
           </div>
 
+          {/* Description */}
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-dark">What&apos;s the problem? <span className="text-red-500">*</span></label>
+            <textarea
+              className={clsx(inputCls, "resize-none")}
+              rows={3}
+              placeholder="Describe what you see…"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            {validationErrors.description && <p className="text-xs text-red-500">{validationErrors.description}</p>}
+          </div>
+
+          {/* AI Classify button — shown once title + description are filled */}
+          {title.trim() && description.trim() && (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={handleAiClassify}
+                disabled={aiClassifying}
+                className={clsx(
+                  "flex items-center gap-2 self-start px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-60",
+                  aiClassifying
+                    ? "border border-sprout-purple/40 bg-sprout-purple/5 text-sprout-purple"
+                    : "ai-sparkle-btn shadow-sm shadow-purple-200"
+                )}
+              >
+                {aiClassifying ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                {aiClassifying ? "Analysing…" : "Analyse with AI"}
+              </button>
+
+              {aiError && (
+                <p className="text-xs text-red-500">{aiError}</p>
+              )}
+
+              {aiSuggestion && (
+                <div className="rounded-xl border border-sprout-purple/30 bg-sprout-purple/5 px-4 py-3 flex flex-col gap-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-sprout-purple">
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      AI suggestion
+                    </div>
+                    <button type="button" onClick={() => setAiSuggestion(null)} className="text-dark/30 hover:text-dark/60">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-dark-secondary leading-relaxed">
+                    {[
+                      categories.find((c) => c.id === aiSuggestion.category_id)?.name
+                        ? `Category: ${categories.find((c) => c.id === aiSuggestion.category_id)!.name}`
+                        : null,
+                      aiSuggestion.priority ? `Priority: ${aiSuggestion.priority.charAt(0).toUpperCase() + aiSuggestion.priority.slice(1)}` : null,
+                      aiSuggestion.is_safety_risk ? "Safety risk detected ⚠️" : null,
+                    ].filter(Boolean).join(" · ")}
+                  </p>
+                  {aiSuggestion.is_safety_risk && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-700 font-medium">
+                      <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                      AI flagged this as a potential safety risk
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={acceptAiSuggestion}
+                    className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sprout-purple text-white text-xs font-medium hover:bg-sprout-purple/90 transition-colors"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Accept suggestions
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Category */}
           <div className="flex flex-col gap-1">
             <label className="text-sm font-medium text-dark">Category <span className="text-red-500">*</span></label>
@@ -1904,19 +2035,6 @@ function ReportProblemModal({
               )}
             </div>
           )}
-
-          {/* Description */}
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-dark">What&apos;s the problem? <span className="text-red-500">*</span></label>
-            <textarea
-              className={clsx(inputCls, "resize-none")}
-              rows={3}
-              placeholder="Describe what you see…"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-            />
-            {validationErrors.description && <p className="text-xs text-red-500">{validationErrors.description}</p>}
-          </div>
 
           {/* Location */}
           <div className="flex flex-col gap-1">
@@ -2056,7 +2174,7 @@ function ReportProblemModal({
               <div className="relative w-full max-w-[200px]">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={photoPreview} alt="Preview" className="w-full rounded-xl border border-surface-border object-cover max-h-32" />
-                <button type="button" onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}
+                <button type="button" onClick={() => { setPhotoFile(null); setPhotoPreview(null); setAiPhotoResult(null); }}
                   className="absolute top-1 right-1 bg-white/90 rounded-full p-0.5 shadow">
                   <X className="w-3 h-3 text-red-500" />
                 </button>
@@ -2070,6 +2188,46 @@ function ReportProblemModal({
                 <ImagePlus className="w-4 h-4" />
                 Tap to add photo
               </button>
+            )}
+
+            {/* AI photo hazard analysis */}
+            {aiPhotoAnalysing && (
+              <div className="flex items-center gap-2 text-xs text-dark-secondary">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Analysing photo for hazards…
+              </div>
+            )}
+            {!aiPhotoAnalysing && aiPhotoResult && (
+              aiPhotoResult.safety_hazard_detected ? (
+                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-1 flex-1 min-w-0">
+                    <p className="text-xs font-medium text-red-700">
+                      AI detected a potential safety hazard: {aiPhotoResult.hazard_description ?? aiPhotoResult.ai_description}
+                    </p>
+                    {safetyRisk !== "yes" && (
+                      <button
+                        type="button"
+                        onClick={() => setSafetyRisk("yes")}
+                        className="self-start text-xs text-red-600 underline hover:no-underline"
+                      >
+                        Flag as safety risk
+                      </button>
+                    )}
+                  </div>
+                  <button type="button" onClick={() => setAiPhotoResult(null)} className="text-red-400 hover:text-red-600 shrink-0">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+                  <CheckCircle className="w-3.5 h-3.5 text-green-600 shrink-0" />
+                  <p className="text-xs text-green-700 flex-1">No obvious hazard detected</p>
+                  <button type="button" onClick={() => setAiPhotoResult(null)} className="text-green-400 hover:text-green-600 shrink-0">
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )
             )}
           </div>
 
@@ -2123,6 +2281,14 @@ function ReportIssueModal({
   const [error, setError]                     = useState("");
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
+  // AI state
+  const [aiClassifying, setAiClassifying]     = useState(false);
+  const [aiSuggestion, setAiSuggestion]       = useState<{
+    category_id: string; priority: string; suggested_title: string;
+    is_safety_risk: boolean; reasoning: string;
+  } | null>(null);
+  const [aiError, setAiError]                 = useState("");
+
   const selectedCategory = categories.find((c) => c.id === categoryId) ?? null;
   const filteredCategories = categorySearch.trim()
     ? categories.filter((c) => c.name.toLowerCase().includes(categorySearch.toLowerCase()))
@@ -2146,6 +2312,35 @@ function ReportIssueModal({
   const filteredAssets = assetSearch.trim()
     ? assets.filter((a) => a.name.toLowerCase().includes(assetSearch.toLowerCase()))
     : assets;
+
+  async function handleAiClassifyMgr() {
+    const titleForAi = effectiveTitle.trim() || buildAutoTitle().trim();
+    if (!titleForAi && !description.trim()) return;
+    setAiClassifying(true);
+    setAiError("");
+    setAiSuggestion(null);
+    try {
+      const result = await classifyIssue({
+        title: titleForAi || description.trim().slice(0, 80),
+        description: description.trim() || titleForAi,
+        available_categories: categories.map((c) => ({ id: c.id, name: c.name })),
+      });
+      setAiSuggestion(result);
+    } catch {
+      setAiError("AI classification failed. Please try again.");
+    } finally {
+      setAiClassifying(false);
+    }
+  }
+
+  function acceptAiSuggestionMgr() {
+    if (!aiSuggestion) return;
+    if (aiSuggestion.category_id) setCategoryId(aiSuggestion.category_id);
+    if (aiSuggestion.priority) setPriority(aiSuggestion.priority as IssuePriority);
+    if (aiSuggestion.suggested_title) { setCustomizeTitle(true); setTitleOverride(aiSuggestion.suggested_title); }
+    if (aiSuggestion.is_safety_risk) setSafetyRisk("yes");
+    setAiSuggestion(null);
+  }
 
   // Auto-generate title from category + asset
   function buildAutoTitle(): string {
@@ -2375,6 +2570,65 @@ function ReportIssueModal({
               placeholder="Provide more details…" value={description}
               onChange={(e) => setDescription(e.target.value)} />
           </div>
+
+          {/* AI Classify button — shown once there is a title or description */}
+          {(effectiveTitle.trim() || description.trim()) && (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={handleAiClassifyMgr}
+                disabled={aiClassifying}
+                className="flex items-center gap-2 self-start px-3 py-1.5 rounded-lg border border-sprout-purple/40 bg-sprout-purple/5 hover:bg-sprout-purple/10 text-sprout-purple text-xs font-medium transition-colors disabled:opacity-60"
+              >
+                {aiClassifying ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                {aiClassifying ? "Analysing…" : "Analyse with AI"}
+              </button>
+
+              {aiError && <p className="text-xs text-red-500">{aiError}</p>}
+
+              {aiSuggestion && (
+                <div className="rounded-xl border border-sprout-purple/30 bg-sprout-purple/5 px-4 py-3 flex flex-col gap-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-sprout-purple">
+                      <Sparkles className="w-3.5 h-3.5 shrink-0" />
+                      AI suggestion
+                    </div>
+                    <button type="button" onClick={() => setAiSuggestion(null)} className="text-dark/30 hover:text-dark/60">
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-dark-secondary leading-relaxed">
+                    {[
+                      categories.find((c) => c.id === aiSuggestion.category_id)?.name
+                        ? `Category: ${categories.find((c) => c.id === aiSuggestion.category_id)!.name}`
+                        : null,
+                      aiSuggestion.priority ? `Priority: ${aiSuggestion.priority.charAt(0).toUpperCase() + aiSuggestion.priority.slice(1)}` : null,
+                      aiSuggestion.suggested_title ? `Title: "${aiSuggestion.suggested_title}"` : null,
+                      aiSuggestion.is_safety_risk ? "Safety risk detected ⚠️" : null,
+                    ].filter(Boolean).join(" · ")}
+                  </p>
+                  {aiSuggestion.is_safety_risk && (
+                    <div className="flex items-center gap-1.5 text-xs text-amber-700 font-medium">
+                      <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                      AI flagged this as a potential safety risk
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={acceptAiSuggestionMgr}
+                    className="self-start flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sprout-purple text-white text-xs font-medium hover:bg-sprout-purple/90 transition-colors"
+                  >
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Accept suggestions
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Safety risk */}
           <div className="flex flex-col gap-2">
@@ -3521,6 +3775,9 @@ function IssuesHubPageInner() {
 
   const [activeTab, setActiveTab] = useState<"incidents" | "issues" | "tasks">(tabParam ?? "tasks");
   const [role, setRole] = useState<string | null>(null); // null = not yet resolved
+  const [openIssues, setOpenIssues] = useState(0);
+  const [inProgressIssues, setInProgressIssues] = useState(0);
+  const [taskSum, setTaskSum] = useState<TaskSummary | null>(null);
 
   // Sync tab when URL param changes (e.g. navigating from inbox)
   useEffect(() => {
@@ -3532,6 +3789,12 @@ function IssuesHubPageInner() {
       const r = data.session?.user?.app_metadata?.role as string | undefined;
       setRole(r ?? "staff");
     });
+  }, []);
+
+  useEffect(() => {
+    listIssues({ status: "open",        page_size: 1 }).then(r => setOpenIssues(r.total)).catch(() => {});
+    listIssues({ status: "in_progress", page_size: 1 }).then(r => setInProgressIssues(r.total)).catch(() => {});
+    taskSummary().then(setTaskSum).catch(() => {});
   }, []);
 
   const isManager = ["super_admin", "admin", "manager"].includes(role ?? "");
@@ -3549,6 +3812,40 @@ function IssuesHubPageInner() {
             <p className="text-sm text-dark-secondary">{isManager ? "Track issues, tasks, and incident reports across your organisation" : "Report problems and track your assigned tasks"}</p>
           </div>
         </div>
+
+        {/* Stat cards */}
+        {role !== null && (() => {
+          type TabKey = "incidents" | "issues" | "tasks";
+          const managerCards: { label: string; value: number | string; icon: React.ElementType; bg: string; color: string; tab: TabKey }[] = [
+            { label: "Open Issues",   value: openIssues,                    tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: "In Progress",   value: inProgressIssues,              tab: "issues", icon: RefreshCw,     bg: "bg-blue-50",          color: "text-blue-600"     },
+            { label: "Total Tasks",   value: taskSum?.total ?? "—",          tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500"    },
+          ];
+          const staffCards: typeof managerCards = [
+            { label: "Open Issues", value: openIssues,                      tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: "Tasks",       value: taskSum?.total ?? "—",            tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: "Overdue",     value: taskSum?.overdue_count ?? "—",    tab: "tasks",  icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500"    },
+          ];
+          const cards = isManager ? managerCards : staffCards;
+          return (
+            <div className={clsx("grid gap-3", isManager ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3")}>
+              {cards.map(({ label, value, icon: Icon, bg, color, tab }) => (
+                <button
+                  key={label}
+                  onClick={() => setActiveTab(tab)}
+                  className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2 text-left hover:border-sprout-purple/40 hover:shadow-sm transition-all cursor-pointer"
+                >
+                  <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                    <Icon className={clsx("w-4 h-4", color)} />
+                  </div>
+                  <p className="text-xl md:text-2xl font-bold text-dark">{value}</p>
+                  <p className="text-xs text-dark-secondary">{label}</p>
+                </button>
+              ))}
+            </div>
+          );
+        })()}
 
         {/* Tab bar — staff sees Issues + Tasks only; managers see all three */}
         {(() => {

@@ -32,8 +32,9 @@ import { listMyBadges, type BadgeAward } from "@/services/gamification";
 import { getMyWorkflowTasks, type WorkflowStageInstance } from "@/services/workflows";
 import { listIssues } from "@/services/issues";
 import { getMyEnrollments, getLmsAnalytics, type CourseEnrollment, type LmsAnalytics } from "@/services/lms";
+import { listShifts } from "@/services/shifts";
 import { createClient } from "@/services/supabase/client";
-import type { Announcement, Task, TaskSummary, Issue } from "@/types";
+import type { Announcement, Task, TaskSummary, Issue, Shift } from "@/types";
 import { AnnouncementCard, proxied } from "@/components/announcements/AnnouncementCard";
 import Link from "next/link";
 
@@ -100,17 +101,17 @@ interface CachedBrief {
   generatedAt: string;
 }
 
-function briefCacheKey(role: string) {
-  return `sidekick_brief_${role}_${new Date().toISOString().slice(0, 10)}`;
+function briefCacheKey(role: string, orgId: string) {
+  return `sidekick_brief_${orgId}_${role}_${new Date().toISOString().slice(0, 10)}`;
 }
 
-function DailyBriefCard({ role, name }: { role: string; name: string }) {
+function DailyBriefCard({ role, name, orgId }: { role: string; name: string; orgId: string }) {
   const [summary, setSummary]     = useState<string | null>(null);
   const [loading, setLoading]     = useState(true);
   const [generatedAt, setAt]      = useState("");
 
   const isStaff   = role === "staff";
-  const cacheKey  = briefCacheKey(role);
+  const cacheKey  = briefCacheKey(role, orgId);
   const firstName = name.split(" ")[0] || "there";
   const dateStr   = new Date().toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric",
@@ -170,7 +171,7 @@ function DailyBriefCard({ role, name }: { role: string; name: string }) {
       } else {
         const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const [issuesRes, taskSumRes, capsRes, dash30] = await Promise.all([
-          listIssues({ status: "open", priority: "critical", my_team: true, page_size: 1 }).catch(() => ({ data: [], total: 0 })),
+          listIssues({ status: "open", priority: "critical", page_size: 1 }).catch(() => ({ data: [], total: 0 })),
           taskSummary().catch(() => null),
           listCAPs({ status: "pending_review", page_size: 1 }).catch(() => ({ total_count: 0 })),
           getDashboardSummary({ from: thirtyDaysAgo }).catch(() => null),
@@ -276,13 +277,11 @@ function AdminDashboard() {
   const router = useRouter();
   const [todaySummary, setTodaySummary] = useState<DashboardSummary | null>(null);
   const [auditSummary, setAuditSummary] = useState<DashboardSummary | null>(null);
-  const [openIssuesCount, setOpenIssuesCount] = useState<number | null>(null);
-  const [pendingAckCount, setPendingAckCount] = useState<number | null>(null);
-  const [openCAPsCount, setOpenCAPsCount] = useState<number | null>(null);
   const [taskSum, setTaskSum] = useState<TaskSummary | null>(null);
   const [unreadTasks, setUnreadTasks] = useState(0);
   const [myBadges, setMyBadges] = useState<BadgeAward[]>([]);
   const [trainingAnalytics, setTrainingAnalytics] = useState<LmsAnalytics | null>(null);
+  const [todayShiftsCount, setTodayShiftsCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -293,24 +292,15 @@ function AdminDashboard() {
       return Promise.all([
         getDashboardSummary({ from: today, to: today }).catch(() => null),
         getDashboardSummary({ from: thirtyDaysAgo }).catch(() => null),
-        listIssues({ status: "open", my_team: true }).catch(() => ({ data: [], total: 0 })),
-        listAnnouncements().catch(() => ({ data: [], total: 0 })),
-        Promise.all([
-          listCAPs({ status: "pending_review", page_size: 1 }).catch(() => ({ total: 0 })),
-          listCAPs({ status: "in_review", page_size: 1 }).catch(() => ({ total: 0 })),
-        ]),
         taskSummary().catch(() => null),
         getUnreadTaskCount().catch(() => ({ count: 0 })),
         listMyBadges().catch(() => [] as BadgeAward[]),
         getLmsAnalytics().catch(() => null),
-      ]).then(([td, aud, iss, ann, caps, ts, u, mb, lms]) => {
+        listShifts({ from_date: `${today}T00:00:00`, to_date: `${today}T23:59:59`, status: "published", page_size: 1 }).catch(() => null),
+      ]).then(([td, aud, ts, u, mb, lms, shiftsRes]) => {
         setTodaySummary(td);
         setAuditSummary(aud);
-        setOpenIssuesCount((iss as { data: Issue[]; total: number }).total ?? 0);
-        const annData = (ann as { data: { requires_acknowledgement?: boolean }[]; total: number }).data ?? [];
-        setPendingAckCount(annData.filter((a) => a.requires_acknowledgement).length);
-        const [capsPending, capsInReview] = caps as [{ total: number }, { total: number }];
-        setOpenCAPsCount((capsPending.total ?? 0) + (capsInReview.total ?? 0));
+        setTodayShiftsCount((shiftsRes as { total_count: number } | null)?.total_count ?? null);
         setTaskSum(ts);
         setUnreadTasks(u?.count ?? 0);
         setMyBadges(mb ?? []);
@@ -331,8 +321,8 @@ function AdminDashboard() {
           Failed to load dashboard data: {error}
         </div>
       )}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-        {loading ? Array.from({ length: 5 }).map((_, i) => <SkeletonCard key={i} />) : (
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {loading ? Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />) : (
           <>
             {/* Checklist Completion — today */}
             {(() => {
@@ -361,41 +351,11 @@ function AdminDashboard() {
                   icon={ShieldCheck}
                   iconBg={pct === null ? "bg-gray-100" : pct >= 80 ? "bg-sprout-green/10" : pct >= 50 ? "bg-amber-100" : "bg-red-50"}
                   iconColor={pct === null ? "text-gray-400" : pct >= 80 ? "text-sprout-green" : pct >= 50 ? "text-amber-600" : "text-red-500"}
-                  href="/dashboard/forms"
+                  href="/dashboard/audits"
                   sub={<p className="text-xs text-dark-secondary">Rolling 30 days</p>}
                 />
               );
             })()}
-            {/* Team Open Issues */}
-            <StatCard
-              label="Team Open Issues"
-              value={openIssuesCount ?? "—"}
-              icon={AlertTriangle}
-              iconBg={(openIssuesCount ?? 0) > 0 ? "bg-orange-50" : "bg-gray-100"}
-              iconColor={(openIssuesCount ?? 0) > 0 ? "text-orange-600" : "text-gray-400"}
-              href="/dashboard/issues"
-              sub={<p className="text-xs text-dark-secondary">Requires attention</p>}
-            />
-            {/* Announcements Waiting Acknowledgement */}
-            <StatCard
-              label="Pending Acknowledgements"
-              value={pendingAckCount ?? "—"}
-              icon={Megaphone}
-              iconBg={(pendingAckCount ?? 0) > 0 ? "bg-sprout-purple/10" : "bg-gray-100"}
-              iconColor={(pendingAckCount ?? 0) > 0 ? "text-sprout-purple" : "text-gray-400"}
-              href="/dashboard/announcements"
-              sub={<p className="text-xs text-dark-secondary">Require acknowledgement</p>}
-            />
-            {/* Open CAPs */}
-            <StatCard
-              label="Open CAPs"
-              value={openCAPsCount ?? "—"}
-              icon={ClipboardList}
-              iconBg={(openCAPsCount ?? 0) > 0 ? "bg-red-50" : "bg-gray-100"}
-              iconColor={(openCAPsCount ?? 0) > 0 ? "text-red-500" : "text-gray-400"}
-              href="/dashboard/forms?tab=cap"
-              sub={<p className="text-xs text-dark-secondary">Corrective action plans</p>}
-            />
             {/* Training Completion */}
             {(() => {
               const pct = trainingAnalytics != null ? Math.round(trainingAnalytics.completion_rate) : null;
@@ -411,6 +371,16 @@ function AdminDashboard() {
                 />
               );
             })()}
+            {/* Shifts & Attendance */}
+            <StatCard
+              label="Shifts Today"
+              value={todayShiftsCount !== null ? todayShiftsCount : "—"}
+              icon={CalendarClock}
+              iconBg="bg-blue-50"
+              iconColor="text-blue-600"
+              href="/dashboard/shifts"
+              sub={<p className="text-xs text-dark-secondary">Published today</p>}
+            />
           </>
         )}
       </div>
@@ -755,44 +725,41 @@ function StaffDashboard({ name }: { name: string }) {
   const router = useRouter();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [myBadges, setMyBadges] = useState<BadgeAward[]>([]);
-  const [tasksDueToday, setTasksDueToday] = useState(0);
   const [overdueCount, setOverdueCount] = useState(0);
-  const [pendingChecklists, setPendingChecklists] = useState(0);
   const [openIssuesCount, setOpenIssuesCount] = useState(0);
-  const [unackedCount, setUnackedCount] = useState(0);
   const [coursesToComplete, setCoursesToComplete] = useState(0);
+  const [myShiftsThisWeek, setMyShiftsThisWeek] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const today = new Date().toISOString().split("T")[0];
+    const today = new Date();
+    const day = today.getDay();
+    const diffMon = day === 0 ? -6 : 1 - day;
+    const weekMon = new Date(today); weekMon.setDate(today.getDate() + diffMon); weekMon.setHours(0,0,0,0);
+    const weekSun = new Date(weekMon); weekSun.setDate(weekMon.getDate() + 6);
+    const weekStart = weekMon.toISOString().slice(0, 10);
+    const weekEnd = weekSun.toISOString().slice(0, 10);
+
     Promise.all([
       listAnnouncements().then((r) => r.items).catch(() => [] as Announcement[]),
       listMyBadges().catch(() => [] as BadgeAward[]),
-      myTasks().catch(() => [] as Task[]),
       taskSummary().catch(() => ({ overdue_count: 0 } as Partial<TaskSummary>)),
-      getMyAssignments().catch(() => []),
       listIssues({ status: "open" }).then((r) => r.total).catch(() => 0),
       getMyEnrollments().catch(() => [] as CourseEnrollment[]),
-    ]).then(([ann, mb, tasks, tSum, assignments, issueTotal, enrollments]) => {
+      listShifts({ from_date: `${weekStart}T00:00:00`, to_date: `${weekEnd}T23:59:59`, page_size: 100 }).catch(() => null),
+    ]).then(([ann, mb, tSum, issueTotal, enrollments, shiftsRes]) => {
       setAnnouncements(ann as Announcement[]);
       setMyBadges(mb ?? []);
-      const todayTasks = (tasks as Task[]).filter(
-        (t) => t.due_at?.startsWith(today) && t.status !== "completed" && t.status !== "cancelled"
-      );
-      setTasksDueToday(todayTasks.length);
       setOverdueCount((tSum as Partial<TaskSummary>).overdue_count ?? 0);
-      setPendingChecklists(
-        (assignments as { completed?: boolean }[]).filter((a) => !a.completed).length
-      );
       setOpenIssuesCount(issueTotal as number);
-      setUnackedCount(
-        (ann as Announcement[]).filter((a) => a.requires_acknowledgement).length
-      );
       setCoursesToComplete(
         (enrollments as CourseEnrollment[]).filter(
           (e) => e.status === "not_started" || e.status === "in_progress"
         ).length
       );
+      if (shiftsRes) {
+        setMyShiftsThisWeek((shiftsRes as { items: Shift[] }).items?.length ?? 0);
+      }
     }).finally(() => setLoading(false));
   }, []);
 
@@ -809,29 +776,33 @@ function StaffDashboard({ name }: { name: string }) {
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
-        {loading ? Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />) : (
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {loading ? Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />) : (
           <>
-            <StatCard label="Tasks Due Today" value={tasksDueToday}
-              icon={CalendarClock} iconBg="bg-blue-50" iconColor="text-blue-600"
-              href="/dashboard/tasks" />
             <StatCard label="Overdue Items" value={overdueCount}
-              icon={TriangleAlert} iconBg="bg-red-50" iconColor="text-red-600"
+              icon={TriangleAlert}
+              iconBg={overdueCount > 0 ? "bg-red-50" : "bg-gray-100"}
+              iconColor={overdueCount > 0 ? "text-red-600" : "text-gray-400"}
               href="/dashboard/tasks" />
-            <StatCard label="Pending Checklists" value={pendingChecklists}
-              icon={ClipboardList} iconBg="bg-amber-50" iconColor="text-amber-600"
-              href="/dashboard/forms" />
             <StatCard label="Open Issues" value={openIssuesCount}
-              icon={AlertTriangle} iconBg="bg-orange-50" iconColor="text-orange-600"
+              icon={AlertTriangle}
+              iconBg={openIssuesCount > 0 ? "bg-orange-50" : "bg-gray-100"}
+              iconColor={openIssuesCount > 0 ? "text-orange-600" : "text-gray-400"}
               href="/dashboard/issues" />
-            <StatCard label="Need Acknowledgement" value={unackedCount}
-              icon={Megaphone} iconBg="bg-sprout-purple/10" iconColor="text-sprout-purple"
-              href="/dashboard/announcements" />
             <StatCard label="Courses to Complete" value={coursesToComplete}
               icon={GraduationCap}
               iconBg={coursesToComplete > 0 ? "bg-teal-50" : "bg-gray-100"}
               iconColor={coursesToComplete > 0 ? "text-teal-600" : "text-gray-400"}
               href="/dashboard/training" />
+            {/* Shifts this week */}
+            <StatCard
+              label="Shifts This Week"
+              value={myShiftsThisWeek !== null ? myShiftsThisWeek : "—"}
+              icon={CalendarClock}
+              iconBg="bg-blue-50"
+              iconColor="text-blue-600"
+              href="/dashboard/shifts"
+            />
           </>
         )}
       </div>
@@ -930,10 +901,78 @@ function StaffDashboard({ name }: { name: string }) {
   );
 }
 
+// ── Onboarding Banner ─────────────────────────────────────────────────────────
+
+const STEP_LABELS = ["Company", "Templates", "Team", "Preview", "Launch"];
+
+function OnboardingBanner() {
+  const [session, setSession] = useState<{ current_step: number; company_name?: string | null } | null>(null);
+
+  useEffect(() => {
+    fetch("http://localhost:8000/api/v1/onboarding/sessions/current", {
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+    })
+      .then(async (r) => {
+        if (!r.ok) return;
+        const data = await r.json();
+        if (data.status === "in_progress") setSession(data);
+      })
+      .catch(() => {});
+
+    // Also try via apiFetch token pattern
+    import("@/services/api/client").then(({ apiFetch }) => {
+      apiFetch<{ current_step: number; status: string; company_name?: string | null }>(
+        "/api/v1/onboarding/sessions/current"
+      )
+        .then((data) => { if (data.status === "in_progress") setSession(data); })
+        .catch(() => {});
+    });
+  }, []);
+
+  if (!session) return null;
+
+  const step = session.current_step;
+  const pct = Math.round(((step - 1) / 5) * 100);
+
+  return (
+    <Link href="/onboarding" className="block">
+      <div className="rounded-2xl border border-green-200 bg-gradient-to-r from-green-50 to-emerald-50 p-4 flex items-center gap-4 hover:shadow-md transition-shadow">
+        <div className="w-10 h-10 rounded-xl bg-green-600 flex items-center justify-center flex-shrink-0">
+          <Sparkles className="w-5 h-5 text-white" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-sm font-semibold text-green-900">
+              {session.company_name ? `Setting up ${session.company_name}` : "Workspace setup in progress"}
+            </span>
+            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">
+              Step {step} of 5 — {STEP_LABELS[step - 1]}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-green-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-green-500 rounded-full transition-all"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="text-xs text-green-600 font-medium whitespace-nowrap">{pct}%</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1 text-green-700 text-sm font-semibold flex-shrink-0">
+          Continue setup <ArrowRight size={15} />
+        </div>
+      </div>
+    </Link>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const [role, setRole] = useState("staff"); // default to most restrictive
   const [name, setName] = useState("there");
+  const [orgId, setOrgId] = useState("");
 
   useEffect(() => {
     const supabase = createClient();
@@ -942,6 +981,7 @@ export default function DashboardPage() {
       const user = data.session?.user;
       if (user) {
         setRole((user.app_metadata?.role as string) ?? "staff");
+        setOrgId((user.app_metadata?.organisation_id as string) ?? "");
         setName(
           (user.app_metadata?.full_name as string) ||
           (user.user_metadata?.full_name as string) ||
@@ -953,6 +993,7 @@ export default function DashboardPage() {
   }, []);
 
   const isStaff = role === "staff";
+  const isAdmin = ["super_admin", "admin"].includes(role);
 
   return (
     <div className="p-4 md:p-6 flex flex-col gap-4 md:gap-6">
@@ -969,7 +1010,10 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <DailyBriefCard role={role} name={name} />
+      {/* Onboarding banner — only for admins with an active setup */}
+      {isAdmin && <OnboardingBanner />}
+
+      <DailyBriefCard role={role} name={name} orgId={orgId} />
 
       {isStaff ? (
         <StaffDashboard name={name} />

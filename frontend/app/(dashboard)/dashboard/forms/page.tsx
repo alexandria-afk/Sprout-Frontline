@@ -44,7 +44,7 @@ import {
   Sparkles, Loader2, X, Pencil, CheckCircle2, ChevronRight,
   Eye, UserPlus, Search, Inbox, CheckCheck, XCircle, ArrowLeft,
   MessageSquare, ChevronDown, Calendar, ShieldCheck, FileText, CheckSquare,
-  ShieldAlert, RefreshCw, Filter,
+  ShieldAlert, RefreshCw, Filter, LayoutTemplate, Clock,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useFormStore } from "@/stores/useFormStore";
@@ -1040,7 +1040,12 @@ function GenerateModal({ onClose, onGenerated }: {
             Cancel
           </button>
           <button type="button" onClick={handleGenerate} disabled={loading || !description.trim()}
-            className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-sprout-purple text-white font-medium hover:bg-sprout-purple/90 disabled:opacity-60">
+            className={clsx(
+              "flex items-center gap-2 px-4 py-2 text-sm rounded-lg font-medium transition-all disabled:opacity-60",
+              loading
+                ? "bg-sprout-purple text-white"
+                : "ai-sparkle-btn shadow-md shadow-purple-200"
+            )}>
             {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating…</> : <><Sparkles className="w-4 h-4" /> Generate</>}
           </button>
         </div>
@@ -2184,10 +2189,31 @@ function MyAssignmentsView() {
 
   return (
     <div className="p-4 md:p-6 flex flex-col gap-4 md:gap-6">
-      {/* Count line */}
-      <p className="text-sm text-dark-secondary">
-        {loading ? "Loading…" : `${assignments.length} form${assignments.length !== 1 ? "s" : ""} assigned to you`}
-      </p>
+      {/* Stat cards */}
+      {!loading && (
+        <div className="grid grid-cols-3 gap-3">
+          {([
+            { label: "Assigned",  value: assignments.length,  onClick: () => setTab("todo"),      icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple", active: false        },
+            { label: "To Do",     value: todoList.length,     onClick: () => setTab("todo"),      icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500",    active: tab === "todo"       },
+            { label: "Completed", value: completedList.length, onClick: () => setTab("completed"), icon: CheckCircle2,  bg: "bg-sprout-green/10",  color: "text-sprout-green", active: tab === "completed"  },
+          ]).map(({ label, value, onClick, icon: Icon, bg, color, active }) => (
+            <button
+              key={label}
+              onClick={onClick}
+              className={clsx(
+                "rounded-xl border p-4 flex flex-col gap-2 text-left transition-all hover:shadow-sm",
+                active ? "bg-white border-sprout-purple/50 shadow-sm" : "bg-white border-surface-border hover:border-sprout-purple/30"
+              )}
+            >
+              <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                <Icon className={clsx("w-4 h-4", color)} />
+              </div>
+              <p className="text-xl font-bold text-dark">{value}</p>
+              <p className="text-xs text-dark-secondary">{label}</p>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Search bar */}
       <div className="relative">
@@ -2201,6 +2227,7 @@ function MyAssignmentsView() {
       </div>
 
       {/* Tab toggle */}
+
       {!loading && (
         <div className="flex gap-2">
           <button
@@ -2350,6 +2377,8 @@ export default function FormsPage() {
   const [activeTab, setActiveTab] = useState<"my_assignments" | "templates" | "submissions" | "audit_cap">("my_assignments");
   const [templateSearch, setTemplateSearch] = useState("");
   const [justCreatedId, setJustCreatedId] = useState<string | null>(null);
+  const [submissionTotal, setSubmissionTotal] = useState<number | null>(null);
+  const [capTotal, setCapTotal] = useState<number | null>(null);
 
   useEffect(() => {
     createClient().auth.getSession().then(({ data }) => {
@@ -2357,6 +2386,13 @@ export default function FormsPage() {
       setRole(r ?? "staff");
     });
   }, []);
+
+  useEffect(() => {
+    if (role !== "staff") {
+      listSubmissions().then(res => setSubmissionTotal(res.total_count)).catch(() => {});
+      listCAPs({ page_size: 1 }).then(res => setCapTotal(res.total_count)).catch(() => {});
+    }
+  }, [role]);
 
   // Handle deep-links: ?tab=submissions&id=<id>  or  ?tab=my_assignments  or  ?action=create|generate
   useEffect(() => {
@@ -2435,6 +2471,31 @@ export default function FormsPage() {
             <Plus className="w-4 h-4" /><span className="hidden sm:inline"> New Template</span>
           </button>
         )}
+      </div>
+
+      {/* Stat cards — each navigates to its tab */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {([
+          { label: "Templates",   value: templates.length,                          tab: "templates"      as const, icon: LayoutTemplate, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+          { label: "Active",      value: templates.filter(t => t.is_active).length, tab: "templates"      as const, icon: CheckCircle2,   bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+          { label: "Submissions", value: submissionTotal ?? "—",                     tab: "submissions"    as const, icon: Inbox,          bg: "bg-blue-50",          color: "text-blue-600"     },
+          { label: "Audit CAP",   value: capTotal ?? "—",                            tab: "audit_cap"      as const, icon: ShieldAlert,    bg: "bg-amber-50",         color: "text-amber-500"    },
+        ]).map(({ label, value, tab, icon: Icon, bg, color }) => (
+          <button
+            key={label}
+            onClick={() => setActiveTab(tab)}
+            className={clsx(
+              "bg-white rounded-xl border p-4 flex flex-col gap-2 text-left transition-all hover:shadow-sm",
+              activeTab === tab ? "border-sprout-purple/50 shadow-sm" : "border-surface-border hover:border-sprout-purple/30"
+            )}
+          >
+            <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+              <Icon className={clsx("w-4 h-4", color)} />
+            </div>
+            <p className="text-xl md:text-2xl font-bold text-dark">{value}</p>
+            <p className="text-xs text-dark-secondary">{label}</p>
+          </button>
+        ))}
       </div>
 
       {/* Tabs */}

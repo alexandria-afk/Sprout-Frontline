@@ -32,6 +32,9 @@ function LocationModal({
 }) {
   const [name, setName] = useState(existing?.name ?? "");
   const [address, setAddress] = useState(existing?.address ?? "");
+  const [latitude, setLatitude] = useState(existing?.latitude != null ? String(existing.latitude) : "");
+  const [longitude, setLongitude] = useState(existing?.longitude != null ? String(existing.longitude) : "");
+  const [geoFence, setGeoFence] = useState(existing?.geo_fence_radius_meters != null ? String(existing.geo_fence_radius_meters) : "200");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -40,11 +43,14 @@ function LocationModal({
     if (!name.trim()) { setError("Location name is required."); return; }
     setError("");
     setLoading(true);
+    const lat = latitude.trim() ? parseFloat(latitude) : null;
+    const lng = longitude.trim() ? parseFloat(longitude) : null;
+    const radius = geoFence.trim() ? parseInt(geoFence) : 200;
     try {
       if (existing) {
-        await updateLocation(existing.id, { name: name.trim(), address: address.trim() || undefined });
+        await updateLocation(existing.id, { name: name.trim(), address: address.trim() || undefined, latitude: lat, longitude: lng, geo_fence_radius_meters: radius });
       } else {
-        await createLocation({ name: name.trim(), address: address.trim() || undefined });
+        await createLocation({ name: name.trim(), address: address.trim() || undefined, latitude: lat, longitude: lng, geo_fence_radius_meters: radius });
       }
       onSuccess();
     } catch (e) {
@@ -76,6 +82,38 @@ function LocationModal({
               placeholder="e.g. 6/F Eastwood City Cyberpark, Quezon City"
               value={address}
               onChange={(e) => setAddress(e.target.value)}
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Latitude (optional)">
+              <input
+                className={inputCls}
+                placeholder="e.g. 14.6053"
+                type="number"
+                step="any"
+                value={latitude}
+                onChange={(e) => setLatitude(e.target.value)}
+              />
+            </Field>
+            <Field label="Longitude (optional)">
+              <input
+                className={inputCls}
+                placeholder="e.g. 121.0794"
+                type="number"
+                step="any"
+                value={longitude}
+                onChange={(e) => setLongitude(e.target.value)}
+              />
+            </Field>
+          </div>
+          <Field label="Geo-fence Radius (meters)">
+            <input
+              className={inputCls}
+              placeholder="200"
+              type="number"
+              min="50"
+              value={geoFence}
+              onChange={(e) => setGeoFence(e.target.value)}
             />
           </Field>
           {error && <p className="text-xs text-red-500">{error}</p>}

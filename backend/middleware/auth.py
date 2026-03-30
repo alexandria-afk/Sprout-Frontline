@@ -10,6 +10,7 @@ _PUBLIC_PATHS = {
     "/openapi.json",
     "/redoc",
     "/api/v1/auth/login",
+    "/api/v1/auth/demo-start",
 }
 
 

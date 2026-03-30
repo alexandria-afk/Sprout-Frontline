@@ -5,7 +5,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import clsx from "clsx";
-import { Megaphone, Plus, X, ImagePlus, Loader2, Video, Search, MapPin, Users, Globe2, Lock } from "lucide-react";
+import { Megaphone, Plus, X, ImagePlus, Loader2, Video, Search, MapPin, Users, Globe2, Lock, CheckCircle2, Bell, Film } from "lucide-react";
 import { useAnnouncementStore } from "@/stores/useAnnouncementStore";
 import { createAnnouncement, deleteAnnouncement } from "@/services/announcements";
 import { createClient } from "@/services/supabase/client";
@@ -422,6 +422,39 @@ export default function AnnouncementsPage() {
         </div>
 
         {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-2 rounded-lg">{error}</div>}
+
+        {/* Stat cards */}
+        {!loading && (() => {
+          const withMedia = announcements.filter(a => (a.media_urls?.length ?? 0) > 0).length;
+          const needsAck = announcements.filter(a => a.requires_acknowledgement).length;
+          const unacked = announcements.filter(a => a.requires_acknowledgement && !a.my_acknowledged).length;
+          const targeted = announcements.filter(a => (a.target_roles?.length ?? 0) > 0 || (a.target_location_ids?.length ?? 0) > 0).length;
+
+          const staffCards = [
+            { label: "Total",                value: total,    icon: Megaphone,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: "Need Acknowledgement", value: unacked,  icon: CheckCircle2,  bg: "bg-amber-50",         color: "text-amber-500"    },
+          ];
+          const managerCards = [
+            { label: "Total",               value: total,     icon: Megaphone,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: "Require Ack",         value: needsAck,  icon: Bell,          bg: "bg-amber-50",         color: "text-amber-500"    },
+            { label: "Targeted",            value: targeted,  icon: Users,         bg: "bg-blue-50",          color: "text-blue-600"     },
+            { label: "With Media",          value: withMedia, icon: Film,          bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+          ];
+          const cards = isStaff ? staffCards : managerCards;
+          return (
+            <div className={clsx("grid gap-3", isStaff ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-4")}>
+              {cards.map(({ label, value, icon: Icon, bg, color }) => (
+                <div key={label} className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2 hover:border-sprout-purple/30 hover:shadow-sm transition-all">
+                  <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                    <Icon className={clsx("w-4 h-4", color)} />
+                  </div>
+                  <p className="text-xl font-bold text-dark">{value}</p>
+                  <p className="text-xs text-dark-secondary">{label}</p>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
 
         {/* Search */}
         <div className="relative">

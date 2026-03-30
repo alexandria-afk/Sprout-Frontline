@@ -10,6 +10,7 @@ import Link from "next/link";
 import { Pencil, Trash2, UserPlus, Upload, Users, ChevronLeft, ChevronRight, Search, X, Download } from "lucide-react";
 import { useUserStore } from "@/stores/useUserStore";
 import { createUser, updateUser, deleteUser, bulkImportUsers, listLocations, listUsers, type Location } from "@/services/users";
+import { PositionCombobox } from "@/components/shared/PositionCombobox";
 import { friendlyError } from "@/lib/errors";
 import { createClient } from "@/services/supabase/client";
 import type { Profile, UserRole } from "@/types";
@@ -66,7 +67,7 @@ const createSchema = z.object({
   role: roleEnum,
   phone_number: z.string().optional(),
   location_id: z.string().min(1, "Location is required"),
-  reports_to: z.string().min(1, "Please select who this user reports to"),
+  reports_to: z.string().optional(),
 });
 
 const editSchema = z.object({
@@ -75,7 +76,7 @@ const editSchema = z.object({
   phone_number: z.string().optional(),
   is_active: z.boolean().optional(),
   location_id: z.string().min(1, "Location is required"),
-  reports_to: z.string().min(1, "Please select who this user reports to"),
+  reports_to: z.string().optional(),
 });
 
 type CreateFormValues = z.infer<typeof createSchema>;
@@ -200,6 +201,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
   });
   const [apiError, setApiError] = useState("");
   const [locations, setLocations] = useState<Location[]>([]);
+  const [position, setPosition] = useState("");
   useEffect(() => { listLocations().then(setLocations).catch(() => {}); }, []);
 
   const reportsToValue = watch("reports_to") ?? "";
@@ -207,7 +209,11 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
   const onSubmit = async (values: CreateFormValues) => {
     setApiError("");
     try {
-      const created = await createUser({ ...values, reports_to: values.reports_to || undefined });
+      const created = await createUser({
+        ...values,
+        position: position || null,
+        reports_to: values.reports_to || undefined,
+      });
       onSuccess(created.id);
     } catch (e) { setApiError(friendlyError(e)); }
   };
@@ -231,6 +237,9 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
               <option value="super_admin">Super Admin</option>
             </select>
           </Field>
+          <Field label="Position (optional)">
+            <PositionCombobox value={position} onChange={setPosition} />
+          </Field>
           <Field label="Location *" error={errors.location_id?.message}>
             <select className={selectCls} {...register("location_id")}>
               <option value="">— Select location —</option>
@@ -239,7 +248,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
               ))}
             </select>
           </Field>
-          <Field label="Reports To *" error={errors.reports_to?.message}>
+          <Field label="Reports To" error={errors.reports_to?.message}>
             <ReportsToCombobox
               value={reportsToValue}
               onChange={(id) => setValue("reports_to", id, { shouldValidate: true })}
@@ -276,6 +285,7 @@ function EditUserModal({ user, onClose, onSuccess }: { user: Profile; onClose: (
   });
   const [apiError, setApiError] = useState("");
   const [locations, setLocations] = useState<Location[]>([]);
+  const [position, setPosition] = useState(user.position ?? "");
   useEffect(() => { listLocations().then(setLocations).catch(() => {}); }, []);
 
   const reportsToValue = watch("reports_to") ?? "";
@@ -283,7 +293,11 @@ function EditUserModal({ user, onClose, onSuccess }: { user: Profile; onClose: (
   const onSubmit = async (values: EditFormValues) => {
     setApiError("");
     try {
-      await updateUser(user.id, { ...values, reports_to: values.reports_to || null });
+      await updateUser(user.id, {
+        ...values,
+        position: position || null,
+        reports_to: values.reports_to || null,
+      });
       onSuccess();
     } catch (e) { setApiError(friendlyError(e)); }
   };
@@ -304,6 +318,9 @@ function EditUserModal({ user, onClose, onSuccess }: { user: Profile; onClose: (
               <option value="super_admin">Super Admin</option>
             </select>
           </Field>
+          <Field label="Position (optional)">
+            <PositionCombobox value={position} onChange={setPosition} />
+          </Field>
           <Field label="Location *" error={errors.location_id?.message}>
             <select className={selectCls} {...register("location_id")}>
               <option value="">— Select location —</option>
@@ -312,7 +329,7 @@ function EditUserModal({ user, onClose, onSuccess }: { user: Profile; onClose: (
               ))}
             </select>
           </Field>
-          <Field label="Reports To *" error={errors.reports_to?.message}>
+          <Field label="Reports To" error={errors.reports_to?.message}>
             <ReportsToCombobox
               value={reportsToValue}
               onChange={(id) => setValue("reports_to", id, { shouldValidate: true })}
@@ -391,12 +408,11 @@ export default function UsersPage() {
   };
 
   const handleDownloadTemplate = () => {
-    // Build rows: header + one example row per location
+    const hint = "# role options: staff | manager | admin | super_admin  |  phone_number and position are optional";
+    const header = "full_name,email,role,phone_number,position,location_id";
     const locationRows = Object.entries(locationMap).map(([id, name]) =>
-      `Example Staff,staff_${name.toLowerCase().replace(/\s+/g, "")}@example.com,staff,${id}`
+      `Example Staff,staff_${name.toLowerCase().replace(/\s+/g, "")}@example.com,staff,,Staff,${id}`
     );
-    const header = "full_name,email,role,location_id";
-    const hint = `# role: staff | manager | admin | super_admin`;
     const rows = [hint, header, ...locationRows].join("\n");
     const blob = new Blob([rows], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -551,7 +567,12 @@ export default function UsersPage() {
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">
                     <Avatar name={user.full_name} />
-                    <span className="font-medium text-dark">{user.full_name}</span>
+                    <div>
+                      <span className="font-medium text-dark">{user.full_name}</span>
+                      {user.position && (
+                        <p className="text-xs text-dark-secondary mt-0.5">{user.position}</p>
+                      )}
+                    </div>
                   </div>
                 </td>
                 <td className="px-4 py-3"><RoleBadge role={user.role} /></td>

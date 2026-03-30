@@ -22,6 +22,7 @@ export interface Profile {
   full_name: string;
   phone_number: string | null;
   role: UserRole;
+  position?: string | null;
   language: string;
   is_active: boolean;
   reports_to: string | null;
@@ -569,4 +570,111 @@ export interface CAP {
   } | null;
   locations?: { name: string } | null;
   cap_items?: CAPItem[];
+}
+
+// ── Shifts & Attendance ───────────────────────────────────────────────────────
+export type ShiftStatus = 'draft' | 'published' | 'open' | 'claimed' | 'cancelled';
+export type ClaimStatus = 'pending' | 'approved' | 'rejected';
+export type SwapStatus = 'pending_colleague' | 'pending_manager' | 'approved' | 'rejected' | 'cancelled';
+export type LeaveType = 'annual' | 'sick' | 'emergency' | 'unpaid' | 'other';
+export type LeaveStatus = 'pending' | 'approved' | 'rejected';
+export type AttendanceStatus = 'present' | 'late' | 'early_departure' | 'absent' | 'unverified';
+export type ClockInMethod = 'gps' | 'selfie' | 'facial_recognition' | 'qr_code' | 'manager_override';
+
+export interface ShiftTemplate {
+  id: string; organisation_id: string; location_id: string;
+  name: string; role: string | null;
+  start_time: string; end_time: string;
+  days_of_week: number[];
+  is_active: boolean; created_at: string;
+  locations?: { id: string; name: string } | null;
+}
+
+export interface Shift {
+  id: string; organisation_id: string; location_id: string;
+  template_id: string | null; assigned_to_user_id: string | null;
+  created_by: string; role: string | null;
+  start_at: string; end_at: string;
+  status: ShiftStatus; is_open_shift: boolean;
+  cancellation_reason: string | null; notes: string | null;
+  ai_generated: boolean; created_at: string;
+  // joined
+  assigned_to?: { id: string; full_name: string; role: string } | null;
+  locations?: { id: string; name: string } | null;
+  open_shift_claims?: OpenShiftClaim[];
+}
+
+export interface OpenShiftClaim {
+  id: string; shift_id: string; claimed_by: string;
+  status: ClaimStatus; claimed_at: string;
+  responded_at: string | null; manager_note: string | null;
+  profiles?: { id: string; full_name: string } | null;
+}
+
+export interface ShiftSwapRequest {
+  id: string; organisation_id: string;
+  requested_by: string; shift_id: string;
+  target_user_id: string | null; target_shift_id: string | null;
+  status: SwapStatus;
+  colleague_response_at: string | null; manager_response_at: string | null;
+  approved_by: string | null; rejection_reason: string | null;
+  created_at: string;
+  requester?: { id: string; full_name: string } | null;
+  shift?: Shift | null;
+  target_shift?: Shift | null;
+  target_user?: { id: string; full_name: string } | null;
+}
+
+export interface LeaveRequest {
+  id: string; user_id: string; organisation_id: string;
+  leave_type: LeaveType; start_date: string; end_date: string;
+  reason: string | null; status: LeaveStatus;
+  approved_by: string | null; responded_at: string | null;
+  created_at: string;
+  profiles?: { id: string; full_name: string } | null;
+}
+
+export interface StaffAvailability {
+  id: string; user_id: string; organisation_id: string;
+  day_of_week: number; available_from: string; available_to: string;
+  is_available: boolean; effective_from: string | null; effective_to: string | null;
+}
+
+export interface AttendanceRecord {
+  id: string; user_id: string; shift_id: string | null;
+  location_id: string; organisation_id: string;
+  clock_in_at: string | null; clock_in_method: ClockInMethod | null;
+  clock_in_latitude: number | null; clock_in_longitude: number | null;
+  clock_in_geo_valid: boolean | null;
+  clock_out_at: string | null;
+  total_minutes: number | null; overtime_minutes: number;
+  break_minutes: number; worked_minutes: number | null; status: AttendanceStatus;
+  manager_override_note: string | null; created_at: string;
+  profiles?: { id: string; full_name: string } | null;
+  shifts?: Pick<Shift, 'id' | 'start_at' | 'end_at' | 'role'> | null;
+}
+
+export interface BreakRecord {
+  id: string;
+  attendance_id: string;
+  user_id: string;
+  break_start_at: string;
+  break_end_at: string | null;
+  duration_minutes: number | null;
+  break_type: "meal" | "rest" | "other";
+  created_at: string;
+}
+
+export interface AttendanceRules {
+  id: string; organisation_id: string;
+  late_threshold_mins: number; early_departure_threshold_mins: number;
+  overtime_threshold_hours: number; weekly_overtime_threshold_hours: number;
+  break_duration_mins: number;
+}
+
+export interface TimesheetSummaryRow {
+  user_id: string; full_name: string;
+  total_hours: number; break_hours: number; worked_hours: number;
+  regular_hours: number; overtime_hours: number;
+  late_count: number; absent_count: number; shift_count: number;
 }

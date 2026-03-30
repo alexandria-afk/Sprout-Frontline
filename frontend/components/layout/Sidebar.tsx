@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, Users, ClipboardList, Megaphone, LogOut, GitBranch, BarChart2, AlertTriangle, Settings, Trophy, GraduationCap } from "lucide-react";
+import { LayoutDashboard, Users, ClipboardList, Megaphone, LogOut, GitBranch, BarChart2, AlertTriangle, Settings, Trophy, GraduationCap, CalendarClock } from "lucide-react";
 import { clsx } from "clsx";
 import { createClient } from "@/services/supabase/client";
 import { getDashboardSummary } from "@/services/dashboard";
@@ -16,6 +16,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/workflows",               label: "Workflows",         icon: GitBranch,       roles: ["super_admin","admin","manager"] },
   { href: "/dashboard/insights",                label: "Insights",          icon: BarChart2,       roles: ["super_admin","admin","manager"] },
   { href: "/dashboard/training",                label: "Training",          icon: GraduationCap,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/shifts",                  label: "Shifts",            icon: CalendarClock,   roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/safety",                  label: "Leaderboard",       icon: Trophy,          roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/settings",                label: "Settings",          icon: Settings,        roles: ["super_admin","admin"] },
 ];

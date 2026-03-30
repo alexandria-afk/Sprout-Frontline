@@ -1,4 +1,6 @@
 import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -17,12 +19,53 @@ from routes import ai_generate
 from routes import gamification
 from routes import lms
 from routes import audit_trail
+from routes import shifts
+from routes import onboarding
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def _reset_stuck_provisioning_sessions():
+    """Reset any onboarding sessions that were left in 'provisioning' state by a server crash/restart."""
+    try:
+        from services.supabase_client import get_supabase
+        sb = get_supabase()
+        sessions = sb.table("onboarding_sessions").select("id,launch_progress,updated_at").execute()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+        reset_count = 0
+        for s in (sessions.data or []):
+            progress = s.get("launch_progress") or {}
+            if progress.get("status") == "provisioning":
+                try:
+                    updated_at = datetime.fromisoformat((s.get("updated_at") or "").replace("Z", "+00:00"))
+                    if updated_at < cutoff:
+                        sb.table("onboarding_sessions").update({
+                            "launch_progress": {
+                                **progress,
+                                "status": "failed",
+                                "error": "Provisioning was interrupted (server restart). Click Retry to try again.",
+                            }
+                        }).eq("id", s["id"]).execute()
+                        reset_count += 1
+                except Exception:
+                    pass
+        if reset_count:
+            logger.info(f"Reset {reset_count} stuck provisioning session(s) on startup.")
+    except Exception as e:
+        logger.warning(f"Could not reset stuck sessions on startup: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _reset_stuck_provisioning_sessions()
+    yield
+
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_limit_per_minute}/minute"])
 
 app = FastAPI(
+    lifespan=lifespan,
     title="Frontline API",
     version="1.0.0",
     description="Frontline Operations Platform — Phase 1",
@@ -71,6 +114,8 @@ app.include_router(ai_generate.router,       prefix="/api/v1/ai",               
 app.include_router(gamification.router,      prefix="/api/v1/gamification",        tags=["gamification"])
 app.include_router(lms.router,               prefix="/api/v1/lms",                 tags=["lms"])
 app.include_router(audit_trail.router,       prefix="/api/v1/settings",            tags=["Audit Trail"])
+app.include_router(shifts.router,            prefix="/api/v1/shifts",              tags=["shifts"])
+app.include_router(onboarding.router,        prefix="/api/v1/onboarding",          tags=["onboarding"])
 
 
 @app.get("/health", tags=["health"])

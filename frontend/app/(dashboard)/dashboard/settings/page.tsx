@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin } from "lucide-react";
+import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin, Sparkles } from "lucide-react";
 
 const SETTINGS_ITEMS = [
   {
@@ -65,6 +65,13 @@ const SETTINGS_ITEMS = [
     icon: History,
     label: "Audit Trail",
     description: "View a complete log of user actions and system events across the platform.",
+    roles: "Admin",
+  },
+  {
+    href: "/onboarding",
+    icon: Sparkles,
+    label: "Onboarding Setup",
+    description: "Re-run the AI-powered workspace setup wizard to add templates, employees, or reconfigure your workspace.",
     roles: "Admin",
   },
 ];

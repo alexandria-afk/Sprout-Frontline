@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/services/supabase/server";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { SidekickChat } from "@/components/shared/SidekickChat";
 
 export default async function DashboardLayout({
   children,
@@ -25,6 +26,7 @@ export default async function DashboardLayout({
           {children}
         </div>
       </main>
+      <SidekickChat />
     </div>
   );
 }

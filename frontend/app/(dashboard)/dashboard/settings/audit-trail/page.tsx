@@ -11,11 +11,12 @@ const ENTITY_CONFIG: Record<
   string,
   { label: string; borderColor: string; emoji: string; filterKey: string }
 > = {
-  task:     { label: "Task",     borderColor: "border-l-blue-500",   emoji: "📋", filterKey: "task"     },
-  issue:    { label: "Issue",    borderColor: "border-l-orange-500", emoji: "⚠️",  filterKey: "issue"    },
-  form:     { label: "Form",     borderColor: "border-l-green-500",  emoji: "📝", filterKey: "form"     },
-  workflow: { label: "Workflow", borderColor: "border-l-purple-500", emoji: "⚡", filterKey: "workflow" },
-  incident: { label: "Incident", borderColor: "border-l-red-500",    emoji: "🚨", filterKey: "incident" },
+  task:        { label: "Task",        borderColor: "border-l-blue-500",   emoji: "📋", filterKey: "task"       },
+  issue:       { label: "Issue",       borderColor: "border-l-orange-500", emoji: "⚠️",  filterKey: "issue"      },
+  form:        { label: "Form",        borderColor: "border-l-green-500",  emoji: "📝", filterKey: "form"       },
+  workflow:    { label: "Workflow",    borderColor: "border-l-purple-500", emoji: "⚡", filterKey: "workflow"   },
+  incident:    { label: "Incident",    borderColor: "border-l-red-500",    emoji: "🚨", filterKey: "incident"   },
+  onboarding:  { label: "Onboarding", borderColor: "border-l-teal-500",   emoji: "🚀", filterKey: "onboarding" },
 };
 
 const FILTERS = [

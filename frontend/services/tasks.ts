@@ -138,3 +138,16 @@ export function myTasks(): Promise<Task[]> {
 export function taskSummary(): Promise<TaskSummary> {
   return apiFetch("/api/v1/tasks/summary");
 }
+
+// ── AI ────────────────────────────────────────────────────────────────────────
+
+export function suggestTaskPriority(body: {
+  title: string;
+  description?: string;
+  context?: string;
+}): Promise<{ priority: string; reasoning: string }> {
+  return apiFetch("/api/v1/ai/suggest-task-priority", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}

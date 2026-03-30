@@ -114,6 +114,9 @@ class UpdateFormTemplateRequest(BaseModel):
 class GenerateTemplateRequest(BaseModel):
     description: str
     type: str = "form"  # "form" | "checklist"
+    input_type: str = "topic"  # "topic" | "url" | "document"
+    url: Optional[str] = None
+    document_base64: Optional[str] = None
 
 
 class TemplateStatsResponse(BaseModel):

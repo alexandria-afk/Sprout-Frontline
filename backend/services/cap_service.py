@@ -4,20 +4,25 @@ Generates, manages, and confirms CAPs for failed audit submissions.
 """
 from __future__ import annotations
 
+import json
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import anthropic
 from fastapi import HTTPException
 
+from config import settings
 from models.caps import UpdateCAPItemRequest
 from models.tasks import CreateTaskRequest
 from services.supabase_client import get_admin_client
 from services.task_service import TaskService
+from services.ai_logger import log_ai_request, AITimer
 
 logger = logging.getLogger(__name__)
 
-# Keywords for suggesting follow-up type
+# Keywords for suggesting follow-up type (kept for fallback)
 SAFETY_KEYWORDS = {
     "injury", "hazard", "accident", "fire", "chemical",
     "spill", "emergency", "safety", "exposure", "electrical",
@@ -29,6 +34,125 @@ EQUIPMENT_KEYWORDS = {
 }
 
 DUE_DAYS = {"critical": 1, "high": 3, "medium": 7, "low": 14}
+
+_CAP_AI_SYSTEM = """You are an operations specialist for QSR and retail compliance.
+Given audit findings that failed, classify the best corrective action for each.
+
+Return JSON array, one object per finding, in the SAME ORDER as input:
+[
+  {
+    "followup_type": "task|issue|incident",
+    "priority": "low|medium|high|critical",
+    "title": "Short action title (max 80 chars)",
+    "description": "What needs to be done and why",
+    "reasoning": "One sentence explanation"
+  }
+]
+
+Rules:
+- incident: safety hazard, injury risk, regulatory violation, pest, fire/chemical
+- issue: physical fault, equipment problem, structural defect
+- task: process fix, training gap, administrative action
+- critical: immediate safety risk or regulatory; high: significant non-compliance; medium: operational gap; low: minor improvement
+- Keep titles action-oriented ("Fix X", "Retrain on Y", "Replace Z")"""
+
+
+async def _ai_suggest_cap_items(failed_fields: list, org_context: str = "") -> list[dict] | None:
+    """Use Claude to classify all failed CAP fields at once.
+    Returns list of {followup_type, priority, title, description} or None on failure."""
+    try:
+        api_key = settings.anthropic_api_key
+        if not api_key:
+            return None
+
+        client = anthropic.Anthropic(api_key=api_key)
+
+        user_payload = json.dumps([
+            {
+                "label": f.label,
+                "response_value": getattr(f, "response_value", None) or "non_compliant",
+                "is_critical": f.is_critical,
+                "score_awarded": f.achieved_score,
+                "max_score": f.max_score,
+            }
+            for f in failed_fields
+        ])
+
+        user_message = user_payload
+        if org_context:
+            user_message = f"Organisation context: {org_context}\n\nFindings:\n{user_payload}"
+
+        max_retries = 3
+        last_error: Exception | None = None
+        response = None
+
+        with AITimer() as timer:
+            for attempt in range(max_retries):
+                try:
+                    response = client.messages.create(
+                        model="claude-haiku-4-5",
+                        max_tokens=2048,
+                        system=_CAP_AI_SYSTEM,
+                        messages=[{"role": "user", "content": user_message}],
+                    )
+                    last_error = None
+                    break
+                except anthropic.APIStatusError as e:
+                    if e.status_code == 529:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2 ** attempt)
+                        continue
+                    last_error = e
+                    break
+                except Exception as e:
+                    last_error = e
+                    break
+
+        input_tokens = getattr(getattr(response, "usage", None), "input_tokens", None) if response else None
+        output_tokens = getattr(getattr(response, "usage", None), "output_tokens", None) if response else None
+        success = last_error is None and response is not None
+
+        log_ai_request(
+            feature="cap_suggest_items",
+            model="claude-haiku-4-5",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=timer.elapsed_ms,
+            success=success,
+            error_message=str(last_error) if last_error else None,
+        )
+
+        if not success or response is None:
+            return None
+
+        text = ""
+        for block in response.content:
+            if block.type == "text":
+                text = block.text
+                break
+
+        if not text:
+            return None
+
+        text = text.strip()
+        if text.startswith("```"):
+            text = text.split("```", 2)[1]
+            if text.startswith("json"):
+                text = text[4:]
+            if "```" in text:
+                text = text.rsplit("```", 1)[0]
+            text = text.strip()
+
+        result = json.loads(text)
+        if not isinstance(result, list) or len(result) != len(failed_fields):
+            return None
+
+        return result
+
+    except Exception as e:
+        logger.debug(f"_ai_suggest_cap_items failed (will use keyword fallback): {e}")
+        return None
 
 
 def _suggest_followup_type(label: str, is_critical: bool) -> str:
@@ -122,15 +246,28 @@ class CAPService:
 
         now = datetime.now(timezone.utc)
 
+        # Try AI suggestions first; fall back to keyword logic if AI fails
+        ai_suggestions = await _ai_suggest_cap_items(failed_fields)
+
         # Create CAP items
         items = []
-        for f in failed_fields:
+        for idx, f in enumerate(failed_fields):
             response_value = resp_map.get(f.field_id, f.response_value or "non_compliant")
-            ftype = _suggest_followup_type(f.label, f.is_critical)
-            priority = _suggest_priority(f.is_critical, response_value)
+
+            ai = ai_suggestions[idx] if ai_suggestions else None
+            if ai:
+                ftype = ai.get("followup_type") or _suggest_followup_type(f.label, f.is_critical)
+                priority = ai.get("priority") or _suggest_priority(f.is_critical, response_value)
+                title = ai.get("title") or f"{f.label} — {_format_response(response_value)}"
+                description = ai.get("description") or f"Scored {f.achieved_score}/{f.max_score}"
+            else:
+                ftype = _suggest_followup_type(f.label, f.is_critical)
+                priority = _suggest_priority(f.is_critical, response_value)
+                title = f"{f.label} — {_format_response(response_value)}"
+                description = f"Scored {f.achieved_score}/{f.max_score}"
+
             due_days = DUE_DAYS.get(priority, 7)
             assignee = staff_assignee if ftype == "task" else manager_assignee
-            title = f"{f.label} — {_format_response(response_value)}"
 
             items.append({
                 "cap_id": cap_id,
@@ -142,14 +279,14 @@ class CAPService:
                 "is_critical": f.is_critical,
                 "suggested_followup_type": ftype,
                 "suggested_title": title,
-                "suggested_description": f"Scored {f.achieved_score}/{f.max_score}",
+                "suggested_description": description,
                 "suggested_priority": priority,
                 "suggested_assignee_id": assignee,
                 "suggested_due_days": due_days,
                 # Pre-fill manager-editable fields with suggested values
                 "followup_type": ftype,
                 "followup_title": title,
-                "followup_description": f"Scored {f.achieved_score}/{f.max_score}",
+                "followup_description": description,
                 "followup_priority": priority,
                 "followup_assignee_id": assignee,
                 "followup_due_at": (now + timedelta(days=due_days)).isoformat(),

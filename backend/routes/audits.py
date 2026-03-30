@@ -14,6 +14,7 @@ POST   /api/v1/audits/submissions/{id}/signature
 
 import base64
 import io
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -21,6 +22,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from dependencies import get_current_user, require_manager_or_above, paginate
 from models.audits import (
@@ -34,6 +36,7 @@ from services.audit_scoring_service import calculate_audit_score, create_correct
 from services.workflow_service import instantiate_workflow
 from services.form_service import FormService
 from services.supabase_client import get_admin_client
+from services.ai_logger import log_ai_request, AITimer
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -53,6 +56,96 @@ def _get_org(current_user: dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Audit Templates
 # ─────────────────────────────────────────────────────────────────────────────
+
+class GenerateAuditTemplateBody(BaseModel):
+    topic: str
+    passing_score: int = 70
+
+
+_AUDIT_TEMPLATE_SYSTEM = """You are an audit template designer for QSR and retail compliance.
+Generate a fully scored audit template that frontline managers use during inspections.
+
+Always respond with ONLY valid JSON — no markdown fences, no explanation.
+
+Schema:
+{
+  "title": "string",
+  "description": "string",
+  "passing_score": number,
+  "sections": [
+    {
+      "title": "string",
+      "weight": number (sections must sum to 100),
+      "fields": [
+        {
+          "label": "string",
+          "field_type": "checkbox" | "text" | "number" | "photo" | "dropdown",
+          "is_required": true | false,
+          "is_critical": true | false,
+          "scoring_type": "binary" | "partial",
+          "max_score": number,
+          "options": ["opt1", "opt2"] | null
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Generate 3–5 sections with 4–7 fields each
+- Section weights must sum to exactly 100
+- Mark is_critical=true for regulatory or safety-critical items
+- scoring_type=binary means 0 or max_score; partial means anywhere in between
+- field_type=photo for visual verification; checkbox for yes/no compliance; dropdown for multi-option
+- Keep field labels action-oriented and specific
+- Include at least one photo field per section for verification
+- Regulatory/safety items should have higher max_score (10–20); minor items 5–10
+"""
+
+
+@router.post("/templates/generate")
+async def generate_audit_template_draft(
+    body: GenerateAuditTemplateBody,
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Use AI to generate an audit template draft that the frontend can review before saving."""
+    org_id = _get_org(current_user)
+    user_id = current_user.get("sub")
+
+    from routes.ai_generate import _call_claude
+
+    user_message = f"Generate an audit template for: {body.topic}\nPassing score threshold: {body.passing_score}%"
+
+    with AITimer() as timer:
+        try:
+            text = await _call_claude(_AUDIT_TEMPLATE_SYSTEM, user_message)
+            success = True
+        except Exception as e:
+            log_ai_request(
+                feature="generate_audit_template_draft", model="claude-haiku-4-5",
+                input_tokens=None, output_tokens=None, latency_ms=timer.elapsed_ms,
+                success=False, org_id=org_id, user_id=user_id, error_message=str(e),
+            )
+            raise
+
+    log_ai_request(
+        feature="generate_audit_template_draft", model="claude-haiku-4-5",
+        input_tokens=None, output_tokens=None, latency_ms=timer.elapsed_ms,
+        success=True, org_id=org_id, user_id=user_id,
+    )
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"AI returned invalid JSON: {e}")
+
+    for key in ("title", "sections"):
+        if key not in data:
+            raise HTTPException(status_code=502, detail=f"AI response missing required field: {key}")
+
+    data.setdefault("passing_score", body.passing_score)
+    return data
+
 
 @router.post("/templates")
 async def create_audit_template(

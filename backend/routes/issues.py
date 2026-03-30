@@ -36,6 +36,7 @@ class CreateIssueRequest(BaseModel):
     location_id: Optional[str] = None
     asset_id: Optional[str] = None
     assigned_to: Optional[str] = None
+    is_safety_risk: Optional[bool] = False
     custom_responses: Optional[List[CustomResponseItem]] = None
 
 
@@ -208,6 +209,7 @@ def _random_suffix(length: int = 8) -> str:
 
 # ── Issues CRUD ────────────────────────────────────────────────────────────────
 
+@router.post("")
 @router.post("/")
 async def create_issue(
     body: CreateIssueRequest,
@@ -326,7 +328,7 @@ async def create_issue(
         logging.getLogger(__name__).warning(f"Workflow trigger failed for issue {issue_id}: {_wf_exc}")
 
     # ── Auto-spawn incident report if safety risk was flagged ──────────────────
-    if body.description and "⚠️ Safety risk reported." in body.description:
+    if body.is_safety_risk:
         try:
             _severity_map = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
             _incident_data: dict = {
@@ -351,6 +353,7 @@ async def create_issue(
     return issue
 
 
+@router.get("")
 @router.get("/")
 async def list_issues(
     pagination: dict = Depends(paginate),
