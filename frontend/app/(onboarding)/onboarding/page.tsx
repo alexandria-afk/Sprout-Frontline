@@ -969,6 +969,17 @@ function Step2({
             </div>
           </div>
 
+          {/* Auto-selected dependency notification */}
+          {autoSelectedNames.length > 0 && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4 text-sm text-amber-800">
+              <span>✓</span>
+              <span>
+                Also selected linked items this workflow needs:{" "}
+                <strong>{autoSelectedNames.join(", ")}</strong>
+              </span>
+            </div>
+          )}
+
           {/* Categories accordion */}
           <div className="space-y-3">
             {pkg.categories.map((cat) => {
@@ -1033,6 +1044,11 @@ function Step2({
                             </div>
                             {item.description && (
                               <p className="text-xs text-slate-400 mt-0.5">{item.description}</p>
+                            )}
+                            {item.category === "workflow" && (item.content_preview as Record<string, unknown>)?.required_refs && (
+                              <p className="text-[10px] text-slate-400 mt-0.5">
+                                Requires: {((item.content_preview as Record<string, unknown>).required_refs as Array<{ name: string }>).map((r) => r.name).join(", ")}
+                              </p>
                             )}
                           </div>
                         </label>
