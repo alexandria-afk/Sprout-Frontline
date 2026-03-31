@@ -484,8 +484,14 @@ class FormService:
             return None
 
     @staticmethod
-    async def create_submission(body: CreateSubmissionRequest, user_id: str) -> dict:
+    async def create_submission(body: CreateSubmissionRequest, user_id: str, org_id: Optional[str] = None) -> dict:
         supabase = get_supabase()
+
+        # ── Verify form template belongs to the org ──
+        if org_id:
+            tpl = supabase.table("form_templates").select("id").eq("id", str(body.form_template_id)).eq("organisation_id", org_id).maybe_single().execute()
+            if not tpl.data:
+                raise HTTPException(status_code=404, detail="Form template not found")
 
         # ── Upsert: if a draft already exists for this assignment, update it ──
         existing_id: Optional[str] = None
@@ -621,19 +627,21 @@ class FormService:
                     "Workflow trigger failed for submission %s: %s", submission_id, _wf_exc
                 )
 
-        return await FormService.get_submission(submission_id, user_id)
+        return await FormService.get_submission(submission_id, user_id, org_id=org_id)
 
     @staticmethod
-    async def get_submission(submission_id: str, user_id: str) -> dict:
+    async def get_submission(submission_id: str, user_id: str, org_id: Optional[str] = None) -> dict:
         supabase = get_supabase()
 
         try:
-            sub_resp = (
+            query = (
                 supabase.table("form_submissions")
-                .select("*, profiles!submitted_by(full_name), form_templates(title, type, audit_configs(passing_score))")
+                .select("*, profiles!submitted_by(full_name), form_templates(title, type, organisation_id, audit_configs(passing_score))")
                 .eq("id", str(submission_id))
-                .execute()
             )
+            if org_id:
+                query = query.eq("organisation_id", org_id)
+            sub_resp = query.execute()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

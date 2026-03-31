@@ -124,6 +124,7 @@ export function createIssue(body: {
   location_id?: string;
   asset_id?: string;
   assigned_to?: string;
+  is_safety_risk?: boolean;
   custom_responses?: Array<{ custom_field_id: string; value: string }>;
 }): Promise<Issue> {
   return apiFetch("/api/v1/issues/", { method: "POST", body: JSON.stringify(body) });

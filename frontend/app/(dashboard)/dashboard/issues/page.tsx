@@ -36,6 +36,7 @@ import { createClient } from "@/services/supabase/client";
 import { CreateTaskModal } from "@/components/tasks/CreateTaskModal";
 import type {
   Issue,
+  IssueAttachment,
   IssueCategory,
   IssuePriority,
   IssueStatus,
@@ -1187,8 +1188,17 @@ function IssueDetailModal({
   useEffect(() => {
     setLoadingFull(true);
     getIssue(initialIssue.id)
-      .then((full) => setIssue(full))
-      .catch(() => {})
+      .then((full) => {
+        // Defensive merge: if the re-fetch returns no attachments but we already
+        // have them (e.g. freshly uploaded), keep the ones we have.
+        setIssue((prev) => ({
+          ...full,
+          attachments: (full.attachments ?? []).length > 0
+            ? full.attachments
+            : (prev.attachments ?? []),
+        }));
+      })
+      .catch((e) => console.error("[IssueDetailModal] Failed to load issue details:", e))
       .finally(() => setLoadingFull(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialIssue.id]);
@@ -1731,6 +1741,7 @@ function ReportProblemModal({
   const [assetSearch, setAssetSearch] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
+  const [incidentBanner, setIncidentBanner] = useState<Issue | null>(null);
   const [error, setError] = useState("");
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
@@ -1838,7 +1849,7 @@ function ReportProblemModal({
       const assetNote = unlisted ? `\n\n[Unlisted equipment: ${unlisted}]` : "";
       const safetyNote = safetyRisk === "yes" ? "\n\n⚠️ Safety risk reported." : "";
 
-      const issue = await createIssue({
+      let issue = await createIssue({
         title: title.trim(),
         description: description.trim() + assetNote + safetyNote,
         category_id: categoryId,
@@ -1846,24 +1857,60 @@ function ReportProblemModal({
         location_description: locationDesc.trim() || undefined,
         location_id: locationId || undefined,
         asset_id: selectedAsset?.id || undefined,
+        is_safety_risk: safetyRisk === "yes",
       });
 
-      // Upload photo if provided
+      // Upload photo if provided — merge returned attachment into issue so
+      // the card shows the photo immediately without waiting for a detail re-fetch
       if (photoFile) {
         try {
-          await uploadIssueAttachments(issue.id, [photoFile]);
+          const uploadResult = await uploadIssueAttachments(issue.id, [photoFile]);
+          if (uploadResult.data && uploadResult.data.length > 0) {
+            issue = { ...issue, attachments: uploadResult.data as IssueAttachment[] };
+          }
         } catch {
           // Non-fatal — issue is created, photo just didn't attach
         }
       }
 
-      onSuccess(issue);
+      if (safetyRisk === "yes") {
+        // Show incident banner before closing — auto-dismiss after 4 s
+        setIncidentBanner(issue);
+        setTimeout(() => onSuccess(issue), 4000);
+      } else {
+        onSuccess(issue);
+      }
     } catch (e) {
       setError(friendlyError(e));
     } finally {
       setSubmitting(false);
     }
   };
+
+  // Incident banner — shown after a safety-risk submission
+  if (incidentBanner) {
+    return (
+      <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 flex flex-col items-center gap-4 text-center">
+          <div className="w-14 h-14 rounded-full bg-red-50 flex items-center justify-center">
+            <ShieldAlert className="w-7 h-7 text-red-500" />
+          </div>
+          <div>
+            <p className="text-base font-bold text-dark mb-1">Problem reported</p>
+            <p className="text-sm text-dark-secondary leading-relaxed">
+              Because you flagged a safety risk, an incident report has been automatically generated and is now with your manager and admin for review.
+            </p>
+          </div>
+          <button
+            onClick={() => onSuccess(incidentBanner)}
+            className="mt-1 px-5 py-2 rounded-lg bg-sprout-purple text-white text-sm font-medium hover:bg-sprout-purple/90 transition-colors"
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4 overflow-y-auto">
