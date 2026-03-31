@@ -40,7 +40,11 @@ async def bulk_import(
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     content = await file.read()
-    csv_content = content.decode("utf-8")
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 5 MB.")
+    if file.content_type not in ("text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"):
+        raise HTTPException(status_code=415, detail="Invalid file type. Please upload a CSV file.")
+    csv_content = content.decode("utf-8", errors="replace")
     return await UserService.bulk_import(csv_content, org_id)
 
 

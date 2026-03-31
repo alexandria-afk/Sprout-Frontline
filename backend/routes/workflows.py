@@ -24,11 +24,14 @@ POST   /api/v1/workflows/instances/{id}/stages/{stage_instance_id}/submit-form
 """
 
 import logging
+import os as _os
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+
+_INTERNAL_SECRET = _os.environ.get("INTERNAL_CRON_SECRET", "")
 
 from dependencies import get_current_user, require_admin, require_manager_or_above
 from models.workflows import (
@@ -821,12 +824,14 @@ async def approve_workflow_stage(
     body: ApproveStageRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    org_id = _get_org(current_user)
     try:
         result = await approve_stage(
             instance_id=str(instance_id),
             stage_instance_id=str(stage_instance_id),
             acting_user_id=current_user["sub"],
             comment=body.comment,
+            org_id=org_id,
         )
         return result
     except ValueError as e:
@@ -840,12 +845,14 @@ async def reject_workflow_stage(
     body: RejectStageRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    org_id = _get_org(current_user)
     try:
         result = await reject_stage(
             instance_id=str(instance_id),
             stage_instance_id=str(stage_instance_id),
             acting_user_id=current_user["sub"],
             comment=body.comment,
+            org_id=org_id,
         )
         return result
     except ValueError as e:
@@ -989,10 +996,15 @@ async def submit_form_for_stage(
 # ─── Internal: Wait Stage Ticker ─────────────────────────────────────────────
 
 @router.post("/internal/tick")
-async def tick(current_user: dict = Depends(require_admin)):
+async def tick(
+    x_internal_secret: str = Header(default="", alias="X-Internal-Secret"),
+    current_user: dict = Depends(require_admin),
+):
     """
     Advance condition-based and timed-out wait stages.
     Call every 5 minutes via a server cron or Supabase Edge Function scheduler.
     Requires admin role to prevent accidental public exposure.
     """
+    if not _INTERNAL_SECRET or x_internal_secret != _INTERNAL_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return await tick_wait_stages()

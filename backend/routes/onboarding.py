@@ -8,6 +8,8 @@ import io
 import base64
 import asyncio
 import uuid
+import secrets
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -370,7 +372,7 @@ async def discover_company(
         "brand_color": profile.brand_color_hex,
         "logo_url": profile.logo_url,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).execute()
+    }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     return profile
 
@@ -391,7 +393,7 @@ async def discover_company_fallback(
         "industry_subcategory": req.industry_subcategory,
         "estimated_locations": req.estimated_locations,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).execute()
+    }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     return CompanyProfile(
         company_name=req.company_name,
@@ -428,7 +430,7 @@ async def confirm_company(
         "logo_url": profile.logo_url,
         "current_step": 2,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).execute()
+    }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     # Pre-populate template selections from industry package
     pkg_res = sb.table("industry_packages").select("id").eq("industry_code", profile.industry_code).eq("is_active", True).limit(1).execute()
@@ -641,7 +643,7 @@ async def set_employee_source(
     _require_step(session, 2)
     get_supabase().table("onboarding_sessions").update(
         {"employee_source": req.source, "updated_at": datetime.now(timezone.utc).isoformat()}
-    ).eq("id", session_id).execute()
+    ).eq("id", session_id).eq("organisation_id", org_id).execute()
     return {"ok": True}
 
 
@@ -928,7 +930,7 @@ async def delete_employee(
 ):
     org_id = _get_org_id(current_user)
     _get_session(session_id, org_id)
-    get_supabase().table("onboarding_employees").delete().eq("id", employee_id).eq("session_id", session_id).execute()
+    get_supabase().table("onboarding_employees").update({"is_deleted": True}).eq("id", employee_id).eq("session_id", session_id).execute()
     return {"ok": True}
 
 
@@ -943,9 +945,16 @@ async def generate_invite_link(
     session = _get_session(session_id, org_id)
     _require_step(session, 2)
 
-    token = str(uuid.uuid4()).replace("-", "")[:16]
+    token = secrets.token_urlsafe(24)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.expiry_hours)).isoformat()
     invite_url = f"https://app.sprout.ph/join/{token}?role={config.default_role}"
+    get_supabase().table("onboarding_sessions").update({
+        "invite_token_hash": token_hash,
+        "invite_token_expires_at": expires_at,
+        "invite_default_role": config.default_role,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     # Generate real QR code as SVG
     try:
@@ -1416,7 +1425,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 "steps_remaining": [s for s in LAUNCH_STEPS if s not in completed_steps],
             },
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).execute()
+        }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     try:
         # Clean up any previously partially-provisioned records so re-runs are idempotent
@@ -2049,7 +2058,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 "steps_remaining": [],
             },
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).execute()
+        }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     except Exception as e:
         sb.table("onboarding_sessions").update({
@@ -2060,7 +2069,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 "steps_remaining": [s for s in LAUNCH_STEPS if s not in completed_steps],
             },
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).execute()
+        }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
 
 @router.post("/sessions/{session_id}/launch")
@@ -2099,7 +2108,7 @@ async def launch_workspace(
             "steps_remaining": LAUNCH_STEPS,
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).execute()
+    }).eq("id", session_id).eq("organisation_id", org_id).execute()
 
     user_id = current_user.get("sub", "")
     background_tasks.add_task(_provision_workspace, session_id, org_id, user_id)

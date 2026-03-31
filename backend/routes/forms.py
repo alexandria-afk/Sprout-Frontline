@@ -136,7 +136,8 @@ async def create_submission(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["sub"]
-    return await FormService.create_submission(body, user_id)
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    return await FormService.create_submission(body, user_id, org_id=org_id)
 
 
 @router.get("/submissions")
@@ -182,7 +183,8 @@ async def get_submission(
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["sub"]
-    return await FormService.get_submission(str(submission_id), user_id)
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    return await FormService.get_submission(str(submission_id), user_id, org_id=org_id)
 
 
 @router.put("/submissions/{submission_id}/review")

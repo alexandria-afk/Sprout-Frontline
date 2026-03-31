@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from uuid import UUID
 
+from fastapi import HTTPException
 from services.supabase_client import get_admin_client
 
 logger = logging.getLogger(__name__)
@@ -859,11 +860,16 @@ async def approve_stage(
     stage_instance_id: str,
     acting_user_id: str,
     comment: Optional[str],
+    org_id: str = "",
 ) -> dict:
     """
     Approve the current stage and advance the workflow.
     """
     db = get_admin_client()
+
+    inst = db.table("workflow_instances").select("id").eq("id", instance_id).eq("organisation_id", org_id).maybe_single().execute()
+    if not inst.data:
+        raise HTTPException(status_code=403, detail="Not found")
 
     si_res = db.table("workflow_stage_instances") \
         .select("workflow_instance_id, status") \
@@ -892,11 +898,16 @@ async def reject_stage(
     stage_instance_id: str,
     acting_user_id: str,
     comment: Optional[str],
+    org_id: str = "",
 ) -> dict:
     """
     Reject the current stage and cancel the workflow.
     """
     db = get_admin_client()
+
+    inst = db.table("workflow_instances").select("id").eq("id", instance_id).eq("organisation_id", org_id).maybe_single().execute()
+    if not inst.data:
+        raise HTTPException(status_code=403, detail="Not found")
 
     si_res = db.table("workflow_stage_instances") \
         .select("workflow_instance_id, stage_id, status") \
