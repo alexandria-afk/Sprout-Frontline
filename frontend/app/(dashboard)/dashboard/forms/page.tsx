@@ -791,24 +791,6 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
   const watchedType = watch("type");
   const [apiError, setApiError] = useState("");
 
-  // Auto-inject "Estimated Cost" field when pull_out is selected
-  useEffect(() => {
-    if (watchedType === "pull_out") {
-      const current = control._formValues as TemplateFormValues;
-      const allFields = (current.sections ?? []).flatMap((s) => s.fields ?? []);
-      const alreadyHas = allFields.some((f) => f.label?.toLowerCase() === "estimated cost");
-      if (!alreadyHas) {
-        const firstSection = current.sections?.[0];
-        if (firstSection) {
-          const updatedFields = [
-            ...(firstSection.fields ?? []),
-            { id: crypto.randomUUID(), label: "Estimated Cost", field_type: "number" as const, is_required: true, placeholder: "e.g. 150.00", options: [], conditional_logic: null },
-          ];
-          setValue("sections.0.fields", updatedFields, { shouldValidate: false });
-        }
-      }
-    }
-  }, [watchedType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onSubmit = async (values: TemplateFormValues) => {
     setApiError("");
