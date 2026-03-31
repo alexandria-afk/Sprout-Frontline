@@ -775,7 +775,7 @@ export default function WorkflowFillFormPage() {
                               </div>
                             )}
                             {item.comment && (
-                              <p className="text-xs text-dark-secondary italic mt-0.5">"{item.comment}"</p>
+                              <p className="text-xs text-dark-secondary italic mt-0.5">&quot;{item.comment}&quot;</p>
                             )}
                           </div>
                         )}

@@ -188,7 +188,7 @@ export function WorkflowInstanceModal({ instanceId, onClose }: WorkflowInstanceM
                             </span>
                           </div>
                           {stage.comment && (
-                            <p className="text-xs text-dark/50 mt-1 italic">"{stage.comment}"</p>
+                            <p className="text-xs text-dark/50 mt-1 italic">&quot;{stage.comment}&quot;</p>
                           )}
                           {stage.completed_at && (
                             <p className="text-xs text-dark/30 mt-0.5">

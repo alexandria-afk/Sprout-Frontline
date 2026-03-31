@@ -2231,7 +2231,7 @@ function StaffClockIn({ locationId }: { locationId: string }) {
 
       {todayRecords.length > 0 && (
         <div className="bg-white rounded-xl border border-surface-border p-4">
-          <p className="text-sm font-semibold text-dark mb-3">Today's Attendance</p>
+          <p className="text-sm font-semibold text-dark mb-3">Today&apos;s Attendance</p>
           <div className="space-y-2">
             {todayRecords.map(r => (
               <div key={r.id} className="flex items-center justify-between text-sm">

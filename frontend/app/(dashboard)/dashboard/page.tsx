@@ -772,7 +772,7 @@ function StaffDashboard({ name }: { name: string }) {
       {/* Greeting */}
       <div className="bg-white rounded-xl border border-surface-border px-6 py-5">
         <p className="text-xl font-bold text-dark">{greeting}, {firstName}! 👋</p>
-        <p className="text-sm text-dark-secondary mt-1">Here's a summary of what needs your attention today.</p>
+        <p className="text-sm text-dark-secondary mt-1">Here&apos;s a summary of what needs your attention today.</p>
       </div>
 
       {/* Stat cards */}

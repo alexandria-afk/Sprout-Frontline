@@ -1006,7 +1006,7 @@ export default function IssueCategoriesPage() {
                 {deletingId === cat.id && (
                   <div className="absolute inset-0 bg-white/95 rounded-2xl border border-red-200 flex flex-col items-center justify-center gap-3 z-10 p-4">
                     <p className="text-sm font-medium text-dark text-center">
-                      Delete <span className="text-red-600">"{cat.name}"</span>?
+                      Delete <span className="text-red-600">&quot;{cat.name}&quot;</span>?
                       <br />
                       <span className="text-xs text-dark-secondary font-normal">This cannot be undone.</span>
                     </p>

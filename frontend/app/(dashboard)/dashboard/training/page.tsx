@@ -708,7 +708,7 @@ function TrainingOverview() {
               </div>
               <div className="flex-1 min-w-0">
                 <h2 className="text-base font-bold text-dark">Translate Course</h2>
-                <p className="text-xs text-dark-secondary mt-0.5 truncate">"{translateCourseTarget.title}"</p>
+                <p className="text-xs text-dark-secondary mt-0.5 truncate">&quot;{translateCourseTarget.title}&quot;</p>
               </div>
               <button onClick={() => setTranslateCourseTarget(null)} className="p-1 rounded-lg hover:bg-gray-100 text-dark/30 transition-colors">
                 <X className="w-4 h-4" />

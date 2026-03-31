@@ -1625,7 +1625,7 @@ function IssueDetailModal({
                     )}
                     <IssueStatusBadge status={h.new_status as IssueStatus} />
                     {h.comment && (
-                      <span className="text-dark-secondary italic">"{h.comment}"</span>
+                      <span className="text-dark-secondary italic">&quot;{h.comment}&quot;</span>
                     )}
                     <span className="ml-auto text-dark-secondary">{timeAgo(h.changed_at)}</span>
                   </div>
