@@ -461,17 +461,43 @@ def _build_content_preview(category: str, content: dict) -> dict:
             "requires_photo": content.get("requires_photo", False),
             "scoring": content.get("scoring") is not None,
             "first_section": sections[0]["title"] if sections else None,
+            "sections": [
+                {
+                    "title": s.get("title", ""),
+                    "fields": [
+                        {"label": f.get("label", ""), "type": f.get("field_type", f.get("type", ""))}
+                        for f in s.get("fields", [])
+                    ]
+                }
+                for s in sections
+            ],
         }
     elif category == "issue_category":
         return {
             "default_priority": content.get("default_priority"),
             "subcategory_count": len(content.get("subcategories", [])),
             "sla_hours": content.get("sla_hours"),
+            "subcategories": content.get("subcategories", []),
         }
     elif category == "workflow":
+        stages = content.get("stages", [])
+        deps = []
+        for stage in stages:
+            if stage.get("form_ref"):
+                deps.append({"type": "form", "name": stage["form_ref"]})
+            for cr in stage.get("course_refs", []):
+                deps.append({"type": "training_module", "name": cr})
+        trigger = content.get("trigger", {})
+        if trigger.get("issue_category_ref"):
+            deps.append({"type": "issue_category", "name": trigger["issue_category_ref"]})
         return {
-            "trigger_type": content.get("trigger", {}).get("type"),
-            "stage_count": len(content.get("stages", [])),
+            "trigger_type": trigger.get("type"),
+            "stage_count": len(stages),
+            "stages": [
+                {"name": s.get("name", ""), "action_type": s.get("type", s.get("action_type", ""))}
+                for s in stages
+            ],
+            "required_refs": deps,
         }
     elif category == "training_module":
         return {
@@ -480,6 +506,10 @@ def _build_content_preview(category: str, content: dict) -> dict:
             "auto_assign_on_hire": content.get("auto_assign_on_hire", False),
             "section_count": len(content.get("sections", [])),
             "passing_score": content.get("passing_score"),
+            "sections": [
+                {"title": s.get("title", ""), "modules": [m.get("title", "") for m in s.get("modules", [])]}
+                for s in content.get("sections", [])
+            ],
         }
     elif category == "shift_template":
         return {

@@ -11,6 +11,7 @@ import type {
   CompanyProfile,
   IndustryPackage,
   TemplateCategoryGroup,
+  TemplateItem,
   OnboardingLocation,
   OnboardingAsset,
   OnboardingVendor,
@@ -724,6 +725,109 @@ function Step1({
 // STEP 2 — Template Selection
 // ═══════════════════════════════════════════════════════════════════════════════
 
+function TemplatePreviewContent({ item }: { item: TemplateItem }) {
+  const cp = item.content_preview as Record<string, unknown>;
+  if (!cp) return <p className="text-sm text-slate-400">No preview available.</p>;
+
+  // Forms / checklists / audits
+  if (["form", "checklist", "audit"].includes(item.category)) {
+    const sections = (cp.sections as Array<{ title: string; fields: Array<{ label: string; type: string }> }>) ?? [];
+    return (
+      <div className="space-y-3">
+        <div className="flex gap-4 text-xs text-slate-500 mb-2">
+          <span>{String(cp.section_count ?? sections.length)} sections</span>
+          <span>{String(cp.field_count ?? 0)} fields</span>
+          {cp.requires_signature && <span className="text-amber-600">Requires signature</span>}
+        </div>
+        {sections.map((sec, i) => (
+          <div key={i} className="bg-slate-50 rounded-xl px-4 py-3">
+            <p className="text-xs font-semibold text-slate-700 mb-2">{sec.title || `Section ${i + 1}`}</p>
+            <ul className="space-y-1">
+              {sec.fields.map((f, j) => (
+                <li key={j} className="text-xs text-slate-600 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-300 flex-shrink-0" />
+                  {f.label}
+                  {f.type && <span className="text-slate-400 text-[10px]">({f.type})</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Workflow
+  if (item.category === "workflow") {
+    const stages = (cp.stages as Array<{ name: string; action_type: string }>) ?? [];
+    return (
+      <div className="space-y-2">
+        <p className="text-xs text-slate-500 mb-2">Trigger: <span className="font-medium text-slate-700">{String(cp.trigger_type ?? "manual")}</span></p>
+        <div className="space-y-1.5">
+          {stages.map((stage, i) => (
+            <div key={i} className="flex items-center gap-3 bg-slate-50 rounded-lg px-3 py-2">
+              <span className="text-xs text-slate-400 w-4">{i + 1}.</span>
+              <span className="text-xs font-medium text-slate-700 flex-1">{stage.name}</span>
+              <span className="text-[10px] text-slate-400 bg-white border border-slate-200 rounded px-1.5 py-0.5">{stage.action_type}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // Training module
+  if (item.category === "training_module") {
+    const sections = (cp.sections as Array<{ title: string }>) ?? [];
+    return (
+      <div className="space-y-2">
+        <div className="flex gap-4 text-xs text-slate-500 mb-2">
+          {cp.format && <span>Format: {String(cp.format)}</span>}
+          {cp.estimated_minutes && <span>{String(cp.estimated_minutes)} min</span>}
+          {cp.passing_score && <span>Passing: {String(cp.passing_score)}%</span>}
+        </div>
+        {sections.map((sec, i) => (
+          <div key={i} className="bg-slate-50 rounded-lg px-3 py-2 text-xs text-slate-700">{sec.title || `Module ${i + 1}`}</div>
+        ))}
+      </div>
+    );
+  }
+
+  // Issue category
+  if (item.category === "issue_category") {
+    const subcats = (cp.subcategories as string[]) ?? [];
+    return (
+      <div className="space-y-2">
+        <div className="flex gap-4 text-xs text-slate-500 mb-2">
+          {cp.default_priority && <span>Default priority: <span className="font-medium">{String(cp.default_priority)}</span></span>}
+          {cp.sla_hours && <span>SLA: {String(cp.sla_hours)}h</span>}
+        </div>
+        {subcats.length > 0 && (
+          <div>
+            <p className="text-xs font-semibold text-slate-700 mb-1.5">Subcategories</p>
+            <ul className="space-y-1">
+              {subcats.map((s, i) => (
+                <li key={i} className="text-xs text-slate-600 flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-300" />{s}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Generic fallback
+  return (
+    <div className="space-y-1">
+      {Object.entries(cp).filter(([,v]) => v !== null && v !== undefined && typeof v !== 'object').map(([k, v]) => (
+        <div key={k} className="flex gap-2 text-xs"><span className="text-slate-400 capitalize">{k.replace(/_/g,' ')}:</span><span className="text-slate-700">{String(v)}</span></div>
+      ))}
+    </div>
+  );
+}
+
 function Step2({
   session,
   onNext,
@@ -736,6 +840,8 @@ function Step2({
   const [saving, setSaving] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [previewItem, setPreviewItem] = useState<TemplateItem | null>(null);
+  const [autoSelectedNames, setAutoSelectedNames] = useState<string[]>([]);
 
   useEffect(() => {
     svc.getTemplates(session.session_id)
@@ -890,6 +996,12 @@ function Step2({
                                   Recommended
                                 </span>
                               )}
+                              <button
+                                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setPreviewItem(item); }}
+                                className="text-[10px] text-green-600 hover:underline ml-2 font-normal"
+                              >
+                                Preview
+                              </button>
                             </div>
                             {item.description && (
                               <p className="text-xs text-slate-400 mt-0.5">{item.description}</p>
@@ -912,6 +1024,27 @@ function Step2({
             {saving ? <Spinner size={16} /> : `Confirm ${pkg.total_selected} templates — Continue →`}
           </button>
         </>
+      )}
+
+      {previewItem && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setPreviewItem(null)}>
+          <div className="bg-white rounded-2xl max-w-lg w-full max-h-[80vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h3 className="text-base font-bold text-slate-800">{previewItem.name}</h3>
+                {previewItem.description && <p className="text-sm text-slate-500 mt-1">{previewItem.description}</p>}
+              </div>
+              <button onClick={() => setPreviewItem(null)} className="text-slate-400 hover:text-slate-600 ml-4">✕</button>
+            </div>
+
+            {/* Preview content based on category */}
+            <TemplatePreviewContent item={previewItem} />
+
+            <p className="text-xs text-slate-400 mt-4 pt-4 border-t border-slate-100">
+              💡 You can review and edit the full details after workspace setup.
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1092,6 +1225,7 @@ function Step4Assets({
   onNext: (updated: OnboardingSession) => void;
 }) {
   const [assets, setAssets] = useState<OnboardingAsset[]>([]);
+  const [assetSuggestions, setAssetSuggestions] = useState<OnboardingAsset[]>([]);
   const [locations, setLocations] = useState<OnboardingLocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1113,15 +1247,36 @@ function Step4Assets({
       setLocations(l);
       if (a.length === 0) {
         return svc.suggestAssets(session.session_id)
-          .then((suggestions) => Promise.all(suggestions.map((s) => svc.addAsset(session.session_id, s))))
-          .then(() => svc.listAssets(session.session_id))
-          .then(setAssets)
+          .then((suggestions) => setAssetSuggestions(suggestions))
           .catch(() => {});
       }
     }).catch(() => {}).finally(() => setLoading(false));
   }, [session.session_id]);
 
   const refreshAssets = () => svc.listAssets(session.session_id).then(setAssets).catch(() => {});
+
+  const handleAddSuggestion = async (suggestion: OnboardingAsset) => {
+    try {
+      await svc.addAsset(session.session_id, suggestion);
+      setAssetSuggestions((prev) => prev.filter((s) => s !== suggestion));
+      await refreshAssets();
+    } catch {
+      setError("Failed to add asset.");
+    }
+  };
+
+  const handleAddAllSuggestions = async () => {
+    setSaving(true);
+    try {
+      await Promise.all(assetSuggestions.map((s) => svc.addAsset(session.session_id, s)));
+      setAssetSuggestions([]);
+      await refreshAssets();
+    } catch {
+      setError("Failed to add assets.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleAddAsset = async () => {
     if (!assetForm.name.trim() || !assetForm.category.trim()) return;
@@ -1175,12 +1330,52 @@ function Step4Assets({
               <div>
                 <p className="text-sm font-medium text-slate-800">{a.name}</p>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  {a.category}{a.model ? ` · ${a.model}` : ""}{a.location_name ? ` · ${a.location_name}` : ""}
+                  {a.category}{a.model ? ` · ${a.model}` : ""}{a.manufacturer ? ` · ${a.manufacturer}` : ""}{a.location_name ? ` · ${a.location_name}` : ""}
                 </p>
               </div>
               <button onClick={() => svc.deleteAsset(session.session_id, a.id!).then(refreshAssets)} className="text-xs text-slate-300 hover:text-red-400 transition-colors ml-4 mt-0.5">✕</button>
             </div>
           ))}
+
+          {assetSuggestions.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide">AI Suggestions</p>
+                <button
+                  onClick={handleAddAllSuggestions}
+                  disabled={saving}
+                  className="text-xs bg-green-600 text-white px-3 py-1 rounded-lg hover:bg-green-700 disabled:opacity-50 font-medium"
+                >
+                  {saving ? "Adding…" : "Add all"}
+                </button>
+              </div>
+              {assetSuggestions.map((s, i) => (
+                <div key={i} className="flex items-start justify-between bg-white border border-amber-100 rounded-lg px-3 py-2">
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">{s.name}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {s.category}{s.model ? ` · ${s.model}` : ""}{s.manufacturer ? ` · ${s.manufacturer}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 ml-3 mt-0.5 shrink-0">
+                    <button
+                      onClick={() => handleAddSuggestion(s)}
+                      className="text-xs bg-green-600 text-white px-2.5 py-1 rounded-lg hover:bg-green-700 font-medium"
+                    >
+                      Add
+                    </button>
+                    <button
+                      onClick={() => setAssetSuggestions((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-xs text-slate-300 hover:text-slate-500 transition-colors px-1 py-1"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
           {showAssetForm ? (
             <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 space-y-2">
               <input className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Asset name*" value={assetForm.name} onChange={(e) => setAssetForm((f) => ({ ...f, name: e.target.value }))} />
@@ -1206,11 +1401,13 @@ function Step4Assets({
         </div>
       )}
 
-      <div className="flex gap-3">
-        <button onClick={handleContinue} disabled={submitting || loading} className="flex-1 bg-green-600 text-white text-sm font-semibold py-3 rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors">
-          {submitting ? "Saving…" : assets.length === 0 ? "Skip assets — Continue →" : "Continue →"}
-        </button>
-      </div>
+      <button
+        onClick={handleContinue}
+        disabled={submitting || loading}
+        className="w-full bg-green-600 text-white text-sm font-semibold py-3 rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors"
+      >
+        {submitting ? "Saving…" : "Continue →"}
+      </button>
     </div>
   );
 }
@@ -1345,6 +1542,8 @@ function Step5Team({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [locations, setLocations] = useState<OnboardingLocation[]>([]);
+  const [unmatchedLocations, setUnmatchedLocations] = useState<string[]>([]);
+  const [addingLocations, setAddingLocations] = useState(false);
   const [manualForm, setManualForm] = useState<Omit<OnboardingEmployee, "id" | "status">>({
     full_name: "",
     email: "",

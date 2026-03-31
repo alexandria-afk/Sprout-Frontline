@@ -7,6 +7,7 @@ import { z } from "zod";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Zap, Sparkles, Building2, Trash2, LogIn } from "lucide-react";
 import { createClient } from "@/services/supabase/client";
+import { deleteDemoWorkspace } from "@/services/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const DEMO_WORKSPACES_KEY = "sprout_demo_workspaces";
@@ -59,6 +60,7 @@ export function LoginForm() {
   const [onboardingLoading, setOnboardingLoading] = useState(false);
   const [companyName, setCompanyName] = useState("");
   const [demoWorkspaces, setDemoWorkspaces] = useState<DemoWorkspace[]>([]);
+  const [deletingWorkspace, setDeletingWorkspace] = useState<string | null>(null);
 
   // Load from localStorage after mount (client-only)
   useEffect(() => {
@@ -142,9 +144,29 @@ export function LoginForm() {
     }
   }
 
-  function deleteWorkspace(org_id: string) {
-    removeDemoWorkspace(org_id);
-    setDemoWorkspaces(loadDemoWorkspaces());
+  async function deleteWorkspace(ws: DemoWorkspace) {
+    setDeletingWorkspace(ws.org_id);
+    try {
+      // Sign in as that workspace's admin
+      const signInErr = await doSignIn(ws.email, ws.password ?? "Test1234!");
+      if (signInErr) {
+        // Can't auth — just remove from local list
+        removeDemoWorkspace(ws.org_id);
+        setDemoWorkspaces(loadDemoWorkspaces());
+        return;
+      }
+      // Wipe from DB
+      await deleteDemoWorkspace(ws.org_id);
+      // Sign back out
+      const supabase = createClient();
+      await supabase.auth.signOut();
+    } catch {
+      // Best effort — still remove from local list
+    } finally {
+      removeDemoWorkspace(ws.org_id);
+      setDemoWorkspaces(loadDemoWorkspaces());
+      setDeletingWorkspace(null);
+    }
   }
 
   async function quickLogin(email: string) {
@@ -292,11 +314,14 @@ export function LoginForm() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => deleteWorkspace(ws.org_id)}
-                    className="text-slate-300 hover:text-red-400 transition-colors flex-shrink-0"
-                    title="Remove from list"
+                    onClick={() => deleteWorkspace(ws)}
+                    disabled={deletingWorkspace === ws.org_id}
+                    className="text-slate-300 hover:text-red-400 transition-colors flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Delete workspace"
                   >
-                    <Trash2 size={13} />
+                    {deletingWorkspace === ws.org_id
+                      ? <Loader2 size={13} className="animate-spin text-red-400" />
+                      : <Trash2 size={13} />}
                   </button>
                 </div>
               ))}

@@ -73,13 +73,10 @@ const STAGE_TYPES = [
 ];
 
 const TRIGGER_TYPES = [
-  { value: "manual",           label: "Manual" },
-  { value: "audit_submitted",  label: "Audit Submitted" },
-  { value: "issue_created",    label: "Issue Created" },
-  { value: "incident_created", label: "Incident Created" },
-  { value: "scheduled",        label: "Scheduled" },
-  { value: "form_submitted",   label: "Form Submitted" },
-  { value: "employee_created", label: "Employee Created" },
+  { value: "manual",           label: "Manual",           description: "User explicitly starts the workflow by filling a linked form" },
+  { value: "form_submitted",   label: "Form Submitted",   description: "Auto-fires when a specific form is submitted" },
+  { value: "issue_created",    label: "Issue Created",    description: "Auto-fires when an issue is filed in a specific category" },
+  { value: "employee_created", label: "Employee Created", description: "Auto-fires when a new employee is added to the system" },
 ];
 
 const ROLES = [
@@ -208,7 +205,7 @@ export default function WorkflowBuilderPage() {
   }, []);
 
   useEffect(() => {
-    const needsPicker = ["audit_submitted", "form_submitted", "issue_created", "incident_created"].includes(triggerType);
+    const needsPicker = ["manual", "form_submitted"].includes(triggerType);
     if (!needsPicker) return;
     loadTriggerTemplates();
   }, [triggerType, loadTriggerTemplates]);
@@ -320,6 +317,32 @@ export default function WorkflowBuilderPage() {
   const selectedStage = stages.find((s) => s.id === selectedStageId) ?? null;
   const isLive = isActive && activeInstanceCount > 0;
 
+  // Trigger config validation — determines whether publish/save should be disabled
+  const triggerConfigValid: boolean = (() => {
+    if (triggerType === "manual" || triggerType === "form_submitted") {
+      return !!(triggerConfig.form_template_id);
+    }
+    if (triggerType === "issue_created") {
+      // issue_category_id is required for issue_created
+      return !!(triggerConfig.issue_category_id);
+    }
+    // employee_created has no required fields
+    return true;
+  })();
+
+  const triggerConfigWarning: string | null = (() => {
+    if (triggerType === "manual" && !triggerConfig.form_template_id) {
+      return "A Starting Form is required for Manual triggers.";
+    }
+    if (triggerType === "form_submitted" && !triggerConfig.form_template_id) {
+      return "A Trigger Form is required for Form Submitted triggers.";
+    }
+    if (triggerType === "issue_created" && !triggerConfig.issue_category_id) {
+      return "An Issue Category is required for Issue Created triggers.";
+    }
+    return null;
+  })();
+
   // Extract the stage name from a publish error string like `Stage "Foo" has no assignee.`
   function errorToStageId(msg: string): string | null {
     const match = msg.match(/Stage "([^"]+)"/);
@@ -396,7 +419,10 @@ export default function WorkflowBuilderPage() {
           </>
         ) : (
           <>
-            <button onClick={saveHeader} disabled={saving}
+            <button
+              onClick={saveHeader}
+              disabled={saving || !triggerConfigValid}
+              title={!triggerConfigValid ? (triggerConfigWarning ?? undefined) : undefined}
               className="text-xs font-medium text-dark/50 hover:text-dark border border-[#E8EDF2] px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40">
               {saving ? "Saving…" : saved && !isDirty ? "Saved ✓" : "Save"}
             </button>
@@ -441,7 +467,8 @@ export default function WorkflowBuilderPage() {
                   }
                 } finally { setSaving(false); }
               }}
-              disabled={saving}
+              disabled={saving || !triggerConfigValid}
+              title={!triggerConfigValid ? (triggerConfigWarning ?? undefined) : undefined}
               className="flex items-center gap-1.5 bg-sprout-green text-white text-xs font-semibold px-3 py-1.5 rounded-lg hover:bg-sprout-green/90 disabled:opacity-50 transition-colors">
               <Save className="w-3.5 h-3.5" />
               {saving ? "Activating…" : "Save & Activate"}
@@ -484,6 +511,15 @@ export default function WorkflowBuilderPage() {
             })}
           </ul>
           <p className="text-[10px] text-red-400 mt-2">Fix these issues before publishing. Click an error to jump to that stage.</p>
+        </div>
+      )}
+
+      {/* Trigger config warning banner */}
+      {!isActive && triggerConfigWarning && (
+        <div className="px-6 py-2 bg-amber-50 border-b border-amber-200 flex items-center gap-2 text-xs text-amber-700 shrink-0">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span>{triggerConfigWarning}</span>
+          <span className="text-amber-500 ml-1">— set this in the Trigger panel on the left.</span>
         </div>
       )}
 
@@ -530,10 +566,12 @@ export default function WorkflowBuilderPage() {
             )}
 
             {/* Trigger config */}
-            {["audit_submitted", "form_submitted"].includes(triggerType) && (
+            {["manual", "form_submitted"].includes(triggerType) && (
               <div className="mt-2">
                 <label className="block text-[10px] text-dark/50 font-semibold mb-1">
-                  {triggerType === "audit_submitted" ? <>Audit Template <span className="text-red-500">*</span></> : <>Form Template <span className="text-red-500">*</span></>}
+                  {triggerType === "manual"
+                    ? <>Starting Form <span className="text-red-500">*</span></>
+                    : <>Trigger Form <span className="text-red-500">*</span></>}
                 </label>
                 {isActive ? (
                   <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-[#E8EDF2] text-xs text-dark/50 truncate">
@@ -550,9 +588,7 @@ export default function WorkflowBuilderPage() {
                       }}
                       className="w-full border border-[#E8EDF2] rounded-lg px-2 py-1.5 text-xs text-dark focus:outline-none bg-white">
                       <option value="">— None —</option>
-                      {triggerTemplates
-                        .filter((t) => triggerType === "audit_submitted" ? t.type === "audit" : true)
-                        .map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
+                      {triggerTemplates.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
                     </select>
                     <div className="mt-1.5 space-y-1">
                       {triggerTemplates.length === 0 && (
@@ -578,7 +614,11 @@ export default function WorkflowBuilderPage() {
                     </div>
                   </>
                 )}
-                <p className="text-[10px] text-dark/30 mt-1 leading-snug">Stage 1 will be a read-only review of this submission</p>
+                <p className="text-[10px] text-dark/30 mt-1 leading-snug">
+                  {triggerType === "manual"
+                    ? "Users must fill this form to start the workflow"
+                    : "Workflow fires automatically when this form is submitted"}
+                </p>
               </div>
             )}
 
@@ -686,7 +726,7 @@ export default function WorkflowBuilderPage() {
                                 {isStartingStage && (
                                   <div className="px-3 pt-2 pb-0.5 flex items-center justify-between gap-2">
                                     <span className="text-[9px] font-bold text-blue-500 uppercase tracking-wider shrink-0">Trigger</span>
-                                    {["form_submitted","audit_submitted","issue_created","incident_created"].includes(triggerType) && (
+                                    {["manual", "form_submitted"].includes(triggerType) && (
                                       triggerConfig.form_template_id
                                         ? <span className="text-[9px] text-dark/50 truncate font-medium">
                                             {triggerTemplates.find(t => t.id === triggerConfig.form_template_id)?.title ?? ""}
@@ -888,7 +928,7 @@ function GenerateFormInlineModal({
   onClose: () => void;
   onCreated: (template: { id: string; title: string }) => void;
 }) {
-  const defaultType = triggerType === "audit_submitted" ? "audit" : "form";
+  const defaultType = "form";
   const [extraDetails, setExtraDetails] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1162,7 +1202,7 @@ function StageConfigDrawer({
 
         {stage.action_type === "fill_form" && (
           <div>
-            {isFirstStage && (triggerType === "audit_submitted" || triggerType === "form_submitted") ? (
+            {isFirstStage && triggerType === "form_submitted" ? (
               /* Read-only review — template is locked to the trigger's template */
               <div>
                 <label className="block text-xs font-semibold text-dark/60 mb-1.5">Linked Template</label>
@@ -1195,9 +1235,6 @@ function StageConfigDrawer({
                 </label>
                 {isFirstStage && triggerType === "issue_created" && (
                   <p className="text-[10px] text-dark/40 mb-1.5">This form captures investigation details for the created issue.</p>
-                )}
-                {isFirstStage && triggerType === "incident_created" && (
-                  <p className="text-[10px] text-dark/40 mb-1.5">This form captures investigation details for the created incident.</p>
                 )}
                 <select
                   value={config.form_template_id ?? ""}

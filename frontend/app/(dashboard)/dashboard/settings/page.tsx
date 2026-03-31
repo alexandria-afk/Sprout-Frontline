@@ -61,7 +61,7 @@ const SETTINGS_ITEMS = [
     roles: "Admin",
   },
   {
-    href: "/dashboard/shifts?tab=settings",
+    href: "/dashboard/settings/shift-settings",
     icon: CalendarClock,
     label: "Shift Settings",
     description: "Configure attendance rules — late thresholds, overtime limits, and break durations for your organisation.",

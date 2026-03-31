@@ -2,7 +2,7 @@ import uuid
 import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from dependencies import get_current_user
+from dependencies import get_current_user, require_admin
 from services.auth_service import AuthService
 from services.supabase_client import get_supabase
 from models.auth import LoginRequest, ChangePasswordRequest
@@ -108,3 +108,77 @@ async def demo_start(body: DemoStartRequest):
         org_id=org_id,
         session_id=session_id,
     )
+
+
+@router.delete("/demo/{org_id}")
+async def delete_demo_workspace(
+    org_id: str,
+    current_user: dict = Depends(require_admin),
+):
+    """
+    Permanently delete a demo workspace and all its data.
+    Requires admin or super_admin role. User must belong to the org being deleted.
+    """
+    app_meta = current_user.get("app_metadata") or {}
+
+    # Only super_admin may wipe an org
+    if app_meta.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="Super-admin access required.")
+
+    sb = get_supabase()
+
+    # Verify caller belongs to this org
+    caller_org = app_meta.get("organisation_id")
+    if str(caller_org) != str(org_id):
+        raise HTTPException(status_code=403, detail="Not your organisation.")
+
+    # Collect user IDs to delete from auth
+    profiles_res = sb.table("profiles").select("id").eq("organisation_id", org_id).execute()
+    user_ids = [p["id"] for p in (profiles_res.data or [])]
+
+    # Delete all org data in dependency order
+    # Children before parents (FK constraints)
+    for tbl in [
+        # Issue children
+        "issue_attachments", "issue_comments", "issue_status_history",
+        # Task children
+        "task_assignments", "task_read_receipts", "task_comments",
+        # Workflow children
+        "workflow_stage_instances", "workflow_instances",
+        # Form children
+        "form_submissions", "form_assignments",
+        # LMS children
+        "course_enrollments", "ai_course_jobs",
+        # Gamification
+        "user_badge_awards", "user_points",
+        # Shift children
+        "shift_claims", "shift_swaps", "leave_requests", "timesheets",
+        # Onboarding children
+        "onboarding_selections", "role_mappings", "onboarding_employees",
+        "onboarding_assets", "onboarding_vendors", "onboarding_locations",
+        # Main entities
+        "issues", "tasks", "task_templates",
+        "shifts", "shift_templates", "attendance_rules",
+        "repair_guides", "courses", "assets", "vendors",
+        "workflow_definitions", "issue_categories",
+        "form_templates", "badge_configs", "leaderboard_configs",
+        "locations", "onboarding_sessions",
+        # Users
+        "profiles",
+    ]:
+        try:
+            sb.table(tbl).delete().eq("organisation_id", org_id).execute()
+        except Exception:
+            pass  # Table may not exist or column name differs — continue
+
+    # Delete the organisation itself
+    sb.table("organisations").delete().eq("id", org_id).execute()
+
+    # Delete auth users
+    for uid in user_ids:
+        try:
+            sb.auth.admin.delete_user(uid)
+        except Exception:
+            pass
+
+    return {"ok": True}
