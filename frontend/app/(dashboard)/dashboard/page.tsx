@@ -183,6 +183,28 @@ function DailyBriefCard({ role, name, orgId }: { role: string; name: string; org
         const auditRate    = dash30?.audit_compliance_rate != null
           ? Math.round(dash30.audit_compliance_rate * 100) : null;
 
+        // Aging context for brief
+        let agingTaskBreaches = 0;
+        let agingIssueBreaches = 0;
+        let oldestLocationName = "";
+        let itemsOver7d = 0;
+
+        try {
+          const [taskAging, issueAging] = await Promise.all([
+            apiFetch<{ summary: { sla_breach_count: number }; by_location: { location_name: string; avg_age_hours: number }[]; aging_buckets: { bucket: string; count: number }[] }>("/api/v1/reports/aging/tasks"),
+            apiFetch<{ summary: { sla_breach_count: number }; by_location: { location_name: string; avg_age_hours: number }[] }>("/api/v1/reports/aging/issues"),
+          ]);
+          agingTaskBreaches = taskAging.summary?.sla_breach_count ?? 0;
+          agingIssueBreaches = issueAging.summary?.sla_breach_count ?? 0;
+          const allLocations = [...(taskAging.by_location ?? []), ...(issueAging.by_location ?? [])];
+          if (allLocations.length > 0) {
+            const worst = allLocations.reduce((a, b) => a.avg_age_hours > b.avg_age_hours ? a : b);
+            oldestLocationName = worst.location_name;
+          }
+          const over7dBucket = taskAging.aging_buckets?.find((b) => b.bucket === "> 7d");
+          itemsOver7d = over7dBucket?.count ?? 0;
+        } catch { /* non-fatal */ }
+
         const flags: string[] = [];
         if (critCount > 0)    flags.push(`${critCount} critical open issue${critCount !== 1 ? "s" : ""}`);
         if (overdueCount > 0) flags.push(`${overdueCount} overdue task${overdueCount !== 1 ? "s" : ""}`);
@@ -204,6 +226,13 @@ function DailyBriefCard({ role, name, orgId }: { role: string; name: string; org
                               ` Audit compliance is at ${auditRate}%, below the minimum threshold — review recent failures.`;
           text += auditSentence;
         }
+
+        // Sentence 3: aging / SLA
+        const agingNote =
+          agingTaskBreaches + agingIssueBreaches > 0
+            ? ` ${agingTaskBreaches + agingIssueBreaches} item${agingTaskBreaches + agingIssueBreaches !== 1 ? "s" : ""} are past SLA${oldestLocationName ? ` — ${oldestLocationName} has the longest average age` : ""}${itemsOver7d > 0 ? `, and ${itemsOver7d} task${itemsOver7d !== 1 ? "s" : ""} have been open over 7 days` : ""}.`
+            : "";
+        text += agingNote;
       }
 
       const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

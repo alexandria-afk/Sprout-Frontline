@@ -169,6 +169,14 @@ def _get_pullout_template_ids(sb, org_id: str) -> list:
     return [r["id"] for r in (res.data or [])]
 
 
+_TASK_SLA_HOURS = {
+    "critical": 4,
+    "high": 24,
+    "medium": 72,   # 3 days
+    "low": 168,     # 7 days
+}
+
+
 # ── Pull-Out / Wastage Reports ─────────────────────────────────────────────
 
 @router.get("/pull-outs/summary")
@@ -435,3 +443,446 @@ def get_pullout_anomalies(
 
     anomalies.sort(key=lambda x: -x["ratio"])
     return {"anomalies": anomalies, "locations_checked": len(loc_weekly)}
+
+
+# ── Aging Analytics ────────────────────────────────────────────────────────
+
+@router.get("/aging/tasks")
+def get_aging_tasks(
+    location_id: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Task aging report: open age, SLA breach counts, aging buckets."""
+    org_id = _get_org(current_user)
+    sb = get_admin_client()
+    from datetime import datetime as dt, timezone
+
+    q = (
+        sb.table("tasks")
+        .select("id, title, priority, status, created_at, completed_at, location_id, locations(name)")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+    )
+    if location_id:
+        q = q.eq("location_id", location_id)
+    if priority:
+        q = q.eq("priority", priority)
+    if status:
+        q = q.eq("status", status)
+    if date_from:
+        q = q.gte("created_at", date_from)
+    if date_to:
+        q = q.lte("created_at", date_to + "T23:59:59")
+
+    tasks = q.execute().data or []
+    now = dt.now(timezone.utc)
+
+    open_statuses = {"pending", "in_progress", "overdue"}
+    closed_statuses = {"completed", "cancelled"}
+
+    total_open = 0
+    total_age_hours = 0.0
+    sla_breach_count = 0
+    by_priority: dict = {}
+    by_location: dict = {}
+    by_status: dict = {}
+    buckets = {"< 4h": 0, "4-24h": 0, "1-3d": 0, "3-7d": 0, "> 7d": 0}
+
+    for t in tasks:
+        s = t.get("status", "pending")
+        pri = t.get("priority", "medium")
+        loc_id = t.get("location_id") or "unknown"
+        loc_name = (t.get("locations") or {}).get("name", "Unknown")
+        created = t.get("created_at", "")
+        completed = t.get("completed_at")
+
+        try:
+            created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+
+        if s in closed_statuses and completed:
+            try:
+                end_dt = dt.fromisoformat(str(completed).replace("Z", "+00:00"))
+                age_h = (end_dt - created_dt).total_seconds() / 3600
+            except (ValueError, AttributeError):
+                age_h = (now - created_dt).total_seconds() / 3600
+        else:
+            age_h = (now - created_dt).total_seconds() / 3600
+
+        sla_h = _TASK_SLA_HOURS.get(pri, 72)
+        breached = age_h > sla_h
+
+        # Open summary
+        if s in open_statuses:
+            total_open += 1
+            total_age_hours += age_h
+            if breached:
+                sla_breach_count += 1
+
+        # By priority
+        if pri not in by_priority:
+            by_priority[pri] = {"priority": pri, "open_count": 0, "total_age_h": 0.0,
+                                 "sla_breach_count": 0, "oldest_age_h": 0.0}
+        if s in open_statuses:
+            by_priority[pri]["open_count"] += 1
+            by_priority[pri]["total_age_h"] += age_h
+            if breached:
+                by_priority[pri]["sla_breach_count"] += 1
+            if age_h > by_priority[pri]["oldest_age_h"]:
+                by_priority[pri]["oldest_age_h"] = age_h
+
+        # By location
+        if loc_id not in by_location:
+            by_location[loc_id] = {"location_id": loc_id, "location_name": loc_name,
+                                    "open_count": 0, "total_age_h": 0.0, "sla_breach_count": 0}
+        if s in open_statuses:
+            by_location[loc_id]["open_count"] += 1
+            by_location[loc_id]["total_age_h"] += age_h
+            if breached:
+                by_location[loc_id]["sla_breach_count"] += 1
+
+        # By status
+        if s not in by_status:
+            by_status[s] = {"status": s, "count": 0, "total_age_h": 0.0}
+        by_status[s]["count"] += 1
+        by_status[s]["total_age_h"] += age_h
+
+        # Aging buckets (open items only)
+        if s in open_statuses:
+            if age_h < 4:
+                buckets["< 4h"] += 1
+            elif age_h < 24:
+                buckets["4-24h"] += 1
+            elif age_h < 72:
+                buckets["1-3d"] += 1
+            elif age_h < 168:
+                buckets["3-7d"] += 1
+            else:
+                buckets["> 7d"] += 1
+
+    avg_age = round(total_age_hours / total_open, 1) if total_open else 0.0
+    sla_pct = round(100 * sla_breach_count / total_open, 1) if total_open else 0.0
+
+    pri_out = []
+    for p in ["critical", "high", "medium", "low"]:
+        if p in by_priority:
+            d = by_priority[p]
+            c = d["open_count"]
+            pri_out.append({
+                "priority": p,
+                "open_count": c,
+                "avg_age_hours": round(d["total_age_h"] / c, 1) if c else 0.0,
+                "sla_breach_count": d["sla_breach_count"],
+                "oldest_age_hours": round(d["oldest_age_h"], 1),
+            })
+
+    loc_out = sorted([
+        {
+            "location_id": v["location_id"],
+            "location_name": v["location_name"],
+            "open_count": v["open_count"],
+            "avg_age_hours": round(v["total_age_h"] / v["open_count"], 1) if v["open_count"] else 0.0,
+            "sla_breach_count": v["sla_breach_count"],
+        }
+        for v in by_location.values() if v["open_count"] > 0
+    ], key=lambda x: -x["avg_age_hours"])
+
+    status_out = [
+        {
+            "status": v["status"],
+            "count": v["count"],
+            "avg_age_hours": round(v["total_age_h"] / v["count"], 1) if v["count"] else 0.0,
+        }
+        for v in by_status.values()
+    ]
+
+    return {
+        "summary": {
+            "total_open": total_open,
+            "avg_age_hours": avg_age,
+            "sla_breach_count": sla_breach_count,
+            "sla_breach_pct": sla_pct,
+        },
+        "by_priority": pri_out,
+        "by_location": loc_out,
+        "by_status": status_out,
+        "aging_buckets": [{"bucket": k, "count": v} for k, v in buckets.items()],
+    }
+
+
+@router.get("/aging/issues")
+def get_aging_issues(
+    location_id: Optional[str] = Query(None),
+    category_id: Optional[str] = Query(None),
+    priority: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Issue aging report: open age, SLA breach counts from category sla_hours."""
+    org_id = _get_org(current_user)
+    sb = get_admin_client()
+    from datetime import datetime as dt, timezone
+
+    q = (
+        sb.table("issues")
+        .select("id, title, priority, status, created_at, resolved_at, location_id, category_id, locations(name), issue_categories(name, sla_hours)")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+    )
+    if location_id:
+        q = q.eq("location_id", location_id)
+    if category_id:
+        q = q.eq("category_id", category_id)
+    if priority:
+        q = q.eq("priority", priority)
+    if status:
+        q = q.eq("status", status)
+    if date_from:
+        q = q.gte("created_at", date_from)
+    if date_to:
+        q = q.lte("created_at", date_to + "T23:59:59")
+
+    issues = q.execute().data or []
+    now = dt.now(timezone.utc)
+
+    open_statuses = {"open", "in_progress", "pending_vendor"}
+    closed_statuses = {"resolved", "closed"}
+
+    total_open = 0
+    total_age_hours = 0.0
+    sla_breach_count = 0
+    by_category: dict = {}
+    by_location: dict = {}
+    by_priority: dict = {}
+    buckets = {"< 4h": 0, "4-24h": 0, "1-3d": 0, "3-7d": 0, "> 7d": 0}
+
+    for issue in issues:
+        s = issue.get("status", "open")
+        pri = issue.get("priority", "medium")
+        loc_id = issue.get("location_id") or "unknown"
+        loc_name = (issue.get("locations") or {}).get("name", "Unknown")
+        cat_id = issue.get("category_id") or "unknown"
+        cat = issue.get("issue_categories") or {}
+        cat_name = cat.get("name", "Unknown")
+        sla_h = cat.get("sla_hours") or 24
+        created = issue.get("created_at", "")
+        resolved = issue.get("resolved_at")
+
+        try:
+            created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+
+        if s in closed_statuses and resolved:
+            try:
+                end_dt = dt.fromisoformat(str(resolved).replace("Z", "+00:00"))
+                age_h = (end_dt - created_dt).total_seconds() / 3600
+            except (ValueError, AttributeError):
+                age_h = (now - created_dt).total_seconds() / 3600
+        else:
+            age_h = (now - created_dt).total_seconds() / 3600
+
+        breached = age_h > sla_h
+
+        if s in open_statuses:
+            total_open += 1
+            total_age_hours += age_h
+            if breached:
+                sla_breach_count += 1
+
+        # By category
+        if cat_id not in by_category:
+            by_category[cat_id] = {"category_id": cat_id, "category_name": cat_name,
+                                    "open_count": 0, "total_age_h": 0.0,
+                                    "sla_breach_count": 0, "sla_hours": sla_h}
+        if s in open_statuses:
+            by_category[cat_id]["open_count"] += 1
+            by_category[cat_id]["total_age_h"] += age_h
+            if breached:
+                by_category[cat_id]["sla_breach_count"] += 1
+
+        # By location
+        if loc_id not in by_location:
+            by_location[loc_id] = {"location_id": loc_id, "location_name": loc_name,
+                                    "open_count": 0, "total_age_h": 0.0, "sla_breach_count": 0}
+        if s in open_statuses:
+            by_location[loc_id]["open_count"] += 1
+            by_location[loc_id]["total_age_h"] += age_h
+            if breached:
+                by_location[loc_id]["sla_breach_count"] += 1
+
+        # By priority
+        if pri not in by_priority:
+            by_priority[pri] = {"priority": pri, "open_count": 0, "total_age_h": 0.0, "sla_breach_count": 0}
+        if s in open_statuses:
+            by_priority[pri]["open_count"] += 1
+            by_priority[pri]["total_age_h"] += age_h
+            if breached:
+                by_priority[pri]["sla_breach_count"] += 1
+
+        # Aging buckets
+        if s in open_statuses:
+            if age_h < 4:
+                buckets["< 4h"] += 1
+            elif age_h < 24:
+                buckets["4-24h"] += 1
+            elif age_h < 72:
+                buckets["1-3d"] += 1
+            elif age_h < 168:
+                buckets["3-7d"] += 1
+            else:
+                buckets["> 7d"] += 1
+
+    avg_age = round(total_age_hours / total_open, 1) if total_open else 0.0
+    sla_pct = round(100 * sla_breach_count / total_open, 1) if total_open else 0.0
+
+    cat_out = sorted([
+        {
+            "category_id": v["category_id"],
+            "category_name": v["category_name"],
+            "open_count": v["open_count"],
+            "avg_age_hours": round(v["total_age_h"] / v["open_count"], 1) if v["open_count"] else 0.0,
+            "sla_breach_count": v["sla_breach_count"],
+            "sla_hours": v["sla_hours"],
+        }
+        for v in by_category.values() if v["open_count"] > 0
+    ], key=lambda x: -x["sla_breach_count"])
+
+    loc_out = sorted([
+        {
+            "location_id": v["location_id"],
+            "location_name": v["location_name"],
+            "open_count": v["open_count"],
+            "avg_age_hours": round(v["total_age_h"] / v["open_count"], 1) if v["open_count"] else 0.0,
+            "sla_breach_count": v["sla_breach_count"],
+        }
+        for v in by_location.values() if v["open_count"] > 0
+    ], key=lambda x: -x["avg_age_hours"])
+
+    pri_out = [
+        {
+            "priority": v["priority"],
+            "open_count": v["open_count"],
+            "avg_age_hours": round(v["total_age_h"] / v["open_count"], 1) if v["open_count"] else 0.0,
+            "sla_breach_count": v["sla_breach_count"],
+        }
+        for v in by_priority.values()
+    ]
+
+    return {
+        "summary": {
+            "total_open": total_open,
+            "avg_age_hours": avg_age,
+            "sla_breach_count": sla_breach_count,
+            "sla_breach_pct": sla_pct,
+        },
+        "by_category": cat_out,
+        "by_location": loc_out,
+        "by_priority": pri_out,
+        "aging_buckets": [{"bucket": k, "count": v} for k, v in buckets.items()],
+    }
+
+
+@router.get("/aging/resolution-time")
+def get_resolution_time(
+    location_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    entity_type: str = Query("issue"),  # "task" | "issue"
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Average and median resolution time for completed tasks or resolved issues."""
+    org_id = _get_org(current_user)
+    sb = get_admin_client()
+    from datetime import datetime as dt, timezone
+    from collections import defaultdict
+    import statistics
+
+    if entity_type == "task":
+        q = (
+            sb.table("tasks")
+            .select("created_at, completed_at, location_id, locations(name)")
+            .eq("organisation_id", org_id)
+            .eq("is_deleted", False)
+            .in_("status", ["completed", "cancelled"])
+        )
+        end_col = "completed_at"
+    else:
+        q = (
+            sb.table("issues")
+            .select("created_at, resolved_at, location_id, locations(name)")
+            .eq("organisation_id", org_id)
+            .eq("is_deleted", False)
+            .in_("status", ["resolved", "closed"])
+        )
+        end_col = "resolved_at"
+
+    if location_id:
+        q = q.eq("location_id", location_id)
+    if date_from:
+        q = q.gte("created_at", date_from)
+    if date_to:
+        q = q.lte("created_at", date_to + "T23:59:59")
+
+    rows = q.execute().data or []
+
+    resolution_hours: list = []
+    period_map: dict = defaultdict(list)
+    loc_map: dict = defaultdict(list)
+
+    for row in rows:
+        created = row.get("created_at")
+        ended = row.get(end_col)
+        if not created or not ended:
+            continue
+        try:
+            c_dt = dt.fromisoformat(str(created).replace("Z", "+00:00"))
+            e_dt = dt.fromisoformat(str(ended).replace("Z", "+00:00"))
+            h = (e_dt - c_dt).total_seconds() / 3600
+            if h < 0:
+                continue
+        except (ValueError, AttributeError):
+            continue
+
+        resolution_hours.append(h)
+        period_key = c_dt.strftime("%Y-%m")
+        period_map[period_key].append(h)
+
+        loc_id = row.get("location_id") or "unknown"
+        loc_name = (row.get("locations") or {}).get("name", "Unknown")
+        loc_map[(loc_id, loc_name)].append(h)
+
+    avg_h = round(sum(resolution_hours) / len(resolution_hours), 1) if resolution_hours else 0.0
+    median_h = round(statistics.median(resolution_hours), 1) if resolution_hours else 0.0
+
+    by_period = [
+        {
+            "period": period,
+            "avg_resolution_hours": round(sum(hrs) / len(hrs), 1),
+            "total_resolved": len(hrs),
+        }
+        for period, hrs in sorted(period_map.items())
+    ]
+
+    by_location = sorted([
+        {
+            "location_name": loc_name,
+            "avg_resolution_hours": round(sum(hrs) / len(hrs), 1),
+            "total_resolved": len(hrs),
+        }
+        for (loc_id, loc_name), hrs in loc_map.items()
+    ], key=lambda x: x["avg_resolution_hours"])
+
+    return {
+        "avg_resolution_hours": avg_h,
+        "median_resolution_hours": median_h,
+        "by_period": by_period,
+        "by_location": by_location,
+    }

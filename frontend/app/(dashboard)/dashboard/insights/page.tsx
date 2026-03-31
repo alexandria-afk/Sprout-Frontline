@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   BarChart2, RefreshCw, X, ChevronRight, ClipboardList, AlertOctagon,
   Users, BookOpen, CheckSquare, Trophy, Lightbulb, Sparkles,
-  Filter, MapPin, Calendar, ChevronDown, PackageX,
+  Filter, MapPin, Calendar, ChevronDown, PackageX, Timer,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { apiFetch } from "@/services/api/client";
@@ -103,6 +103,11 @@ const REPORT_GROUPS: {
   { icon:Trophy,      color:"text-amber-600",  bg:"bg-amber-50",  label:"Safety",
     description:"Safety leaderboard rankings and badges awarded",
     reports:[{ label:"Safety Leaderboard", href:"/dashboard/insights/reports/safety/leaderboard" }]},
+  { icon: Timer, color: "text-red-600", bg: "bg-red-50", label: "Aging & SLA",
+    description: "Task and issue age, SLA breach rates, and resolution trends",
+    reports: [
+      { label: "Aging & SLA Report", href: "/dashboard/insights/reports/aging" },
+    ]},
 ];
 
 // ─── AI Insights panel ────────────────────────────────────────────────────────

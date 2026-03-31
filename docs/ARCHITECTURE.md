@@ -1,6 +1,6 @@
 # Architecture Reference
 **Frontline Operations Platform**
-_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic_
+_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature_
 
 ---
 
@@ -439,6 +439,9 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 | `GET` | `/pull-outs/trends` | Pull-out count and cost by day/week/month; filters: date_from, date_to, location_id, granularity |
 | `GET` | `/pull-outs/top-items` | Most frequently pulled-out items with total cost; filters: date_from, date_to, location_id, limit |
 | `GET` | `/pull-outs/anomalies` | Cost-based weekly anomaly detection per location — flags locations where current week cost > 1.5× 4-week rolling average; filter: location_id |
+| `GET` | `/aging/tasks` | Task aging report: total open, avg age (hours), SLA breach count + %, aging buckets (0–4h / 4–24h / 24–72h / 72–168h / 168h+), breakdown by priority / location / status; filters: date_from, date_to, location_id |
+| `GET` | `/aging/issues` | Issue aging report: total open, avg age, SLA breach count + %, aging buckets, breakdown by category / location / priority; SLA per issue uses `issue_categories.sla_hours` (default 24h); filters: date_from, date_to, location_id |
+| `GET` | `/aging/resolution-time` | Avg and median resolution time in hours for closed tasks and issues; by_period (monthly) and by_location breakdown; tasks use `completed_at`, issues use `resolved_at`; filters: date_from, date_to, location_id, entity (tasks\|issues) |
 
 ### Tasks — `/api/v1/tasks`
 
@@ -718,9 +721,9 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 
 | Route | File | Description |
 |---|---|---|
-| `/dashboard` | `(dashboard)/dashboard/page.tsx` | Main home; role-differentiated (admin/manager vs staff); daily AI brief (localStorage cached) |
+| `/dashboard` | `(dashboard)/dashboard/page.tsx` | Main home; role-differentiated (admin/manager vs staff); daily AI brief (localStorage cached). For admin/manager, brief fetches `/reports/aging/tasks` and `/reports/aging/issues` in parallel; if SLA breaches exist, a third sentence is appended naming the worst location and item count. |
 | `/dashboard/tasks` | `dashboard/tasks/page.tsx` | Task list with status, priority, date filters |
-| `/dashboard/issues` | `dashboard/issues/page.tsx` | Issue list with multi-filter |
+| `/dashboard/issues` | `dashboard/issues/page.tsx` | Issue list with multi-filter; includes kanban and list views for both issues and tasks. Age badges on every card/row — color-coded green/yellow/red based on % of SLA elapsed. Issues use `issue_categories.sla_hours` (default 24h); tasks use `_TASK_SLA_HOURS` (critical=4h, high=24h, medium=72h, low=168h). `/dashboard/tasks` redirects here. |
 | `/dashboard/issues/categories` | `dashboard/issues/categories/page.tsx` | Issue category editor (custom fields, escalation rules) |
 | `/dashboard/issues/dashboard` | `dashboard/issues/dashboard/page.tsx` | Issue analytics (trends, by-location, by-asset, recurring) |
 | `/dashboard/audits` | `dashboard/audits/page.tsx` | Audit submission list |
@@ -759,6 +762,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/insights/reports/issues/summary` | `...issues/summary/page.tsx` | Issue summary report |
 | `/dashboard/insights/reports/issues/recurring` | `...issues/recurring/page.tsx` | Recurring issues report |
 | `/dashboard/insights/reports/compliance` | `...reports/compliance/page.tsx` | Compliance trend report |
+| `/dashboard/insights/reports/aging` | `...reports/aging/page.tsx` | Aging & SLA report — Issues/Tasks toggle, date-range filter, summary cards (Total Open / Avg Age / SLA Breaches / Breach Rate), aging bucket bar chart, resolution time trend line with avg+median callout, by-location table, by-category/priority table |
 | `/dashboard/vendors` | `dashboard/vendors/page.tsx` | Vendor list and category access management |
 | `/dashboard/settings` | `dashboard/settings/page.tsx` | Settings overview |
 | `/dashboard/settings/locations` | `dashboard/settings/locations/page.tsx` | Location management |
@@ -941,7 +945,7 @@ All JSON responses from Claude are stripped of markdown code fences before `json
 | `POST /ai/translate-course` | Translates course content JSON to a target language |
 | `POST /ai/knowledge-gaps` | Analyses quiz attempt history; returns gap summary and recommended topics |
 | `POST /ai/learning-path` | Returns an ordered list of course recommendations with reasons |
-| `POST /ai/chat` | Sidekick assistant; general-purpose chat with context about the org; streaming supported |
+| `POST /ai/chat` | Sidekick assistant; general-purpose chat with context about the org; streaming supported. Keyword detection injects aging/SLA context (open tasks, SLA breaches, oldest-item age by location) when the message contains terms like "overdue", "sla", "aging", "stuck", "breach", "past due", etc. Pull-out context is also injected when the message mentions wastage or pull-outs. |
 
 ### LMS (`backend/services/lms_service.py`)
 

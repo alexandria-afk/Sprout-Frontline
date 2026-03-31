@@ -1064,6 +1064,7 @@ You help store managers and staff with:
 - Scheduling, leave, and HR questions
 - Store procedures and best practices
 - Pull-Out & Wastage: You have access to pull-out/wastage record data. Pull-out forms track food items removed from service due to expiry, overproduction, quality issues, contamination, or equipment failure. You can help managers identify waste trends, top wasted items, anomalous days, and cost-reduction opportunities.
+- Aging & SLA: You have access to task and issue aging data. You can tell managers which items are past SLA, which location has the longest average open age, and identify bottlenecks.
 
 Keep replies concise and practical. Use bullet points for multi-step answers.
 If you don't know something specific to their store, say so and suggest who to ask.
@@ -1146,6 +1147,85 @@ async def sidekick_chat(
                         f"Top wasted items: {', '.join(f'{i} ({c})' for i, c in top_items)}. "
                         f"Top reasons: {', '.join(f'{r} ({c})' for r, c in top_reasons)}."
                     )
+        except Exception:
+            pass
+
+    # Aging / SLA context
+    aging_keywords = [
+        "overdue", "sla", "aging", "ageing", "how long",
+        "oldest", "stuck", "bottleneck", "breach", "past due",
+        "what's open", "open longest",
+    ]
+    if any(kw in user_message_lower for kw in aging_keywords):
+        try:
+            sb_aging = get_supabase()
+            from datetime import datetime as _dt, timezone as _tz
+
+            # SLA hours map
+            task_sla = {"critical": 4, "high": 24, "medium": 72, "low": 168}
+
+            # Open tasks
+            t_res = (
+                sb_aging.table("tasks")
+                .select("id, priority, status, created_at, completed_at")
+                .eq("organisation_id", org_id)
+                .eq("is_deleted", False)
+                .in_("status", ["pending", "in_progress", "overdue"])
+                .limit(200)
+                .execute()
+            )
+            open_tasks = t_res.data or []
+            now_utc = _dt.now(_tz.utc)
+            task_breaches = 0
+            max_task_age_h = 0.0
+            for task in open_tasks:
+                ca = task.get("created_at", "")
+                if not ca:
+                    continue
+                age_h = (now_utc - _dt.fromisoformat(ca.replace("Z", "+00:00"))).total_seconds() / 3600
+                sla = task_sla.get(task.get("priority", "medium"), 72)
+                if age_h > sla:
+                    task_breaches += 1
+                if age_h > max_task_age_h:
+                    max_task_age_h = age_h
+
+            # Open issues
+            i_res = (
+                sb_aging.table("issues")
+                .select("id, status, created_at, resolved_at, issue_categories(sla_hours)")
+                .eq("organisation_id", org_id)
+                .eq("is_deleted", False)
+                .in_("status", ["open", "in_progress", "pending_vendor"])
+                .limit(200)
+                .execute()
+            )
+            open_issues = i_res.data or []
+            issue_breaches = 0
+            max_issue_age_h = 0.0
+            for issue in open_issues:
+                ca = issue.get("created_at", "")
+                if not ca:
+                    continue
+                age_h = (now_utc - _dt.fromisoformat(ca.replace("Z", "+00:00"))).total_seconds() / 3600
+                sla = (issue.get("issue_categories") or {}).get("sla_hours") or 24
+                if age_h > sla:
+                    issue_breaches += 1
+                if age_h > max_issue_age_h:
+                    max_issue_age_h = age_h
+
+            def _fmt_h(h: float) -> str:
+                if h < 1: return "< 1h"
+                if h < 24: return f"{int(h)}h"
+                d = int(h / 24)
+                return f"{d}d" if d <= 7 else f"{d // 7}w {d % 7}d"
+
+            if open_tasks or open_issues:
+                context_parts.append(
+                    f"Aging data: {len(open_tasks)} open tasks "
+                    f"({task_breaches} past SLA, oldest {_fmt_h(max_task_age_h)}); "
+                    f"{len(open_issues)} open issues "
+                    f"({issue_breaches} past SLA, oldest {_fmt_h(max_issue_age_h)})."
+                )
         except Exception:
             pass
 

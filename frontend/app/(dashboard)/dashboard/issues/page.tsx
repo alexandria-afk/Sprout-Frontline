@@ -123,6 +123,59 @@ const MANAGER_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed", 
 const STAFF_COLS: TaskStatus[] = ["pending", "in_progress", "completed"];
 const STAFF_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed"];
 
+// ── Aging helpers ─────────────────────────────────────────────────────────────
+const TASK_SLA_HOURS: Record<string, number> = {
+  critical: 4,
+  high: 24,
+  medium: 72,
+  low: 168,
+};
+
+function calcAgeHours(
+  createdAt: string,
+  status: string,
+  resolvedAt?: string | null,
+): number {
+  const closedStatuses = ["completed", "cancelled", "resolved", "closed"];
+  const start = new Date(createdAt).getTime();
+  const end =
+    closedStatuses.includes(status) && resolvedAt
+      ? new Date(resolvedAt).getTime()
+      : Date.now();
+  return (end - start) / 3_600_000;
+}
+
+function formatAge(hours: number): string {
+  if (hours < 1) return "< 1h";
+  if (hours < 24) return `${Math.floor(hours)}h`;
+  const days = Math.floor(hours / 24);
+  if (days <= 7) return `${days}d`;
+  const weeks = Math.floor(days / 7);
+  const rem = days % 7;
+  return rem > 0 ? `${weeks}w ${rem}d` : `${weeks}w`;
+}
+
+type AgeColor = "green" | "yellow" | "red";
+
+function taskAgeColor(hours: number, priority: string): AgeColor {
+  const sla = TASK_SLA_HOURS[priority] ?? 72;
+  if (hours > sla) return "red";
+  if (hours > sla * 0.5) return "yellow";
+  return "green";
+}
+
+function issueAgeColor(hours: number, slaHours: number): AgeColor {
+  if (hours > slaHours) return "red";
+  if (hours > slaHours * 0.5) return "yellow";
+  return "green";
+}
+
+const AGE_BADGE_CLS: Record<AgeColor, string> = {
+  green: "bg-green-100 text-green-700",
+  yellow: "bg-amber-100 text-amber-700",
+  red:    "bg-red-100 text-red-700",
+};
+
 // ── Incidents types & helpers ─────────────────────────────────────────────────
 
 type IncidentSeverity = "low" | "medium" | "high" | "critical";
@@ -1119,6 +1172,18 @@ function IssueCard({ issue, onClick, highlighted }: { issue: Issue; onClick: () 
             From Incident
           </span>
         )}
+        {/* Age badge */}
+        {(() => {
+          const hours = calcAgeHours(issue.created_at, issue.status, issue.resolved_at);
+          const slaHours = issue.issue_categories?.sla_hours ?? 24;
+          const open = ["open", "in_progress", "pending_vendor"].includes(issue.status);
+          const color = open ? issueAgeColor(hours, slaHours) : "green";
+          return (
+            <span className={clsx("flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium", AGE_BADGE_CLS[color])}>
+              <Clock className="w-2.5 h-2.5" />{formatAge(hours)}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Category */}
@@ -2994,6 +3059,19 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
                       <Wrench className="w-3 h-3" /> Asset
                     </span>
                   )}
+                  {/* Age badge */}
+                  {(() => {
+                    const openStatuses = ["open", "in_progress", "pending_vendor"];
+                    const isOpen = openStatuses.includes(issue.status);
+                    const hours = calcAgeHours(issue.created_at, issue.status, issue.resolved_at);
+                    const slaHours = issue.issue_categories?.sla_hours ?? 24;
+                    const color = isOpen ? issueAgeColor(hours, slaHours) : "green";
+                    return (
+                      <span className={clsx("flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium", AGE_BADGE_CLS[color])}>
+                        <Clock className="w-2.5 h-2.5" />{formatAge(hours)}
+                      </span>
+                    );
+                  })()}
                 </div>
                 {(issue.location_description || issue.reporter) && (
                   <div className="flex items-center gap-3 text-xs text-dark-secondary">
@@ -3377,6 +3455,17 @@ function TaskCard({ task, onClick, highlighted }: { task: Task; onClick: () => v
             <ShieldAlert className="w-3 h-3" /> Audit finding
           </span>
         )}
+        {/* Age badge */}
+        {(() => {
+          const hours = calcAgeHours(task.created_at, task.status, task.completed_at);
+          const open = ["pending", "in_progress", "overdue"].includes(task.status);
+          const color = open ? taskAgeColor(hours, task.priority) : "green";
+          return (
+            <span className={clsx("flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium", AGE_BADGE_CLS[color])}>
+              <Clock className="w-2.5 h-2.5" />{formatAge(hours)}
+            </span>
+          );
+        })()}
       </div>
 
       <div className="flex items-center justify-between gap-2 border-t border-surface-border pt-2 mt-auto">

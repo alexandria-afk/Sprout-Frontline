@@ -181,6 +181,50 @@ The `type` key is optional and ignored for backwards compatibility.
 
 ---
 
+---
+
+## Task SLA Thresholds
+
+Defined in `backend/routes/reports.py` as `_TASK_SLA_HOURS` and mirrored in `frontend/app/(dashboard)/dashboard/issues/page.tsx` as `TASK_SLA_HOURS`.
+
+| Priority | SLA Hours |
+|---|---|
+| `critical` | 4 |
+| `high` | 24 |
+| `medium` | 72 |
+| `low` | 168 |
+
+These constants are used by:
+- `GET /api/v1/reports/aging/tasks` — breach detection
+- `taskAgeColor()` in `issues/page.tsx` — age badge color on task kanban cards and list rows
+- The aging report page (`/dashboard/insights/reports/aging`) — breach counts and bucket chart for tasks
+
+**Issue SLA** comes from `issue_categories.sla_hours` per category (set during AI generation or manual creation). Default fallback: 24 hours.
+
+### Age Badge Color Logic
+
+| Color | Condition |
+|---|---|
+| Green | Age < 50% of SLA |
+| Yellow | Age ≥ 50% and ≤ 100% of SLA |
+| Red | Age > 100% of SLA (breached) |
+
+Age badges appear on every issue card (kanban + list) and every task card (kanban + list) in `dashboard/issues/page.tsx`.
+
+### Aging Bucket Definitions
+
+Used by both `/aging/tasks` and `/aging/issues` endpoints and displayed in the aging report bar chart.
+
+| Bucket | Range |
+|---|---|
+| `0–4h` | Age < 4 hours |
+| `4–24h` | 4 ≤ age < 24 hours |
+| `24–72h` | 24 ≤ age < 72 hours |
+| `72–168h` | 72 ≤ age < 168 hours |
+| `168h+` | Age ≥ 168 hours (7+ days) |
+
+---
+
 ## Updating This File
 
 When new enum values are added via database migration:
