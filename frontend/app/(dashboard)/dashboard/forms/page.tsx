@@ -930,9 +930,16 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
           )}
 
           {watchedType === "pull_out" && (
-            <div className="flex flex-col gap-1.5 p-3 bg-orange-50 border border-orange-200 rounded-xl">
-              <label className="text-sm font-medium text-orange-800">Estimated Cost (required field)</label>
-              <p className="text-xs text-orange-700">Every pull-out submission must include an <strong>Estimated Cost</strong> greater than zero. This field is automatically added to your template — the backend will reject any submission without it.</p>
+            <div className="flex flex-col gap-1 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+              <label className="text-sm font-medium text-amber-800">Estimated Cost</label>
+              <p className="text-xs text-amber-600 mb-1">Every pull-out submission must include an estimated cost greater than zero. The backend will reject submissions without it.</p>
+              <input
+                type="number" min={0} step={0.01}
+                className={`${inputCls} max-w-[160px]`}
+                placeholder="e.g. 150.00"
+                disabled
+                defaultValue=""
+              />
             </div>
           )}
 
@@ -1079,12 +1086,6 @@ function GenerateModal({ onClose, onGenerated }: {
             ))}
           </div>
         </div>
-        {type === "pull_out" && (
-          <div className="flex flex-col gap-1 p-3 bg-orange-50 border border-orange-200 rounded-xl">
-            <p className="text-sm font-medium text-orange-800">Estimated Cost (required field)</p>
-            <p className="text-xs text-orange-700">Every pull-out submission must include an <strong>Estimated Cost</strong> greater than zero. Sidekick will include this field automatically.</p>
-          </div>
-        )}
         {error && <p className="text-xs text-red-500">{error}</p>}
         <div className="flex gap-2 justify-end pt-1">
           <button type="button" onClick={onClose} disabled={loading}
