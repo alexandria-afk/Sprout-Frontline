@@ -127,7 +127,6 @@ const CRITERIA_CATEGORY: Record<string, string> = {
   checklist_streak_days:  "Checklists",
   audit_perfect_score:    "Audits",
   audit_score_improvement:"Audits",
-  audit_perfect_scores:   "Audits",
   training_completed:     "Training",
   training_perfect_score: "Training",
   attendance_streak_days: "Attendance",

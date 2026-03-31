@@ -2,6 +2,7 @@ import json
 import base64
 import uuid
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 import httpx
 import anthropic
@@ -184,7 +185,7 @@ class LmsService:
         supabase = get_supabase()
         updates = {k: v for k, v in body.model_dump().items() if v is not None}
         if updates:
-            updates["updated_at"] = "now()"
+            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
             supabase.table("courses").update(updates).eq("id", course_id).eq("organisation_id", org_id).execute()
         return await LmsService.get_course(course_id, org_id)
 

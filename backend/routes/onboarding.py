@@ -30,6 +30,7 @@ from models.onboarding import (
     WorkspacePreview, LaunchProgress, GuidedAction, LaunchResult, INDUSTRY_DISPLAY,
 )
 from config import settings
+from utils.ai_helpers import _strip_code_fence
 
 import logging as _logging
 _log = _logging.getLogger(__name__)
@@ -71,21 +72,6 @@ def _get_anthropic() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60.0)
 
 
-def _strip_code_fence(text: str) -> str:
-    """Remove markdown code fences from an AI response (```json ... ``` or ``` ... ```)."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text[3:]                          # drop opening ```
-        if text.startswith("json"):
-            text = text[4:]                      # drop language tag
-        text = text.strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()             # drop closing ```
-        elif "```" in text:
-            text = text[:text.index("```")].strip()
-    return text
-
-
 def _get_org_id(current_user: dict) -> str:
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     if not org_id:
@@ -102,6 +88,12 @@ def _get_session(session_id: str, org_id: str) -> dict:
 
 
 def _require_step(session: dict, expected_step: int):
+    """Enforce a minimum step gate on the session.
+
+    Allows sessions at any step >= expected_step to proceed, enabling admins to
+    revisit earlier steps. Stricter (exact-step) validation is intentionally
+    avoided to support back-navigation in the UI.
+    """
     if session["current_step"] < expected_step:
         raise HTTPException(
             status_code=400,
@@ -418,10 +410,6 @@ async def confirm_company(
     """Confirm company profile. Advance to step 2. Pre-populate template selections."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-
-    if session["current_step"] > 1:
-        # Allow re-confirming without resetting selections
-        pass
 
     sb = get_supabase()
 

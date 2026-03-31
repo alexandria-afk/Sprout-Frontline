@@ -18,23 +18,9 @@ from models.lms import (
     SubmitQuizRequest,
 )
 from services.lms_service import LmsService
+from utils.ai_helpers import _strip_code_fence
 
 router = APIRouter()
-
-
-def _strip_code_fence(text: str) -> str:
-    """Remove markdown code fences from an LLM response."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text[3:]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-        if text.endswith("```"):
-            text = text[:-3].strip()
-        elif "```" in text:
-            text = text[: text.index("```")].strip()
-    return text
 
 # ── Published Courses (learner) ───────────────────────────────────────────────
 

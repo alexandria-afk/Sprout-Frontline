@@ -114,7 +114,7 @@ export type SubmissionStatus = "draft" | "submitted" | "approved" | "rejected";
 export interface FormSubmission {
   id: string;
   form_template_id: string;
-  assignment_id: string;
+  assignment_id: string | null;
   submitted_by: string;
   submitted_at: string | null;
   status: SubmissionStatus;

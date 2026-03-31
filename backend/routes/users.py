@@ -69,7 +69,7 @@ async def create_user(
         )
     except Exception as _wf_exc:
         import logging
-        logging.getLogger(__name__).warning("Workflow trigger failed for new user %s: %s", profile.id, _wf_exc)
+        logging.getLogger(__name__).error("Workflow trigger failed: %s", _wf_exc, exc_info=True)
 
     return profile
 

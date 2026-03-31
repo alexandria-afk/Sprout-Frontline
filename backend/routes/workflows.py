@@ -23,6 +23,7 @@ POST   /api/v1/workflows/instances/{id}/stages/{stage_instance_id}/reject
 POST   /api/v1/workflows/instances/{id}/stages/{stage_instance_id}/submit-form
 """
 
+import json
 import logging
 import os as _os
 from datetime import datetime, timezone
@@ -148,10 +149,9 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
 
         # assign_training must have at least one course
         if action_type == "assign_training":
-            import json as _json
             course_ids_raw = config.get("course_ids", "[]")
             try:
-                course_ids = _json.loads(course_ids_raw) if isinstance(course_ids_raw, str) else (course_ids_raw or [])
+                course_ids = json.loads(course_ids_raw) if isinstance(course_ids_raw, str) else (course_ids_raw or [])
             except Exception:
                 course_ids = []
             if not course_ids:

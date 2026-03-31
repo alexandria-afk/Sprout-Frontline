@@ -330,7 +330,7 @@ def _get_first_admin(db, org_id: str) -> Optional[str]:
 
 
 def _get_first_location(db, org_id: str) -> Optional[str]:
-    res = db.table("locations").select("id").eq("organisation_id", org_id).limit(1).execute()
+    res = db.table("locations").select("id").eq("organisation_id", org_id).eq("is_deleted", False).limit(1).execute()
     return res.data[0]["id"] if res.data else None
 
 

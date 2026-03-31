@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   GitBranch,
@@ -111,7 +111,7 @@ export default function WorkflowsPage() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     try {
       const [defs, instancesRes] = await Promise.all([
         listWorkflowDefinitions(),
@@ -124,9 +124,9 @@ export default function WorkflowsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   async function handleToggleActive(def: WorkflowDefinition) {
     try {
