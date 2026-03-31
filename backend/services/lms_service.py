@@ -172,7 +172,7 @@ class LmsService:
                         "question": q.question,
                         "question_type": q.question_type,
                         "image_url": q.image_url,
-                        "options": [o.dict() for o in q.options],
+                        "options": [o.model_dump() for o in q.options],
                         "explanation": q.explanation,
                         "display_order": q.display_order or j,
                     }).execute()
@@ -182,7 +182,7 @@ class LmsService:
     @staticmethod
     async def update_course(course_id: str, body: UpdateCourseRequest, org_id: str):
         supabase = get_supabase()
-        updates = {k: v for k, v in body.dict().items() if v is not None}
+        updates = {k: v for k, v in body.model_dump().items() if v is not None}
         if updates:
             updates["updated_at"] = "now()"
             supabase.table("courses").update(updates).eq("id", course_id).eq("organisation_id", org_id).execute()

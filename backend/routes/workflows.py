@@ -394,9 +394,11 @@ async def delete_workflow_definition(
     if existing.data.get("is_active"):
         raise HTTPException(status_code=409, detail="Cannot delete an active workflow. Deactivate it first.")
 
-    # Cancel all in-progress instances (cascade)
+    # Cancel all in-progress instances (cascade).
+    # current_stage_id is also cleared so deleted stage foreign keys don't
+    # linger on cancelled instances.
     db.table("workflow_instances") \
-        .update({"status": "cancelled"}) \
+        .update({"status": "cancelled", "current_stage_id": None}) \
         .eq("workflow_definition_id", str(definition_id)) \
         .eq("status", "in_progress") \
         .execute()
@@ -533,6 +535,7 @@ async def reorder_stages(
             .update({"stage_order": item["stage_order"]}) \
             .eq("id", item["id"]) \
             .eq("workflow_definition_id", str(definition_id)) \
+            .eq("organisation_id", org_id) \
             .execute()
 
     return {"success": True}

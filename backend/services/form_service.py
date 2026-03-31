@@ -522,12 +522,10 @@ class FormService:
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
-            # Replace responses: delete old ones, insert new
-            try:
-                supabase.table("form_responses").delete().eq("submission_id", existing_id).execute()
-            except Exception:
-                pass
-
+            # Replace responses using insert-then-delete so that a failed
+            # insert never leaves the draft with zero responses.
+            # The actual delete happens below, after body.responses are
+            # inserted successfully (see the response insertion block).
             submission_id = existing_id
         else:
             # Insert a new submission
@@ -557,10 +555,36 @@ class FormService:
                 }
                 for item in body.responses
             ]
+
+            # When updating a draft, collect the IDs of the existing response
+            # rows BEFORE inserting so we can delete them only after the
+            # insert succeeds.  This prevents data loss if the insert fails.
+            old_response_ids: list = []
+            if existing_id:
+                try:
+                    old_resp = supabase.table("form_responses") \
+                        .select("id") \
+                        .eq("submission_id", existing_id) \
+                        .execute()
+                    old_response_ids = [r["id"] for r in (old_resp.data or [])]
+                except Exception:
+                    pass  # non-fatal; worst case old rows remain until next save
+
             try:
                 supabase.table("form_responses").insert(response_rows).execute()
             except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).error(
+                    "Response insertion failed for submission %s: %s", submission_id, e
+                )
                 raise HTTPException(status_code=400, detail=f"Response insertion failed: {e}")
+
+            # Insert succeeded — now safe to remove the previous response rows
+            if old_response_ids:
+                try:
+                    supabase.table("form_responses").delete().in_("id", old_response_ids).execute()
+                except Exception:
+                    pass  # old rows orphaned but new data is safe
 
         # ── Audit scoring: calculate and persist score on final submission ──
         if body.status == "submitted":

@@ -764,8 +764,10 @@ async def advance_workflow(
     si_res = db.table("workflow_stage_instances") \
         .select("*, workflow_instances(*)") \
         .eq("id", stage_instance_id) \
-        .single() \
+        .maybe_single() \
         .execute()
+    if not si_res.data:
+        raise HTTPException(status_code=404, detail="Stage instance not found")
     stage_inst = si_res.data
     instance = stage_inst["workflow_instances"]
     wf_def_id = instance["workflow_definition_id"]
@@ -830,7 +832,9 @@ async def advance_workflow(
         }).eq("id", instance_id).execute()
         return {"status": "completed"}
 
-    next_stage_res = db.table("workflow_stages").select("*").eq("id", next_stage_id).single().execute()
+    next_stage_res = db.table("workflow_stages").select("*").eq("id", next_stage_id).maybe_single().execute()
+    if not next_stage_res.data:
+        raise HTTPException(status_code=404, detail="Next workflow stage not found")
     next_stage = next_stage_res.data
     logger.info(f"advance_workflow {instance_id}: activating next stage '{next_stage.get('name')}' (order={next_stage.get('stage_order')}, action={next_stage.get('action_type')}, is_final={next_stage.get('is_final')})")
 
@@ -874,8 +878,10 @@ async def approve_stage(
     si_res = db.table("workflow_stage_instances") \
         .select("workflow_instance_id, status") \
         .eq("id", stage_instance_id) \
-        .single() \
+        .maybe_single() \
         .execute()
+    if not si_res.data:
+        raise HTTPException(status_code=404, detail="Stage instance not found")
     stage_inst = si_res.data
 
     if str(stage_inst["workflow_instance_id"]) != str(instance_id):
@@ -912,8 +918,10 @@ async def reject_stage(
     si_res = db.table("workflow_stage_instances") \
         .select("workflow_instance_id, stage_id, status") \
         .eq("id", stage_instance_id) \
-        .single() \
+        .maybe_single() \
         .execute()
+    if not si_res.data:
+        raise HTTPException(status_code=404, detail="Stage instance not found")
     stage_inst = si_res.data
 
     if str(stage_inst["workflow_instance_id"]) != str(instance_id):

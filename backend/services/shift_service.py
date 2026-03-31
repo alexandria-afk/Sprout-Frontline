@@ -111,7 +111,7 @@ class ShiftService:
     @staticmethod
     async def delete_template(template_id: str, org_id: str) -> None:
         db = get_supabase()
-        db.table("shift_templates").delete().eq("id", template_id).eq("organisation_id", org_id).execute()
+        db.table("shift_templates").update({"is_deleted": True}).eq("id", str(template_id)).eq("organisation_id", org_id).execute()
 
     @staticmethod
     async def bulk_generate(body: BulkGenerateShiftsRequest, org_id: str, user_id: str) -> dict:

@@ -852,12 +852,18 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
         text = text.strip()
         text = _strip_code_fence(text)
         mappings = json.loads(text.strip())
-    except Exception:
+    except Exception as e:
+        _log.error("Role mapping AI call failed: %s", e, exc_info=True)
         mappings = [{"source_title": t, "source_department": d, "retail_role": "staff", "confidence": 0.5}
                     for (t, d) in combos.keys()]
 
-    # Save to role_mappings table (replace any existing mappings for this session)
-    sb.table("role_mappings").delete().eq("session_id", session_id).execute()
+    # Save to role_mappings table (replace any existing mappings for this session).
+    # Fetch existing row IDs first, insert new rows, then delete the old ones
+    # only after the insert succeeds — so a failed insert never leaves the
+    # session with zero mappings.
+    existing_rows = sb.table("role_mappings").select("id").eq("session_id", session_id).execute()
+    old_ids = [r["id"] for r in (existing_rows.data or [])]
+
     to_insert = []
     for m in mappings:
         count = combos.get((m.get("source_title", ""), m.get("source_department", "")), 1)
@@ -872,6 +878,9 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
         })
     if to_insert:
         sb.table("role_mappings").insert(to_insert).execute()
+        # Insert succeeded — now safe to remove the previous mappings
+        if old_ids:
+            sb.table("role_mappings").delete().in_("id", old_ids).execute()
 
     return mappings
 

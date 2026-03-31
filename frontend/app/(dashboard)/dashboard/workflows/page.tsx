@@ -38,6 +38,7 @@ import {
   GeneratedWorkflow,
   WorkflowDefinition,
 } from "@/services/workflows";
+import { friendlyError } from "@/lib/errors";
 import { listLocations, Location } from "@/services/users";
 import { getPackageTemplates } from "@/services/onboarding";
 import { createClient } from "@/services/supabase/client";
@@ -108,6 +109,7 @@ export default function WorkflowsPage() {
   const [triggerModal, setTriggerModal] = useState<WorkflowDefinition | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<WorkflowDefinition | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -127,8 +129,12 @@ export default function WorkflowsPage() {
   useEffect(() => { load(); }, []);
 
   async function handleToggleActive(def: WorkflowDefinition) {
-    await updateWorkflowDefinition(def.id, { is_active: !def.is_active });
-    setDefinitions((prev) => prev.map((d) => d.id === def.id ? { ...d, is_active: !def.is_active } : d));
+    try {
+      await updateWorkflowDefinition(def.id, { is_active: !def.is_active });
+      setDefinitions((prev) => prev.map((d) => d.id === def.id ? { ...d, is_active: !def.is_active } : d));
+    } catch (e) {
+      console.error("[Workflows] Toggle active failed:", e);
+    }
   }
 
   function handleDelete(def: WorkflowDefinition) {
@@ -138,18 +144,25 @@ export default function WorkflowsPage() {
   async function confirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
       await deleteWorkflowDefinition(deleteTarget.id);
       setDefinitions((prev) => prev.filter((d) => d.id !== deleteTarget.id));
       setDeleteTarget(null);
+    } catch (e) {
+      setDeleteError(friendlyError(e));
     } finally {
       setDeleting(false);
     }
   }
 
   async function handleDuplicate(def: WorkflowDefinition) {
-    const copy = await duplicateWorkflowDefinition(def.id);
-    setDefinitions((prev) => [copy, ...prev]);
+    try {
+      const copy = await duplicateWorkflowDefinition(def.id);
+      setDefinitions((prev) => [copy, ...prev]);
+    } catch (e) {
+      console.error("[Workflows] Duplicate failed:", e);
+    }
   }
 
   return (
@@ -493,9 +506,14 @@ export default function WorkflowsPage() {
                 </p>
               </div>
             </div>
+            {deleteError && (
+              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                {deleteError}
+              </p>
+            )}
             <div className="flex gap-3">
               <button
-                onClick={() => setDeleteTarget(null)}
+                onClick={() => { setDeleteTarget(null); setDeleteError(null); }}
                 disabled={deleting}
                 className="flex-1 px-4 py-2.5 rounded-xl border border-surface-border text-sm font-medium text-dark hover:bg-gray-50 disabled:opacity-50"
               >

@@ -59,7 +59,7 @@ class TaskService:
     @staticmethod
     async def update_template(template_id: str, org_id: str, body: UpdateTaskTemplateRequest) -> dict:
         db = get_supabase()
-        updates = {k: v for k, v in body.model_dump().items() if v is not None}
+        updates = body.model_dump(exclude_unset=True)
         if not updates:
             raise HTTPException(status_code=400, detail="Nothing to update")
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -285,7 +285,7 @@ class TaskService:
     @staticmethod
     async def update_task(task_id: str, org_id: str, body: UpdateTaskRequest) -> dict:
         db = get_supabase()
-        updates: dict = {k: v for k, v in body.model_dump().items() if v is not None}
+        updates: dict = body.model_dump(exclude_unset=True)
         if not updates:
             raise HTTPException(status_code=400, detail="Nothing to update")
         if "due_at" in updates and isinstance(updates["due_at"], datetime):

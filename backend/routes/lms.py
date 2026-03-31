@@ -109,14 +109,7 @@ async def regenerate_course_content(
     if not module_records:
         raise HTTPException(status_code=400, detail="Course has no modules to regenerate.")
 
-    # Delete existing empty slides and quiz questions
-    for mod in module_records:
-        if mod["type"] == "slides":
-            sb.table("course_slides").delete().eq("module_id", mod["id"]).execute()
-        else:
-            sb.table("quiz_questions").delete().eq("module_id", mod["id"]).execute()
-
-    # Generate content with Claude Haiku
+    # Step 1: Generate content with Claude Haiku FIRST — if this fails, nothing is deleted
     if not settings.anthropic_api_key:
         raise HTTPException(status_code=503, detail="AI content generation is not configured.")
 
@@ -138,10 +131,21 @@ async def regenerate_course_content(
             )}],
         )
 
-    resp = await asyncio.to_thread(_call)
-    content_text = "".join(b.text for b in resp.content if hasattr(b, "text"))
-    content_list = json.loads(_strip_code_fence(content_text))
+    try:
+        resp = await asyncio.to_thread(_call)
+        content_text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+        content_list = json.loads(_strip_code_fence(content_text))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI content generation failed: {exc}")
 
+    # Step 2: Only now that generation succeeded, delete existing slides/quiz questions
+    for mod in module_records:
+        if mod["type"] == "slides":
+            sb.table("course_slides").delete().eq("module_id", mod["id"]).execute()
+        else:
+            sb.table("quiz_questions").delete().eq("module_id", mod["id"]).execute()
+
+    # Step 3: Insert new content
     slide_rows: list[dict] = []
     quiz_rows: list[dict] = []
     for idx, mod in enumerate(module_records):
