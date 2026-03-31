@@ -8,7 +8,7 @@ export default defineConfig({
   workers: 1,
   reporter: [["html", { open: "never" }], ["list"]],
   use: {
-    baseURL: "http://localhost:3000",
+    baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
     trace: "retain-on-failure",
     video: "retain-on-failure",
     screenshot: "only-on-failure",
@@ -21,7 +21,8 @@ export default defineConfig({
       name: "admin",
       use: { ...devices["Desktop Chrome"], storageState: "e2e/.auth/admin.json" },
       dependencies: ["setup"],
-      testMatch: /.*\.(admin|shared)\.spec\.ts/,
+      // Matches: *.admin.spec.ts  *.shared.spec.ts  auth.spec.ts  onboarding.spec.ts
+      testMatch: /.*\.(admin|shared)\.spec\.ts|[/\\]auth\.spec\.ts|[/\\]onboarding\.spec\.ts/,
     },
     {
       name: "manager",
