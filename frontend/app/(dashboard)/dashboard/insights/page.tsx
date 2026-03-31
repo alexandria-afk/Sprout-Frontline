@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   BarChart2, RefreshCw, X, ChevronRight, ClipboardList, AlertOctagon,
   Users, BookOpen, CheckSquare, Trophy, Lightbulb, Sparkles,
-  Filter, MapPin, Calendar, ChevronDown,
+  Filter, MapPin, Calendar, ChevronDown, PackageX,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { apiFetch } from "@/services/api/client";
@@ -73,6 +73,7 @@ const REPORT_GROUPS: {
       { label:"Checklist Completion", href:"/dashboard/insights/reports/operations/checklists" },
       { label:"Audit Compliance",     href:"/dashboard/insights/reports/operations/audits" },
       { label:"CAP Status",           href:"/dashboard/insights/reports/operations/caps" },
+      { label:"Pull-Outs & Wastage",  href:"/dashboard/insights/reports/operations/pull-outs" },
     ]},
   { icon:AlertOctagon, color:"text-orange-600", bg:"bg-orange-50", label:"Issues",
     description:"Issue summary, recurring patterns, maintenance costs, incidents",

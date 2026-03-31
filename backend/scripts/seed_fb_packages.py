@@ -337,6 +337,168 @@ FB_FORM_BAKERY_WASTE_LOG = {
 }
 
 
+# ── PULL-OUT / WASTAGE RECORD FORMS ───────────────────────────────────────────
+
+_PULL_OUT_COMMON_FIELDS_PREFIX = [
+    {
+        "id": "f1",
+        "label": "Date",
+        "type": "date",
+        "required": True,
+        "options": [],
+        "conditional_logic": None
+    },
+    {
+        "id": "f2",
+        "label": "Shift",
+        "type": "dropdown",
+        "required": True,
+        "options": ["Opening", "Midshift", "Closing"],
+        "conditional_logic": None
+    },
+]
+
+_PULL_OUT_COMMON_FIELDS_SUFFIX = [
+    {
+        "id": "f5",
+        "label": "Quantity",
+        "type": "number",
+        "required": True,
+        "options": [],
+        "conditional_logic": None
+    },
+    {
+        "id": "f6",
+        "label": "Unit",
+        "type": "dropdown",
+        "required": True,
+        "options": ["pcs", "portions", "trays", "kg", "g", "L", "mL"],
+        "conditional_logic": None
+    },
+    {
+        "id": "f8",
+        "label": "Notes",
+        "type": "text",
+        "required": False,
+        "options": [],
+        "conditional_logic": None
+    },
+]
+
+
+def _make_pull_out_form(categories, options_map, reasons):
+    all_items = [item for items in options_map.values() for item in items]
+    return {
+        "name": "Pull-Out / Wastage Record",
+        "type": "pull_out",
+        "description": "Log food items pulled out due to expiry, damage, overproduction, or quality issues.",
+        "content": {
+            "sections": [
+                {
+                    "id": "s1",
+                    "title": "Pull-Out Details",
+                    "fields": _PULL_OUT_COMMON_FIELDS_PREFIX + [
+                        {
+                            "id": "f3",
+                            "label": "Category",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": categories,
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f4",
+                            "label": "Item Name",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": all_items,
+                            "conditional_logic": {
+                                "type": "show_options",
+                                "fieldId": "f3",
+                                "optionsMap": options_map
+                            }
+                        },
+                    ] + _PULL_OUT_COMMON_FIELDS_SUFFIX[:2] + [
+                        {
+                            "id": "f7",
+                            "label": "Reason",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": reasons,
+                            "conditional_logic": None
+                        },
+                    ] + _PULL_OUT_COMMON_FIELDS_SUFFIX[2:]
+                }
+            ]
+        }
+    }
+
+
+_REASONS_HOLD_TIME = [
+    "Expired / Past hold time",
+    "Overproduction",
+    "Quality issue",
+    "Contamination / Dropped",
+    "Equipment failure",
+    "Customer return",
+    "Other",
+]
+
+_REASONS_SHELF_LIFE = [
+    "Expired / Past shelf life",
+    "Overproduction",
+    "Quality issue",
+    "Contamination / Dropped",
+    "Equipment failure",
+    "Customer return",
+    "Other",
+]
+
+_CASUAL_FULL_CATEGORIES = ["Starters", "Mains", "Desserts", "Beverages", "Sides", "Bread & Pastry"]
+_CASUAL_FULL_OPTIONS_MAP = {
+    "Starters": ["Soup of the Day", "Caesar Salad", "Bruschetta", "Calamari"],
+    "Mains": ["Grilled Chicken", "Beef Steak", "Pasta Carbonara", "Fish Fillet", "Pork Ribs"],
+    "Desserts": ["Cheesecake", "Ice Cream", "Chocolate Lava Cake", "Fruit Tart"],
+    "Beverages": ["Soft Drink", "Juice", "Coffee", "Tea", "Bottled Water"],
+    "Sides": ["Steamed Rice", "Mixed Vegetables", "Mashed Potato", "Garden Salad"],
+    "Bread & Pastry": ["Dinner Roll", "Garlic Bread", "Croissant"],
+}
+
+FB_FORM_PULL_OUT_CASUAL_DINING = _make_pull_out_form(
+    _CASUAL_FULL_CATEGORIES, _CASUAL_FULL_OPTIONS_MAP, _REASONS_HOLD_TIME
+)
+
+FB_FORM_PULL_OUT_FULL_SERVICE = _make_pull_out_form(
+    _CASUAL_FULL_CATEGORIES, _CASUAL_FULL_OPTIONS_MAP, _REASONS_HOLD_TIME
+)
+
+_CAFE_BAR_CATEGORIES = ["Coffee", "Non-Coffee", "Food", "Pastry", "Alcohol"]
+_CAFE_BAR_OPTIONS_MAP = {
+    "Coffee": ["Espresso", "Americano", "Latte", "Cappuccino", "Cold Brew"],
+    "Non-Coffee": ["Matcha Latte", "Fruit Tea", "Smoothie", "Hot Chocolate"],
+    "Food": ["Sandwich", "Salad Bowl", "Pasta", "Rice Bowl"],
+    "Pastry": ["Croissant", "Muffin", "Danish", "Brownie", "Cheesecake Slice"],
+    "Alcohol": ["Beer", "House Wine", "Cocktail", "Spirits"],
+}
+
+FB_FORM_PULL_OUT_CAFE_BAR = _make_pull_out_form(
+    _CAFE_BAR_CATEGORIES, _CAFE_BAR_OPTIONS_MAP, _REASONS_HOLD_TIME
+)
+
+_BAKERY_CATEGORIES = ["Breads", "Pastry", "Cakes", "Beverages", "Savory"]
+_BAKERY_OPTIONS_MAP = {
+    "Breads": ["White Loaf", "Whole Wheat", "Sourdough", "Baguette", "Pandesal"],
+    "Pastry": ["Croissant", "Danish", "Cinnamon Roll", "Eclair", "Donut"],
+    "Cakes": ["Chocolate Cake Slice", "Cheesecake Slice", "Carrot Cake Slice", "Whole Cake"],
+    "Beverages": ["Coffee", "Tea", "Juice", "Hot Chocolate"],
+    "Savory": ["Cheese Roll", "Ham & Cheese Croissant", "Spinach Pie"],
+}
+
+FB_FORM_PULL_OUT_BAKERY = _make_pull_out_form(
+    _BAKERY_CATEGORIES, _BAKERY_OPTIONS_MAP, _REASONS_SHELF_LIFE
+)
+
+
 # ── CHECKLISTS ────────────────────────────────────────────────────────────────
 
 _FOH_OPENING_BAR_SECTION = {
@@ -2651,6 +2813,7 @@ def _casual_dining_items():
         FB_FORM_EQUIPMENT_MAINTENANCE,
         FB_FORM_INVENTORY_BAR,
         FB_FORM_INVENTORY_KITCHEN,
+        FB_FORM_PULL_OUT_CASUAL_DINING,
     ]
     checklists = [
         FB_CHECKLIST_FOH_OPENING,
@@ -2720,6 +2883,7 @@ def _full_service_items():
         FB_FORM_EQUIPMENT_MAINTENANCE,
         FB_FORM_INVENTORY_BAR,
         FB_FORM_INVENTORY_KITCHEN,
+        FB_FORM_PULL_OUT_FULL_SERVICE,
     ]
     checklists = [
         FB_CHECKLIST_FOH_OPENING,
@@ -2790,6 +2954,7 @@ def _cafe_bar_items():
         FB_FORM_EQUIPMENT_MAINTENANCE,
         FB_FORM_INVENTORY_BAR,
         FB_FORM_INVENTORY_KITCHEN,
+        FB_FORM_PULL_OUT_CAFE_BAR,
     ]
     checklists = [
         FB_CHECKLIST_FOH_OPENING,    # includes bar section
@@ -2862,6 +3027,7 @@ def _bakery_items():
         FB_FORM_INVENTORY_KITCHEN,
         FB_FORM_PRODUCTION_SCHEDULE,  # bakery exclusive
         FB_FORM_BAKERY_WASTE_LOG,     # bakery exclusive
+        FB_FORM_PULL_OUT_BAKERY,      # pull-out / wastage record
     ]
     checklists = [
         FB_CHECKLIST_FOH_OPENING_BAKERY,  # no bar section

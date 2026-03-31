@@ -21,17 +21,40 @@ import { friendlyError } from "@/lib/errors";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-type ConditionalLogic = {
+type ConditionalLogicShowHide = {
+  type?: "show" | "hide";  // type field is optional for backwards compat
   fieldId: string;
   value: string;
   action: "show" | "hide";
 };
 
+type ConditionalLogicShowOptions = {
+  type: "show_options";
+  fieldId: string;
+  optionsMap: Record<string, string[]>;
+};
+
+type ConditionalLogic = ConditionalLogicShowHide | ConditionalLogicShowOptions;
+
 function isVisible(field: FormField, answers: Record<string, string>): boolean {
   const cl = field.conditional_logic as ConditionalLogic | null;
   if (!cl) return true;
-  const match = answers[cl.fieldId] === cl.value;
-  return cl.action === "show" ? match : !match;
+  if ("type" in cl && cl.type === "show_options") return true; // always visible, options filtered separately
+  const showHideCl = cl as ConditionalLogicShowHide;
+  const match = answers[showHideCl.fieldId] === showHideCl.value;
+  return showHideCl.action === "show" ? match : !match;
+}
+
+function getFieldOptions(field: FormField, answers: Record<string, string>): string[] {
+  const cl = field.conditional_logic as ConditionalLogic | null;
+  if (cl && "type" in cl && cl.type === "show_options") {
+    const parentValue = answers[(cl as ConditionalLogicShowOptions).fieldId];
+    if (parentValue) {
+      return (cl as ConditionalLogicShowOptions).optionsMap[parentValue] ?? field.options ?? [];
+    }
+    return []; // no parent value selected yet — show empty until parent is chosen
+  }
+  return field.options ?? [];
 }
 
 function TypeBadge({ type }: { type: FormType }) {
@@ -657,10 +680,14 @@ function FieldInput({
   field,
   value,
   onChange,
+  answers,
+  allFields,
 }: {
   field: FormField;
   value: string;
   onChange: (v: string) => void;
+  answers: Record<string, string>;
+  allFields: FormField[];
 }) {
   const inputCls =
     "border border-surface-border rounded-lg px-3 py-2 text-sm text-dark focus:outline-none focus:ring-2 focus:ring-sprout-purple/40 w-full bg-white";
@@ -751,21 +778,32 @@ function FieldInput({
         </div>
       );
 
-    case "dropdown":
+    case "dropdown": {
+      const dropdownOptions = getFieldOptions(field, answers);
+      const cl = field.conditional_logic as ConditionalLogic | null;
+      const isShowOptions = cl && "type" in cl && cl.type === "show_options";
+      const parentFieldLabel = isShowOptions
+        ? (allFields.find((f) => f.id === (cl as ConditionalLogicShowOptions).fieldId)?.label ?? "parent field")
+        : null;
       return (
         <select
           className={clsx(inputCls, "bg-white")}
           value={value}
           onChange={(e) => onChange(e.target.value)}
         >
-          <option value="">— Select an option —</option>
-          {(field.options ?? []).map((opt) => (
+          {isShowOptions && dropdownOptions.length === 0 ? (
+            <option value="" disabled>Select {parentFieldLabel} first…</option>
+          ) : (
+            <option value="">— Select an option —</option>
+          )}
+          {dropdownOptions.map((opt) => (
             <option key={opt} value={opt}>
               {opt}
             </option>
           ))}
         </select>
       );
+    }
 
     case "multi_select": {
       const selected = value ? value.split(",").filter(Boolean) : [];
@@ -996,6 +1034,9 @@ function FormFillPageInner() {
     setOpenComments((prev) => ({ ...prev, [fieldId]: !prev[fieldId] }));
   }, []);
 
+  // All fields (for conditional logic lookups)
+  const allFields = (template?.sections ?? []).flatMap((s) => s.fields ?? []);
+
   // Progress calculation
   const allVisibleFields = (template?.sections ?? []).flatMap((s) =>
     (s.fields ?? []).filter((f) => isVisible(f, answers))
@@ -1218,6 +1259,8 @@ function FormFillPageInner() {
                             field={field}
                             value={answers[field.id] ?? ""}
                             onChange={(v) => setAnswer(field.id, v)}
+                            answers={answers}
+                            allFields={allFields}
                           />
                           {validationErrors[field.id] && (
                             <p className="text-xs text-red-500">{validationErrors[field.id]}</p>

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from dependencies import get_current_user, require_manager_or_above
+from services.supabase_client import get_supabase
 from config import settings
 from services.ai_logger import log_ai_request, AITimer
 from services.industry_context import get_industry_context
@@ -1062,6 +1063,7 @@ You help store managers and staff with:
 - General retail and QSR operations questions
 - Scheduling, leave, and HR questions
 - Store procedures and best practices
+- Pull-Out & Wastage: You have access to pull-out/wastage record data. Pull-out forms track food items removed from service due to expiry, overproduction, quality issues, contamination, or equipment failure. You can help managers identify waste trends, top wasted items, anomalous days, and cost-reduction opportunities.
 
 Keep replies concise and practical. Use bullet points for multi-step answers.
 If you don't know something specific to their store, say so and suggest who to ask.
@@ -1084,6 +1086,66 @@ async def sidekick_chat(
     sidekick_system = get_industry_context(org_id) + SIDEKICK_SYSTEM
 
     sdk_messages = [{"role": m.role, "content": m.content} for m in body.messages]
+
+    # --- Context injection ---
+    context_parts = []
+    user_message_lower = (body.messages[-1].content or "").lower() if body.messages else ""
+
+    # Pull-out / wastage context
+    pullout_keywords = ["pull out", "pull-out", "pullout", "wastage", "waste", "spoilage", "spoil", "expired", "thrown", "discard"]
+    if any(kw in user_message_lower for kw in pullout_keywords):
+        try:
+            from datetime import datetime, timedelta, timezone
+            from collections import Counter
+            sb_ctx = get_supabase()
+            tpl_res = (
+                sb_ctx.table("form_templates")
+                .select("id")
+                .eq("organisation_id", org_id)
+                .eq("type", "pull_out")
+                .eq("is_deleted", False)
+                .execute()
+            )
+            tpl_ids = [r["id"] for r in (tpl_res.data or [])]
+            if tpl_ids:
+                since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+                po_res = (
+                    sb_ctx.table("form_submissions")
+                    .select("submitted_at, form_data, location_id")
+                    .eq("organisation_id", org_id)
+                    .eq("is_deleted", False)
+                    .in_("form_template_id", tpl_ids)
+                    .gte("submitted_at", since)
+                    .limit(200)
+                    .execute()
+                )
+                po_submissions = po_res.data or []
+                if po_submissions:
+                    items = []
+                    reasons = []
+                    for sub in po_submissions:
+                        fd = sub.get("form_data") or {}
+                        item = fd.get("f4") or fd.get("item_name")
+                        reason = fd.get("f7") or fd.get("reason")
+                        if item:
+                            items.append(item)
+                        if reason:
+                            reasons.append(reason)
+                    top_items = Counter(items).most_common(5)
+                    top_reasons = Counter(reasons).most_common(5)
+                    context_parts.append(
+                        f"Pull-out data (last 30 days): {len(po_submissions)} records. "
+                        f"Top wasted items: {', '.join(f'{i} ({c})' for i, c in top_items)}. "
+                        f"Top reasons: {', '.join(f'{r} ({c})' for r, c in top_reasons)}."
+                    )
+        except Exception:
+            pass
+
+    # Prepend context as an assistant-side system note if any context was gathered
+    if context_parts:
+        context_text = "Relevant store data:\n" + "\n".join(context_parts)
+        # Inject as the first user turn so the model has it before the conversation
+        sdk_messages = [{"role": "user", "content": context_text}, {"role": "assistant", "content": "Understood. I'll use this data to answer your questions."}] + sdk_messages
 
     def _sync_chat():
         return client.messages.create(

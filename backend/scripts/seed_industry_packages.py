@@ -563,6 +563,111 @@ QSR_FORMS = [
             "requires_photo": True,
         }
     },
+    {
+        "name": "Pull-Out / Wastage Record",
+        "type": "pull_out",
+        "description": "Log food items pulled out due to expiry, damage, overproduction, or quality issues.",
+        "content": {
+            "sections": [
+                {
+                    "id": "s1",
+                    "title": "Pull-Out Details",
+                    "fields": [
+                        {
+                            "id": "f1",
+                            "label": "Date",
+                            "type": "date",
+                            "required": True,
+                            "options": [],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f2",
+                            "label": "Shift",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": ["Opening", "Midshift", "Closing"],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f3",
+                            "label": "Category",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": ["Chicken", "Burgers & Sandwiches", "Sides", "Beverages", "Desserts", "Sauces & Condiments"],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f4",
+                            "label": "Item Name",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": [
+                                "Fried Chicken", "Chicken Strips", "Chicken Sandwich",
+                                "Beef Burger", "Fish Fillet Burger",
+                                "French Fries", "Onion Rings", "Coleslaw",
+                                "Soft Drink", "Juice", "Milkshake",
+                                "Sundae", "Apple Pie",
+                                "Ketchup", "Mayonnaise", "Hot Sauce"
+                            ],
+                            "conditional_logic": {
+                                "type": "show_options",
+                                "fieldId": "f3",
+                                "optionsMap": {
+                                    "Chicken": ["Fried Chicken", "Chicken Strips", "Chicken Sandwich"],
+                                    "Burgers & Sandwiches": ["Beef Burger", "Fish Fillet Burger", "Chicken Sandwich"],
+                                    "Sides": ["French Fries", "Onion Rings", "Coleslaw"],
+                                    "Beverages": ["Soft Drink", "Juice", "Milkshake"],
+                                    "Desserts": ["Sundae", "Apple Pie"],
+                                    "Sauces & Condiments": ["Ketchup", "Mayonnaise", "Hot Sauce"]
+                                }
+                            }
+                        },
+                        {
+                            "id": "f5",
+                            "label": "Quantity",
+                            "type": "number",
+                            "required": True,
+                            "options": [],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f6",
+                            "label": "Unit",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": ["pcs", "portions", "trays", "kg", "g", "L", "mL"],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f7",
+                            "label": "Reason",
+                            "type": "dropdown",
+                            "required": True,
+                            "options": [
+                                "Expired / Past hold time",
+                                "Overproduction",
+                                "Quality issue",
+                                "Contamination / Dropped",
+                                "Equipment failure",
+                                "Customer return",
+                                "Other"
+                            ],
+                            "conditional_logic": None
+                        },
+                        {
+                            "id": "f8",
+                            "label": "Notes",
+                            "type": "text",
+                            "required": False,
+                            "options": [],
+                            "conditional_logic": None
+                        }
+                    ]
+                }
+            ]
+        }
+    },
 ]
 
 QSR_ISSUE_CATEGORIES = [

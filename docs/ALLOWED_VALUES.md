@@ -113,6 +113,18 @@ All `template_items` content JSONB must use only allowed values:
 
 ---
 
+## Form Template Types
+
+Column: `form_templates.type` (enum: `form_template_type`)
+
+| Value | Description |
+|---|---|
+| `form` | Standard form |
+| `checklist` | Checklist |
+| `pull_out` | Pull-out / wastage record |
+
+---
+
 ## Updating This File
 
 When new enum values are added via database migration:
