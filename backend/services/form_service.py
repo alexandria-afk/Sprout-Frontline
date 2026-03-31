@@ -495,6 +495,52 @@ class FormService:
             if not tpl.data:
                 raise HTTPException(status_code=404, detail="Form template not found")
 
+        # ── Pull-out: validate estimated_cost is present and > 0 ──────────────
+        if body.status == "submitted":
+            try:
+                tpl_type_check = (
+                    supabase.table("form_templates")
+                    .select("type")
+                    .eq("id", str(body.form_template_id))
+                    .maybe_single()
+                    .execute()
+                )
+                if tpl_type_check.data and tpl_type_check.data.get("type") == "pull_out":
+                    # Find the "Estimated Cost" field for this template
+                    cost_field_resp = (
+                        supabase.table("form_fields")
+                        .select("id")
+                        .eq("is_deleted", False)
+                        .ilike("label", "%estimated cost%")
+                        .in_("section_id", [
+                            s["id"] for s in (
+                                supabase.table("form_sections")
+                                .select("id")
+                                .eq("form_template_id", str(body.form_template_id))
+                                .execute()
+                            ).data or []
+                        ])
+                        .execute()
+                    )
+                    cost_field_ids = {str(r["id"]) for r in (cost_field_resp.data or [])}
+                    if cost_field_ids:
+                        cost_response = next(
+                            (r for r in body.responses if str(r.field_id) in cost_field_ids),
+                            None
+                        )
+                        if not cost_response or not cost_response.value:
+                            raise HTTPException(status_code=422, detail="Estimated cost is required for pull-out submissions.")
+                        try:
+                            cost_val = float(cost_response.value)
+                        except (ValueError, TypeError):
+                            raise HTTPException(status_code=422, detail="Estimated cost must be a number.")
+                        if cost_val <= 0:
+                            raise HTTPException(status_code=422, detail="Estimated cost must be greater than zero.")
+            except HTTPException:
+                raise
+            except Exception:
+                pass  # don't block submission on lookup errors
+
         # ── Upsert: if a draft already exists for this assignment, update it ──
         existing_id: Optional[str] = None
         if body.assignment_id:
@@ -587,6 +633,48 @@ class FormService:
                     supabase.table("form_responses").delete().in_("id", old_response_ids).execute()
                 except Exception:
                     pass  # old rows orphaned but new data is safe
+
+        # ── Pull-out: persist estimated_cost to form_submissions ─────────────
+        if body.status == "submitted":
+            try:
+                tpl_type_po = (
+                    supabase.table("form_templates")
+                    .select("type")
+                    .eq("id", str(body.form_template_id))
+                    .maybe_single()
+                    .execute()
+                )
+                if tpl_type_po.data and tpl_type_po.data.get("type") == "pull_out":
+                    cost_field_resp2 = (
+                        supabase.table("form_fields")
+                        .select("id")
+                        .eq("is_deleted", False)
+                        .ilike("label", "%estimated cost%")
+                        .in_("section_id", [
+                            s["id"] for s in (
+                                supabase.table("form_sections")
+                                .select("id")
+                                .eq("form_template_id", str(body.form_template_id))
+                                .execute()
+                            ).data or []
+                        ])
+                        .execute()
+                    )
+                    cost_field_ids2 = {str(r["id"]) for r in (cost_field_resp2.data or [])}
+                    if cost_field_ids2:
+                        cost_resp_item = next(
+                            (r for r in body.responses if str(r.field_id) in cost_field_ids2),
+                            None
+                        )
+                        if cost_resp_item:
+                            try:
+                                supabase.table("form_submissions").update(
+                                    {"estimated_cost": float(cost_resp_item.value)}
+                                ).eq("id", submission_id).execute()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
         # ── Audit scoring: calculate and persist score on final submission ──
         if body.status == "submitted":

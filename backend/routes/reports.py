@@ -156,6 +156,19 @@ async def checklist_completion(
     return {"from": from_date, "to": to_date, "templates": result}
 
 
+def _get_pullout_template_ids(sb, org_id: str) -> list:
+    """Return IDs of all active pull_out form templates for the org."""
+    res = (
+        sb.table("form_templates")
+        .select("id")
+        .eq("organisation_id", org_id)
+        .eq("type", "pull_out")
+        .eq("is_deleted", False)
+        .execute()
+    )
+    return [r["id"] for r in (res.data or [])]
+
+
 # ── Pull-Out / Wastage Reports ─────────────────────────────────────────────
 
 @router.get("/pull-outs/summary")
@@ -165,32 +178,21 @@ def get_pullout_summary(
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
 ):
-    """Total pull-out count, total quantity, and breakdown by reason."""
+    """Total pull-out count, total cost, and breakdown by reason and category."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
+    sb = get_admin_client()
+
+    tpl_ids = _get_pullout_template_ids(sb, org_id)
+    if not tpl_ids:
+        return {"total_submissions": 0, "total_cost": 0, "by_reason": [], "by_category": []}
 
     q = (
-        db.table("form_submissions")
-        .select("id, submitted_at, location_id, form_data")
-        .eq("organisation_id", org_id)
+        sb.table("form_submissions")
+        .select("id, submitted_at, location_id, estimated_cost, form_responses(value, form_fields(label))")
         .eq("is_deleted", False)
+        .eq("status", "submitted")
+        .in_("form_template_id", tpl_ids)
     )
-    # join on form_templates type = pull_out via form_template_id
-    # We filter by form type by checking the template; use a subquery approach:
-    # First get pull_out template ids for this org
-    tpl_res = (
-        db.table("form_templates")
-        .select("id")
-        .eq("organisation_id", org_id)
-        .eq("type", "pull_out")
-        .eq("is_deleted", False)
-        .execute()
-    )
-    tpl_ids = [r["id"] for r in (tpl_res.data or [])]
-    if not tpl_ids:
-        return {"total_submissions": 0, "total_quantity": 0, "by_reason": [], "by_category": []}
-
-    q = q.in_("form_template_id", tpl_ids)
     if date_from:
         q = q.gte("submitted_at", date_from)
     if date_to:
@@ -198,31 +200,31 @@ def get_pullout_summary(
     if location_id:
         q = q.eq("location_id", location_id)
 
-    res = q.execute()
-    submissions = res.data or []
+    submissions = q.execute().data or []
 
-    total_qty = 0
+    total_cost = 0.0
     reason_counts: dict = {}
     category_counts: dict = {}
 
     for sub in submissions:
-        fd = sub.get("form_data") or {}
-        # form_data is a dict of field_id -> value
-        # We look for fields by scanning values heuristically
-        # Fields: f5=quantity, f7=reason, f3=category
-        qty = fd.get("f5") or fd.get("quantity") or 0
-        try:
-            total_qty += float(qty)
-        except (ValueError, TypeError):
-            pass
-        reason = fd.get("f7") or fd.get("reason") or "Unknown"
-        reason_counts[reason] = reason_counts.get(reason, 0) + 1
-        category = fd.get("f3") or fd.get("category") or "Unknown"
-        category_counts[category] = category_counts.get(category, 0) + 1
+        ec = sub.get("estimated_cost")
+        if ec is not None:
+            try:
+                total_cost += float(ec)
+            except (ValueError, TypeError):
+                pass
+        responses = sub.get("form_responses") or []
+        for r in responses:
+            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
+            val = r.get("value") or ""
+            if label == "reason":
+                reason_counts[val] = reason_counts.get(val, 0) + 1
+            elif label == "category":
+                category_counts[val] = category_counts.get(val, 0) + 1
 
     return {
         "total_submissions": len(submissions),
-        "total_quantity": round(total_qty, 2),
+        "total_cost": round(total_cost, 2),
         "by_reason": [{"reason": k, "count": v} for k, v in sorted(reason_counts.items(), key=lambda x: -x[1])],
         "by_category": [{"category": k, "count": v} for k, v in sorted(category_counts.items(), key=lambda x: -x[1])],
     }
@@ -233,30 +235,22 @@ def get_pullout_trends(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     location_id: Optional[str] = Query(None),
-    granularity: str = Query("day"),  # "day" | "week" | "month"
+    granularity: str = Query("day"),
     current_user: dict = Depends(require_manager_or_above),
 ):
-    """Daily/weekly/monthly pull-out submission counts."""
+    """Daily/weekly/monthly pull-out counts and total cost."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
+    sb = get_admin_client()
 
-    tpl_res = (
-        db.table("form_templates")
-        .select("id")
-        .eq("organisation_id", org_id)
-        .eq("type", "pull_out")
-        .eq("is_deleted", False)
-        .execute()
-    )
-    tpl_ids = [r["id"] for r in (tpl_res.data or [])]
+    tpl_ids = _get_pullout_template_ids(sb, org_id)
     if not tpl_ids:
         return {"trends": []}
 
     q = (
-        db.table("form_submissions")
-        .select("submitted_at")
-        .eq("organisation_id", org_id)
+        sb.table("form_submissions")
+        .select("submitted_at, estimated_cost")
         .eq("is_deleted", False)
+        .eq("status", "submitted")
         .in_("form_template_id", tpl_ids)
     )
     if date_from:
@@ -266,18 +260,19 @@ def get_pullout_trends(
     if location_id:
         q = q.eq("location_id", location_id)
 
-    res = q.execute()
-    submissions = res.data or []
+    submissions = q.execute().data or []
 
     from collections import defaultdict
+    from datetime import datetime as dt
 
     bucket_counts: dict = defaultdict(int)
+    bucket_cost: dict = defaultdict(float)
     for sub in submissions:
         ts = sub.get("submitted_at", "")
         if not ts:
             continue
         try:
-            d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            d = dt.fromisoformat(ts.replace("Z", "+00:00"))
             if granularity == "month":
                 key = d.strftime("%Y-%m")
             elif granularity == "week":
@@ -285,10 +280,20 @@ def get_pullout_trends(
             else:
                 key = d.strftime("%Y-%m-%d")
             bucket_counts[key] += 1
+            ec = sub.get("estimated_cost")
+            if ec is not None:
+                try:
+                    bucket_cost[key] += float(ec)
+                except (ValueError, TypeError):
+                    pass
         except ValueError:
             pass
 
-    trends = [{"period": k, "count": v} for k, v in sorted(bucket_counts.items())]
+    all_keys = sorted(set(list(bucket_counts.keys()) + list(bucket_cost.keys())))
+    trends = [
+        {"period": k, "count": bucket_counts.get(k, 0), "total_cost": round(bucket_cost.get(k, 0.0), 2)}
+        for k in all_keys
+    ]
     return {"trends": trends}
 
 
@@ -300,27 +305,19 @@ def get_pullout_top_items(
     limit: int = Query(10),
     current_user: dict = Depends(require_manager_or_above),
 ):
-    """Top pulled-out items by frequency."""
+    """Top pulled-out items by frequency and total cost."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
+    sb = get_admin_client()
 
-    tpl_res = (
-        db.table("form_templates")
-        .select("id")
-        .eq("organisation_id", org_id)
-        .eq("type", "pull_out")
-        .eq("is_deleted", False)
-        .execute()
-    )
-    tpl_ids = [r["id"] for r in (tpl_res.data or [])]
+    tpl_ids = _get_pullout_template_ids(sb, org_id)
     if not tpl_ids:
         return {"top_items": []}
 
     q = (
-        db.table("form_submissions")
-        .select("form_data")
-        .eq("organisation_id", org_id)
+        sb.table("form_submissions")
+        .select("estimated_cost, form_responses(value, form_fields(label))")
         .eq("is_deleted", False)
+        .eq("status", "submitted")
         .in_("form_template_id", tpl_ids)
     )
     if date_from:
@@ -330,28 +327,33 @@ def get_pullout_top_items(
     if location_id:
         q = q.eq("location_id", location_id)
 
-    res = q.execute()
-    submissions = res.data or []
+    submissions = q.execute().data or []
 
     from collections import defaultdict
-
     item_counts: dict = defaultdict(int)
-    item_qty: dict = defaultdict(float)
+    item_cost: dict = defaultdict(float)
 
     for sub in submissions:
-        fd = sub.get("form_data") or {}
-        item = fd.get("f4") or fd.get("item_name") or "Unknown"
-        qty = fd.get("f5") or fd.get("quantity") or 0
-        item_counts[item] += 1
-        try:
-            item_qty[item] += float(qty)
-        except (ValueError, TypeError):
-            pass
+        responses = sub.get("form_responses") or []
+        item_name = None
+        for r in responses:
+            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
+            if label == "item name":
+                item_name = r.get("value") or "Unknown"
+                break
+        if item_name:
+            item_counts[item_name] += 1
+            ec = sub.get("estimated_cost")
+            if ec is not None:
+                try:
+                    item_cost[item_name] += float(ec)
+                except (ValueError, TypeError):
+                    pass
 
     top = sorted(item_counts.items(), key=lambda x: -x[1])[:limit]
     return {
         "top_items": [
-            {"item": k, "count": v, "total_quantity": round(item_qty[k], 2)}
+            {"item": k, "count": v, "total_cost": round(item_cost.get(k, 0.0), 2)}
             for k, v in top
         ]
     }
@@ -359,79 +361,77 @@ def get_pullout_top_items(
 
 @router.get("/pull-outs/anomalies")
 def get_pullout_anomalies(
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
 ):
-    """Flag days where pull-out count exceeds 2x the rolling average (simple spike detection)."""
+    """
+    Cost-based weekly anomaly detection per location.
+    Compares current week's total estimated_cost against the 4-week rolling average.
+    Flags locations where current week > 1.5× average.
+    """
     org_id = _get_org(current_user)
-    db = get_admin_client()
+    sb = get_admin_client()
 
-    tpl_res = (
-        db.table("form_templates")
-        .select("id")
-        .eq("organisation_id", org_id)
-        .eq("type", "pull_out")
-        .eq("is_deleted", False)
-        .execute()
-    )
-    tpl_ids = [r["id"] for r in (tpl_res.data or [])]
+    tpl_ids = _get_pullout_template_ids(sb, org_id)
     if not tpl_ids:
-        return {"anomalies": []}
+        return {"anomalies": [], "locations_checked": 0}
+
+    from datetime import datetime as dt, timedelta, timezone
+    now = dt.now(timezone.utc)
+    # Start of current week (Monday)
+    current_week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    # 4 weeks back
+    four_weeks_ago = current_week_start - timedelta(weeks=4)
 
     q = (
-        db.table("form_submissions")
-        .select("submitted_at, form_data")
-        .eq("organisation_id", org_id)
+        sb.table("form_submissions")
+        .select("submitted_at, location_id, estimated_cost")
         .eq("is_deleted", False)
+        .eq("status", "submitted")
         .in_("form_template_id", tpl_ids)
+        .gte("submitted_at", four_weeks_ago.isoformat())
     )
-    if date_from:
-        q = q.gte("submitted_at", date_from)
-    if date_to:
-        q = q.lte("submitted_at", date_to + "T23:59:59")
     if location_id:
         q = q.eq("location_id", location_id)
 
-    res = q.execute()
-    submissions = res.data or []
+    submissions = q.execute().data or []
 
-    from collections import defaultdict, Counter
-
-    day_counts: dict = defaultdict(int)
-    day_items: dict = defaultdict(list)
+    from collections import defaultdict
+    # loc_id → list of (week_start_str, cost)
+    loc_weekly: dict = defaultdict(lambda: defaultdict(float))
 
     for sub in submissions:
         ts = sub.get("submitted_at", "")
+        loc = sub.get("location_id") or "unknown"
+        ec = sub.get("estimated_cost") or 0
         if not ts:
             continue
         try:
-            d = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            key = d.strftime("%Y-%m-%d")
-            day_counts[key] += 1
-            fd = sub.get("form_data") or {}
-            item = fd.get("f4") or fd.get("item_name") or "Unknown"
-            day_items[key].append(item)
-        except ValueError:
+            d = dt.fromisoformat(ts.replace("Z", "+00:00"))
+            # Monday of this submission's week
+            week_mon = d - timedelta(days=d.weekday())
+            week_key = week_mon.strftime("%Y-%m-%d")
+            loc_weekly[loc][week_key] += float(ec)
+        except (ValueError, TypeError):
             pass
 
-    if not day_counts:
-        return {"anomalies": [], "average_daily": 0}
-
-    counts = list(day_counts.values())
-    avg = sum(counts) / len(counts)
-    threshold = avg * 2 if avg > 0 else 1
-
+    current_week_key = current_week_start.strftime("%Y-%m-%d")
     anomalies = []
-    for day, cnt in sorted(day_counts.items()):
-        if cnt >= threshold:
-            top_items = [item for item, _ in Counter(day_items[day]).most_common(3)]
+
+    for loc, weeks in loc_weekly.items():
+        current_cost = weeks.get(current_week_key, 0.0)
+        prior_costs = [v for k, v in weeks.items() if k != current_week_key]
+        if not prior_costs:
+            continue
+        avg = sum(prior_costs) / len(prior_costs)
+        if avg > 0 and current_cost > 1.5 * avg:
             anomalies.append({
-                "date": day,
-                "count": cnt,
-                "average": round(avg, 1),
-                "top_items": top_items,
+                "location_id": loc,
+                "current_week_cost": round(current_cost, 2),
+                "four_week_avg_cost": round(avg, 2),
+                "ratio": round(current_cost / avg, 2),
+                "week_start": current_week_key,
             })
 
-    return {"anomalies": anomalies, "average_daily": round(avg, 1)}
+    anomalies.sort(key=lambda x: -x["ratio"])
+    return {"anomalies": anomalies, "locations_checked": len(loc_weekly)}

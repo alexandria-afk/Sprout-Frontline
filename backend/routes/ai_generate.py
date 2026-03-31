@@ -1111,9 +1111,9 @@ async def sidekick_chat(
                 since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
                 po_res = (
                     sb_ctx.table("form_submissions")
-                    .select("submitted_at, form_data, location_id")
-                    .eq("organisation_id", org_id)
+                    .select("submitted_at, estimated_cost, location_id, form_responses(value, form_fields(label))")
                     .eq("is_deleted", False)
+                    .eq("status", "submitted")
                     .in_("form_template_id", tpl_ids)
                     .gte("submitted_at", since)
                     .limit(200)
@@ -1123,18 +1123,26 @@ async def sidekick_chat(
                 if po_submissions:
                     items = []
                     reasons = []
+                    total_cost = 0.0
                     for sub in po_submissions:
-                        fd = sub.get("form_data") or {}
-                        item = fd.get("f4") or fd.get("item_name")
-                        reason = fd.get("f7") or fd.get("reason")
-                        if item:
-                            items.append(item)
-                        if reason:
-                            reasons.append(reason)
+                        ec = sub.get("estimated_cost")
+                        if ec is not None:
+                            try:
+                                total_cost += float(ec)
+                            except (ValueError, TypeError):
+                                pass
+                        for r in (sub.get("form_responses") or []):
+                            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
+                            val = r.get("value") or ""
+                            if label == "item name" and val:
+                                items.append(val)
+                            elif label == "reason" and val:
+                                reasons.append(val)
                     top_items = Counter(items).most_common(5)
                     top_reasons = Counter(reasons).most_common(5)
                     context_parts.append(
-                        f"Pull-out data (last 30 days): {len(po_submissions)} records. "
+                        f"Pull-out data (last 30 days): {len(po_submissions)} records, "
+                        f"total estimated cost ₱{total_cost:,.2f}. "
                         f"Top wasted items: {', '.join(f'{i} ({c})' for i, c in top_items)}. "
                         f"Top reasons: {', '.join(f'{r} ({c})' for r, c in top_reasons)}."
                     )

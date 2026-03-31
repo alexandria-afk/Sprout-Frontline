@@ -662,6 +662,14 @@ QSR_FORMS = [
                             "required": False,
                             "options": [],
                             "conditional_logic": None
+                        },
+                        {
+                            "id": "f9",
+                            "label": "Estimated Cost",
+                            "type": "number",
+                            "required": True,
+                            "options": [],
+                            "conditional_logic": None
                         }
                     ]
                 }

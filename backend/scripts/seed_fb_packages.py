@@ -383,6 +383,14 @@ _PULL_OUT_COMMON_FIELDS_SUFFIX = [
         "options": [],
         "conditional_logic": None
     },
+    {
+        "id": "f9",
+        "label": "Estimated Cost",
+        "type": "number",
+        "required": True,
+        "options": [],
+        "conditional_logic": None
+    },
 ]
 
 
