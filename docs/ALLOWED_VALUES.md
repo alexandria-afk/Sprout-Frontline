@@ -115,13 +115,69 @@ All `template_items` content JSONB must use only allowed values:
 
 ## Form Template Types
 
-Column: `form_templates.type` (enum: `form_template_type`)
+Column: `form_templates.type` — `TEXT` with a `CHECK` constraint (not a PG enum)
 
-| Value | Description |
-|---|---|
-| `form` | Standard form |
-| `checklist` | Checklist |
-| `pull_out` | Pull-out / wastage record |
+```sql
+CHECK (type = ANY (ARRAY['checklist','form','audit','pull_out']))
+```
+
+| Value | Description | Notes |
+|---|---|---|
+| `form` | Standard data collection form | General-purpose fields |
+| `checklist` | Step-by-step task checklist | Staff complete items in order |
+| `audit` | Scored inspection | Requires an `audit_configs` row with `passing_score`; submissions with score below threshold auto-generate CAPs |
+| `pull_out` | Pull-out / wastage record | Requires an `Estimated Cost` field with value > 0; backend returns HTTP 422 if missing or zero; `estimated_cost` is persisted to `form_submissions.estimated_cost` for analytics |
+
+### Pull-Out Enforcement Rules
+
+1. **Estimated Cost required.** `POST /api/v1/forms/submissions` with `status = "submitted"` for a `pull_out` template validates that a field labelled "Estimated Cost" exists in `form_responses` with a numeric value > 0. Returns 422 if absent or zero.
+2. **Auto-feeds analytics.** All submitted `form_submissions` rows where `form_templates.type = 'pull_out'` are automatically picked up by the pull-out analytics endpoints (`/api/v1/reports/pull-outs/*`). No tagging or naming convention required.
+3. **Anomaly detection.** `GET /api/v1/reports/pull-outs/anomalies` compares each location's current-week total `estimated_cost` against its 4-week rolling average. Locations where current week > 1.5× average are flagged. Anomalies surface in the pull-out analytics dashboard and the AI sidekick nightly brief only — no push notifications or alerts are generated.
+
+---
+
+## Form Field Conditional Logic
+
+Column: `form_fields.conditional_logic` — `JSONB`, nullable
+
+Two shapes are supported:
+
+### Shape 1 — Show / Hide
+
+```json
+{ "fieldId": "uuid", "value": "some-value", "action": "show" }
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `fieldId` | string | UUID of the controlling field |
+| `value` | string | Value that triggers the action |
+| `action` | `"show"` \| `"hide"` | Whether to show or hide this field when the condition matches |
+
+The `type` key is optional and ignored for backwards compatibility.
+
+### Shape 2 — Show Options (dropdown filtering)
+
+```json
+{
+  "type": "show_options",
+  "fieldId": "uuid",
+  "optionsMap": {
+    "Category A": ["Item 1", "Item 2"],
+    "Category B": ["Item 3", "Item 4"]
+  }
+}
+```
+
+| Key | Type | Description |
+|---|---|---|
+| `type` | `"show_options"` | Identifies this as an options-filtering rule |
+| `fieldId` | string | UUID of the parent dropdown field |
+| `optionsMap` | `Record<string, string[]>` | Maps each parent value to the list of allowed options for this field |
+
+**Behaviour in form fill:** When the parent field has no value selected yet, the dependent dropdown shows "Select [parent field label] first…" and no options. When the parent has a value, only the matching `optionsMap` entries are shown. The field itself is always visible (the `show_options` shape does not hide the field).
+
+**No other `conditional_logic` shapes exist.** Do not generate or seed conditional logic with keys like `condition`, `operator`, `target`, or any shape not listed above.
 
 ---
 

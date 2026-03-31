@@ -1,6 +1,6 @@
 # Architecture Reference
 **Frontline Operations Platform**
-_Last updated: 2026-03-30 — generated from codebase scan_
+_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic_
 
 ---
 
@@ -99,7 +99,7 @@ RETAIL APP RENEGADE/
 ## Database
 
 **Engine:** PostgreSQL 17 via Supabase (local port 54322; API port 54321).
-**Migration count:** 51 SQL files in `supabase/migrations/`, ordered by timestamp prefix.
+**Migration count:** 52 SQL files in `supabase/migrations/`, ordered by timestamp prefix.
 **Soft deletes:** `is_deleted BOOLEAN DEFAULT false` column on most entities instead of hard deletion.
 **Multi-tenancy:** Every tenant table has `organisation_id UUID REFERENCES organisations(id)`.
 **RLS:** Enabled on 40+ tables; service role key bypasses RLS for backend writes; authenticated users are scoped to their organisation via `auth.uid() → profiles.organisation_id`.
@@ -118,12 +118,12 @@ RETAIL APP RENEGADE/
 
 | Table | Key Columns | Notes |
 |---|---|---|
-| `form_templates` | `id`, `organisation_id`, `created_by`, `title`, `description`, `type ENUM(checklist\|form)`, `is_active`, `is_deleted` | |
-| `form_sections` | `id`, `template_id`, `title`, `display_order` | |
-| `form_fields` | `id`, `section_id`, `label`, `field_type ENUM(text\|number\|checkbox\|dropdown\|multi_select\|photo\|signature\|datetime)`, `options JSONB`, `is_required`, `conditional_logic JSONB`, `display_order` | |
-| `form_assignments` | `id`, `template_id`, `assigned_to_user_id`, `assigned_to_location_id`, `assigned_by`, `recurrence ENUM(once\|daily\|weekly\|custom)`, `cron_expression`, `due_at`, `is_active` | |
-| `form_submissions` | `id`, `assignment_id`, `submitted_by`, `location_id`, `status ENUM(draft\|submitted\|approved\|rejected)`, `submitted_at`, `reviewed_by`, `reviewed_at`, `manager_comment` | |
-| `form_responses` | `id`, `submission_id`, `field_id`, `value TEXT` (file URL for media fields) | |
+| `form_templates` | `id`, `organisation_id`, `created_by`, `title`, `description`, `type TEXT CHECK(checklist\|form\|audit\|pull_out)`, `is_active`, `is_deleted` | `type` is a `text` column with a `CHECK` constraint — not a PG enum |
+| `form_sections` | `id`, `form_template_id`, `title`, `display_order` | |
+| `form_fields` | `id`, `section_id`, `label`, `field_type ENUM(text\|number\|checkbox\|dropdown\|multi_select\|photo\|signature\|datetime)`, `options JSONB`, `is_required`, `conditional_logic JSONB`, `display_order`, `placeholder`, `is_critical` | `conditional_logic` supports two shapes: `{fieldId, value, action:"show"\|"hide"}` and `{type:"show_options", fieldId, optionsMap:{value→string[]}}` |
+| `form_assignments` | `id`, `form_template_id`, `assigned_to_user_id`, `assigned_to_location_id`, `organisation_id`, `recurrence ENUM(once\|daily\|weekly\|custom)`, `cron_expression`, `due_at`, `is_active`, `is_deleted` | |
+| `form_submissions` | `id`, `form_template_id`, `assignment_id`, `submitted_by`, `location_id`, `status ENUM(draft\|submitted\|approved\|rejected)`, `submitted_at`, `reviewed_by`, `reviewed_at`, `reviewed_at`, `manager_comment`, `overall_score NUMERIC`, `passed BOOLEAN`, `estimated_cost NUMERIC` | `estimated_cost` populated by backend for `pull_out` type submissions only |
+| `form_responses` | `id`, `submission_id`, `field_id`, `value TEXT`, `comment TEXT` | `field_id` FK → `form_fields.id`; `value` is a file URL for media fields |
 
 #### Audits
 
@@ -303,6 +303,7 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 | `POST` | `/logout` | Invalidate session |
 | `POST` | `/change-password` | Change authenticated user's password |
 | `POST` | `/demo-start` | Create demo org + super_admin + onboarding session |
+| `DELETE` | `/demo/{org_id}` | Wipe all DB data for a demo workspace (tables wiped in FK-safe order; used by login screen when switching demo workspaces) |
 
 ### Users — `/api/v1/users`
 
@@ -434,6 +435,10 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 |---|---|---|
 | `GET` | `/compliance` | Audit compliance trend (weekly buckets) |
 | `GET` | `/checklist-completion` | Checklist completion rates by template |
+| `GET` | `/pull-outs/summary` | Pull-out totals: submission count, total estimated cost, breakdown by reason and category; filters: date_from, date_to, location_id |
+| `GET` | `/pull-outs/trends` | Pull-out count and cost by day/week/month; filters: date_from, date_to, location_id, granularity |
+| `GET` | `/pull-outs/top-items` | Most frequently pulled-out items with total cost; filters: date_from, date_to, location_id, limit |
+| `GET` | `/pull-outs/anomalies` | Cost-based weekly anomaly detection per location — flags locations where current week cost > 1.5× 4-week rolling average; filter: location_id |
 
 ### Tasks — `/api/v1/tasks`
 
@@ -723,8 +728,8 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/audits/caps/[id]` | `dashboard/audits/caps/[id]/page.tsx` | CAP detail; confirm/dismiss; spawn follow-ups |
 | `/dashboard/audits/templates` | `dashboard/audits/templates/page.tsx` | Audit template list and builder |
 | `/dashboard/audits/corrective-actions` | `dashboard/audits/corrective-actions/page.tsx` | Corrective actions list |
-| `/dashboard/forms` | `dashboard/forms/page.tsx` | Form/checklist template list |
-| `/dashboard/forms/fill/[id]` | `dashboard/forms/fill/[id]/page.tsx` | Form fill view for assignments |
+| `/dashboard/forms` | `dashboard/forms/page.tsx` | Form template list — supports 4 types: checklist, form, audit, pull_out; filter chips, type picker (4 tiles), GenerateModal, CreateTemplateModal |
+| `/dashboard/forms/fill/[id]` | `dashboard/forms/fill/[id]/page.tsx` | Form fill view for assignments; supports `show_options` conditional logic to filter dropdown options based on another field's value |
 | `/dashboard/training` | `dashboard/training/page.tsx` | Training dashboard (enrollment stats, course list) |
 | `/dashboard/training/courses` | `dashboard/training/courses/page.tsx` | Published courses list |
 | `/dashboard/training/courses/new` | `dashboard/training/courses/new/page.tsx` | New course creation form |
@@ -747,6 +752,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/insights/reports/operations/audits` | `...operations/audits/page.tsx` | Audit compliance report |
 | `/dashboard/insights/reports/operations/caps` | `...operations/caps/page.tsx` | CAP resolution report |
 | `/dashboard/insights/reports/operations/checklists` | `...operations/checklists/page.tsx` | Checklist completion report |
+| `/dashboard/insights/reports/operations/pull-outs` | `...operations/pull-outs/page.tsx` | Pull-Out & Wastage report — summary cards, trends line chart, top items bar chart, anomaly alerts; auto-loads last 30 days |
 | `/dashboard/insights/reports/safety/leaderboard` | `...safety/leaderboard/page.tsx` | Safety points leaderboard report |
 | `/dashboard/insights/reports/issues/maintenance` | `...issues/maintenance/page.tsx` | Maintenance issue report |
 | `/dashboard/insights/reports/issues/incidents` | `...issues/incidents/page.tsx` | Incident report |
@@ -760,6 +766,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/settings/users` | `dashboard/settings/users/page.tsx` | User management (manager+ only) |
 | `/dashboard/settings/audit-trail` | `dashboard/settings/audit-trail/page.tsx` | Audit trail log viewer |
 | `/dashboard/settings/badges` | `dashboard/settings/badges/page.tsx` | Badge config management |
+| `/dashboard/settings/shift-settings` | `dashboard/settings/shift-settings/page.tsx` | Standalone attendance rules form (late threshold, early departure, overtime, break duration); linked from Settings overview |
 
 ### Shared Components (`components/`)
 

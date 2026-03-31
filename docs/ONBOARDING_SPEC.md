@@ -1,7 +1,7 @@
 # Onboarding Spec
 
 **Scope:** Documents the current implementation of the AI-First Onboarding flow.
-**Last updated:** 2026-03-30
+**Last updated:** 2026-03-31
 
 ---
 
@@ -130,6 +130,7 @@ The backend loads the template package for the confirmed `industry_code` from `t
 | 📋 Form | `form` |
 | ✅ Checklist | `checklist` |
 | 🔍 Audit | `audit` |
+| 📦 Pull-Out | `pull_out` |
 | ⚠️ Issue Type | `issue_category` |
 | ⚡ Workflow | `workflow` |
 | 🎓 Training | `training_module` |
@@ -230,7 +231,7 @@ Sessions are created on first visit via `POST /sessions/start` (or `demo-start` 
 
 Seeded by `backend/scripts/seed_industry_packages.py`. Uses `upsert` on `(industry_code, version)`. Existing items for the package are deleted and re-inserted on each seed run.
 
-### Forms & Checklists (10 items)
+### Forms, Checklists & Pull-Outs (11 items)
 
 | Name | Category |
 |---|---|
@@ -244,6 +245,9 @@ Seeded by `backend/scripts/seed_industry_packages.py`. Uses `upsert` on `(indust
 | New Employee Onboarding Checklist | checklist |
 | Incident Report Form | form |
 | Weekly Inventory Count Sheet | form |
+| Pull-Out / Wastage Record | pull_out |
+
+The **Pull-Out / Wastage Record** template has 9 fields: Date, Shift, Category (dropdown), Item Name (dropdown with `show_options` conditional logic keyed on Category), Quantity, Unit, Reason, Notes, and Estimated Cost (number, required). See `ALLOWED_VALUES.md` for pull-out enforcement rules.
 
 The **Daily Store Opening Checklist** has a `form_assignment` created at provisioning time with `recurrence = "daily"` and a `due_at` 24 hours from provisioning time.
 
@@ -292,12 +296,23 @@ Seeded by `backend/scripts/seed_fb_packages.py`. Covers four sub-types: `casual_
 | Forms | 6 | 6 | 5 | 6 |
 | Checklists | 6 | 6 | 6 | 6 |
 | Audits | 4 | 5 | 4 | 3 |
+| Pull-Outs | 1 | 1 | 1 | 1 |
 | Issue Categories | 9 | 9 | 9 | 8 |
 | Workflows | 5 | 5 | 5 | 4 |
 | Training Modules | 9 | 9 | 9 | 7 |
 | Shift Templates | 5 | 5 | 6 | 3 |
 | Repair Manuals | 5 | 5 | 5 | 4 |
 | Badges | 5 | 5 | 5 | 5 |
+
+Each sub-type includes one **Pull-Out / Wastage Record** template (`pull_out` type) with industry-appropriate categories and items. Category/item options differ by sub-type:
+
+| Sub-type | Categories |
+|---|---|
+| casual_dining, full_service_restaurant | Starters, Mains, Desserts, Beverages, Sides, Bread & Pastry |
+| cafe_bar | Coffee, Non-Coffee, Food, Pastry, Alcohol |
+| bakery | Breads, Pastry, Cakes, Beverages, Savory |
+
+The bakery variant uses "Expired / Past shelf life" as the first reason option (vs "Expired / Past hold time" for all others). All F&B pull-out templates share the same 9-field structure as the QSR version: Date, Shift, Category, Item Name (show_options), Quantity, Unit, Reason, Notes, Estimated Cost.
 
 ### Sub-type variations
 
@@ -352,7 +367,7 @@ F&B packages seed badge configs directly from template items instead of using AI
 
 - Every package **must** include `repair_manual` items. Without them, users who skip the Assets step get no repair guides at all (the AI path only runs when assets are registered).
 - Every package **should** include `badge` items. If omitted, badges fall back to AI generation which produces generic results.
-- The `template_items.category` constraint must be updated (migration) before adding any new category values to seed scripts. Currently allowed: `form`, `checklist`, `audit`, `issue_category`, `workflow`, `training_module`, `shift_template`, `repair_manual`, `badge`.
+- The `template_items.category` constraint must be updated (migration) before adding any new category values to seed scripts. Currently allowed: `form`, `checklist`, `audit`, `pull_out`, `issue_category`, `workflow`, `training_module`, `shift_template`, `repair_manual`, `badge`.
 
 ---
 
@@ -374,7 +389,7 @@ F&B packages seed badge configs directly from template items instead of using AI
 | 1 | Creating locations | 8% | `onboarding_locations` |
 | 2 | Registering assets | 15% | `onboarding_assets` |
 | 3 | Setting up vendors | 23% | `onboarding_vendors` |
-| 4 | Creating forms & checklists | 5% | `onboarding_selections` where `category ∈ {form, checklist, audit}` |
+| 4 | Creating forms & checklists | 5% | `onboarding_selections` where `category ∈ {form, checklist, audit, pull_out}` |
 | 5 | Setting up issue categories | 20% | `onboarding_selections` where `category = issue_category` |
 | 6 | Configuring workflows | 35% | `onboarding_selections` where `category = workflow` |
 | 7 | Importing training modules | 50% | `onboarding_selections` where `category = training_module` |
@@ -389,7 +404,7 @@ Note: progress percentages in the code reflect the order in which steps were add
 
 ### Step Detail: Forms & Checklists (Step 4)
 
-- `content.type` is normalised to `form | checklist | audit` (any other value → `checklist`).
+- `content.type` is normalised to `form | checklist | audit | pull_out` (any other value → `checklist`).
 - Each form gets `form_sections` and `form_fields`. Field types are normalised: `pass_fail → yes_no`, `boolean → yes_no`, `select → dropdown`. Unknown types fall back to `text`.
 - Audit forms get an `audit_configs` row with `passing_score` from `content.scoring.passing_threshold` (default 80).
 - The template name is stored in `form_name_to_id` for later resolution of `form_ref` in workflow stages.
