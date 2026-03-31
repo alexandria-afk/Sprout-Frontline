@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   BarChart2, RefreshCw, X, ChevronRight, ClipboardList, AlertOctagon,
@@ -94,7 +94,7 @@ const REPORT_GROUPS: {
     description:"Course completion, certification expiry, and onboarding",
     reports:[
       { label:"Training Completion",  href:"/dashboard/insights/reports/training" },
-      { label:"Certification Expiry", href:"#", soon:true },
+      { label:"Certification Expiry", href:"/dashboard/insights/reports/training/certification-expiry" },
       { label:"Onboarding Progress",  href:"#", soon:true },
     ]},
   { icon:CheckSquare, color:"text-green-600",  bg:"bg-green-50",  label:"Tasks",
@@ -380,7 +380,10 @@ function presetDates(preset: DatePreset, customFrom: string, customTo: string): 
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function InsightsPage() {
   const router = useRouter();
-  const [tab, setTab]               = useState<"analytics"|"reports">("analytics");
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<"analytics"|"reports">(
+    searchParams.get("tab") === "reports" ? "reports" : "analytics"
+  );
 
   // ── Filter state ────────────────────────────────────────────────────────────
   const [datePreset, setDatePreset]   = useState<DatePreset>("month");

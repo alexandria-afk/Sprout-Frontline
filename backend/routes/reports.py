@@ -5,7 +5,7 @@ GET /api/v1/reports/checklist-completion
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -885,4 +885,142 @@ def get_resolution_time(
         "median_resolution_hours": median_h,
         "by_period": by_period,
         "by_location": by_location,
+    }
+
+
+# ── Training / Certification Expiry ───────────────────────────────────────────
+
+@router.get("/training/certification-expiry")
+def get_certification_expiry(
+    days_ahead: int = Query(30, ge=1, le=365),
+    location_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Certification expiry report: per-enrollment validity, summary, by-location and by-course breakdowns."""
+    org_id = _get_org(current_user)
+    sb = get_admin_client()
+
+    # Fetch all passed enrollments with cert_expires_at for this org
+    res = (
+        sb.table("course_enrollments")
+        .select(
+            "id, user_id, course_id, status, cert_issued_at, cert_expires_at, "
+            "courses(title, cert_validity_days), profiles!user_id(full_name, location_id, role)"
+        )
+        .eq("organisation_id", org_id)
+        .eq("status", "passed")
+        .not_.is_("cert_expires_at", "null")
+        .execute()
+    )
+    rows = res.data or []
+
+    # Fetch location names
+    loc_res = sb.table("locations").select("id, name").eq("organisation_id", org_id).execute()
+    loc_map: dict = {l["id"]: l["name"] for l in (loc_res.data or [])}
+
+    today = date.today()
+
+    # Optionally filter by location in Python
+    if location_id:
+        rows = [r for r in rows if (r.get("profiles") or {}).get("location_id") == location_id]
+
+    # Build per-enrollment data and aggregate
+    enrollments_out = []
+    by_location: dict = {}
+    by_course: dict = {}
+
+    total_certified = 0
+    expiring_soon = 0
+    expired = 0
+    valid = 0
+
+    for row in rows:
+        profile = row.get("profiles") or {}
+        course = row.get("courses") or {}
+
+        full_name = profile.get("full_name") or "Unknown"
+        user_loc_id = profile.get("location_id") or ""
+        location_name = loc_map.get(user_loc_id, "Unknown") if user_loc_id else "Unknown"
+
+        course_id = row.get("course_id") or ""
+        course_title = course.get("title") or "Unknown Course"
+
+        cert_expires_raw = row.get("cert_expires_at")
+        cert_issued_raw = row.get("cert_issued_at")
+
+        if not cert_expires_raw:
+            continue
+
+        try:
+            cert_expires_date = date.fromisoformat(str(cert_expires_raw)[:10])
+        except ValueError:
+            continue
+
+        days_until = (cert_expires_date - today).days
+
+        if days_until < 0:
+            status_label = "expired"
+            expired += 1
+        elif days_until <= days_ahead:
+            status_label = "expiring_soon"
+            expiring_soon += 1
+        else:
+            status_label = "valid"
+            valid += 1
+
+        total_certified += 1
+
+        # By location aggregation
+        if user_loc_id not in by_location:
+            by_location[user_loc_id] = {
+                "location_id": user_loc_id,
+                "location_name": location_name,
+                "valid": 0, "expiring_soon": 0, "expired": 0,
+            }
+        by_location[user_loc_id][status_label] += 1
+
+        # By course aggregation
+        if course_id not in by_course:
+            by_course[course_id] = {
+                "course_id": course_id,
+                "course_title": course_title,
+                "valid": 0, "expiring_soon": 0, "expired": 0,
+            }
+        by_course[course_id][status_label] += 1
+
+        enrollments_out.append({
+            "user_id": row.get("user_id") or "",
+            "full_name": full_name,
+            "location_id": user_loc_id,
+            "location_name": location_name,
+            "course_id": course_id,
+            "course_title": course_title,
+            "cert_issued_at": str(cert_issued_raw)[:10] if cert_issued_raw else None,
+            "cert_expires_at": str(cert_expires_raw)[:10],
+            "days_until_expiry": days_until,
+            "expiry_status": status_label,
+        })
+
+    # Sort enrollments: expired first, then expiring_soon by days asc, then valid
+    def _sort_key(e):
+        s = e["expiry_status"]
+        d = e["days_until_expiry"]
+        if s == "expired":
+            return (0, d)
+        if s == "expiring_soon":
+            return (1, d)
+        return (2, d)
+
+    enrollments_out.sort(key=_sort_key)
+
+    return {
+        "summary": {
+            "total_certified": total_certified,
+            "expiring_soon": expiring_soon,
+            "expired": expired,
+            "valid": valid,
+        },
+        "by_location": sorted(by_location.values(), key=lambda x: x["location_name"]),
+        "by_course": sorted(by_course.values(), key=lambda x: -(x["expired"] + x["expiring_soon"])),
+        "enrollments": enrollments_out,
     }
