@@ -285,11 +285,13 @@ class FormService:
     async def create_assignment(body: CreateAssignmentRequest, org_id: str) -> dict:
         supabase = get_supabase()
 
-        # Audit templates require a location
+        # Audit templates require a location.
+        # The org_id filter ensures a manager cannot assign a template from another org.
         template_type_resp = (
             supabase.table("form_templates")
             .select("type")
             .eq("id", str(body.form_template_id))
+            .eq("organisation_id", str(org_id))
             .maybe_single()
             .execute()
         )

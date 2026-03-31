@@ -333,12 +333,19 @@ async def analytics_completion(current_user: dict = Depends(require_manager_or_a
 @router.post("/upload")
 async def upload_training_file(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_manager_or_above),
 ):
     import uuid, time
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     db = get_admin_client()
+
+    # Restrict to safe media types — reject anything that is not a video,
+    # image, or PDF to prevent arbitrary file uploads.
+    allowed_prefixes = ("video/", "image/", "application/pdf")
+    content_type = file.content_type or ""
+    if not any(content_type.startswith(prefix) for prefix in allowed_prefixes):
+        raise HTTPException(status_code=422, detail="Unsupported file type")
 
     content = await file.read()
     if len(content) > 100 * 1024 * 1024:

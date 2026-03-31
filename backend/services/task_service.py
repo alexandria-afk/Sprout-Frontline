@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging as _logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import HTTPException
+
+_log = _logging.getLogger(__name__)
 
 from models.tasks import (
     CreateTaskRequest,
@@ -247,7 +250,8 @@ class TaskService:
                         if m["user_id"] != user_id
                         and (last_read is None or m["created_at"] > last_read)
                     )
-            except Exception:
+            except Exception as e:
+                _log.warning("Failed to fetch unread counts for tasks: %s", e)
                 for t in items:
                     t["unread_message_count"] = 0
         else:
@@ -516,7 +520,8 @@ class TaskService:
                         if m["user_id"] != user_id
                         and (last_read is None or m["created_at"] > last_read)
                     )
-            except Exception:
+            except Exception as e:
+                _log.warning("Failed to fetch unread counts for tasks: %s", e)
                 for t in tasks:
                     t["unread_message_count"] = 0
         return tasks

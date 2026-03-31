@@ -36,7 +36,7 @@ INDUSTRY_DISPLAY = {
 
 class CompanyProfile(BaseModel):
     company_name: str
-    industry_code: str
+    industry_code: Optional[IndustryCode] = None
     industry_subcategory: Optional[str] = None
     estimated_locations: Optional[int] = None
     brand_color_hex: Optional[str] = None
@@ -50,7 +50,7 @@ class CompanyDiscoveryRequest(BaseModel):
 
 class CompanyDiscoveryFallbackRequest(BaseModel):
     company_name: str
-    industry_code: str
+    industry_code: Optional[IndustryCode] = None
     industry_subcategory: Optional[str] = None
     estimated_locations: Optional[int] = None
 

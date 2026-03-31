@@ -278,8 +278,8 @@ async def _scrape_website(url: str) -> dict:
                     + "\n\n[Store Locator Page: " + loc_url + "]\n"
                     + loc_text[:6000]
                 )
-        except Exception:
-            pass  # Sub-page failure is non-fatal; homepage text is still available
+        except Exception as e:
+            _log.debug("Sub-page fetch failed: %s", e)  # Non-fatal; homepage text is still available
 
     return scraped
 
@@ -361,6 +361,7 @@ async def discover_company(
     """Step 1: Scrape website and classify company. Does not advance step."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
+    _require_step(session, 1)
 
     scrape = await _scrape_website(req.website_url)
     profile = await _classify_with_ai(scrape)
@@ -388,7 +389,8 @@ async def discover_company_fallback(
 ):
     """Step 1 fallback: Manual entry when scrape fails."""
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
+    session = _get_session(session_id, org_id)
+    _require_step(session, 1)
 
     get_supabase().table("onboarding_sessions").update({
         "company_name": req.company_name,
@@ -506,7 +508,13 @@ def _build_content_preview(category: str, content: dict) -> dict:
 
 @router.get("/sessions/{session_id}/templates", response_model=IndustryPackageResponse)
 async def get_templates(session_id: str, current_user: dict = Depends(get_current_user)):
-    """Load industry package with current selections for this session."""
+    """Load industry package with current selections for this session.
+
+    Step 6 = template selection (the step where the user picks their templates).
+    Steps 7 (workspace preview) and 8 (launch) are downstream of step 6, so
+    sessions at those steps are also permitted to call this endpoint — hence
+    the guard uses >= 6 rather than == 6.
+    """
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
     _require_step(session, 6)
@@ -768,7 +776,7 @@ async def upload_employee_csv(
                 unique_combos[key] = 0
             unique_combos[key] += 1
 
-        mappings = await _map_roles_with_ai(session_id, unique_combos)
+        mappings = await _map_roles_with_ai(session_id, unique_combos, org_id)
         role_map = {(m["source_title"], m.get("source_department", "")): m["retail_role"] for m in mappings}
 
         # Insert employees
@@ -808,7 +816,7 @@ async def upload_employee_csv(
     )
 
 
-async def _map_roles_with_ai(session_id: str, combos: dict) -> list[dict]:
+async def _map_roles_with_ai(session_id: str, combos: dict, org_id: str) -> list[dict]:
     """AI role mapping for unique position+department combos."""
     client = _get_anthropic()
     sb = get_supabase()
@@ -861,7 +869,7 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
     # Fetch existing row IDs first, insert new rows, then delete the old ones
     # only after the insert succeeds — so a failed insert never leaves the
     # session with zero mappings.
-    existing_rows = sb.table("role_mappings").select("id").eq("session_id", session_id).execute()
+    existing_rows = sb.table("role_mappings").select("id").eq("session_id", session_id).eq("organisation_id", org_id).execute()
     old_ids = [r["id"] for r in (existing_rows.data or [])]
 
     to_insert = []
@@ -869,6 +877,7 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
         count = combos.get((m.get("source_title", ""), m.get("source_department", "")), 1)
         to_insert.append({
             "session_id": session_id,
+            "organisation_id": org_id,
             "source_title": m.get("source_title", ""),
             "source_department": m.get("source_department"),
             "retail_role": m.get("retail_role", "staff"),
@@ -880,7 +889,7 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
         sb.table("role_mappings").insert(to_insert).execute()
         # Insert succeeded — now safe to remove the previous mappings
         if old_ids:
-            sb.table("role_mappings").delete().in_("id", old_ids).execute()
+            sb.table("role_mappings").delete().eq("organisation_id", org_id).in_("id", old_ids).execute()
 
     return mappings
 

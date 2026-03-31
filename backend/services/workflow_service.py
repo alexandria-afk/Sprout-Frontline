@@ -608,12 +608,20 @@ async def tick_wait_stages() -> dict:
       - Timed out (due_at <= now), or
       - Condition met (e.g. all_courses_passed for the subject_user_id).
     Call this every 5 minutes via an internal cron endpoint.
+
+    Cross-tenant design note: this function is intentionally called from the
+    internal tick endpoint and processes wait stages across ALL organisations
+    in a single query.  There is no single-org scope here by design.  The
+    select is deliberately limited to the minimum columns needed to keep the
+    memory footprint small when the table grows.
     """
     db = get_admin_client()
     now = datetime.now(timezone.utc)
     advanced = 0
     timed_out_count = 0
 
+    # Select only the columns required for timeout/condition evaluation — do
+    # not use SELECT * to avoid loading large config blobs for non-wait stages.
     res = db.table("workflow_stage_instances") \
         .select(
             "id, workflow_instance_id, due_at, stage_id,"

@@ -85,7 +85,7 @@ class LmsService:
         return {"items": result.data or [], "total_count": count_result.count or 0, "page": page, "page_size": page_size}
 
     @staticmethod
-    async def list_managed_courses(org_id: str, page: int = 1, page_size: int = 20, search: str = None):
+    async def list_managed_courses(org_id: str, page: int = 1, page_size: int = 20, search: Optional[str] = None):
         """All courses (including drafts) for managers."""
         supabase = get_supabase()
         offset = (page - 1) * page_size

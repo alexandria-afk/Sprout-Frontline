@@ -351,6 +351,7 @@ class ShiftService:
             db.table("shifts")
             .update({"status": "published", "updated_at": _now()})
             .in_("id", ids)
+            .eq("organisation_id", org_id)
             .execute()
         )
         return {"published": len(resp.data or [])}

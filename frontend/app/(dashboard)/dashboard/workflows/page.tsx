@@ -91,13 +91,13 @@ export default function WorkflowsPage() {
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [defSearch, setDefSearch] = useState("");
-  const [role, setRole] = useState<string>("admin");
+  const [role, setRole] = useState<string>("");
 
   // Resolve viewer role from session
   useEffect(() => {
     const supabase = createClient();
     supabase.auth.getSession().then(({ data }) => {
-      const r = (data.session?.user?.app_metadata?.role as string) ?? "admin";
+      const r = (data.session?.user?.app_metadata?.role as string) ?? "";
       setRole(r);
     });
   }, []);

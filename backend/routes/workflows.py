@@ -249,12 +249,15 @@ async def create_workflow_definition(
         "is_active": body.is_active,
     }
     if body.form_template_id:
-        # Check no existing workflow for this template
+        # Check no existing *active* workflow for this template.
+        # Inactive (but not deleted) workflows do not block creation so that
+        # a deactivated workflow can be superseded by a fresh one.
         existing = db.table("workflow_definitions") \
             .select("id") \
             .eq("form_template_id", str(body.form_template_id)) \
             .eq("organisation_id", org_id) \
             .eq("is_deleted", False) \
+            .eq("is_active", True) \
             .maybe_single() \
             .execute()
         if existing.data:

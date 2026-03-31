@@ -221,7 +221,10 @@ function Step1({
         setLocSuggestions(suggested.filter((s) => !savedNames.has(s.name.toLowerCase())));
         setLocSuggestionsVisible(50);
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error("Failed to load location suggestions:", err);
+        setLocError("Failed to load location suggestions. Please try again.");
+      })
       .finally(() => setLocsLoading(false));
   }, [companyConfirmed, profile, session.session_id]);
 
@@ -241,7 +244,10 @@ function Step1({
         setLocSuggestions(suggested.filter((s) => !savedNames.has(s.name.toLowerCase())));
         setLocSuggestionsVisible(50);
       })
-      .catch(() => {})
+      .catch((err) => {
+        console.error("Failed to refresh location suggestions:", err);
+        setLocError("Failed to load location suggestions. Please try again.");
+      })
       .finally(() => setLocsLoading(false));
   };
 

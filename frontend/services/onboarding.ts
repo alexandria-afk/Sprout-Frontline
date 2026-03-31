@@ -180,7 +180,7 @@ export const getTemplates = (sessionId: string): Promise<IndustryPackage> =>
 export const updateSelections = (
   sessionId: string,
   updates: { template_id: string; is_selected: boolean }[]
-): Promise<SelectionSummary> =>
+): Promise<{ ok: boolean }> =>
   apiFetch(`${BASE}/sessions/${sessionId}/selections`, {
     method: "PATCH",
     body: JSON.stringify(updates),
