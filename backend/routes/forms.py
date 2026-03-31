@@ -24,7 +24,8 @@ async def generate_form_template(
     current_user: dict = Depends(require_manager_or_above),
 ):
     """Use AI to generate a form template from a plain-text description."""
-    return await generate_template(body)
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    return await generate_template(body, org_id=org_id)
 
 
 @router.get("/templates")

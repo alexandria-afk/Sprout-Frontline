@@ -63,6 +63,7 @@ export interface SelectionSummary {
   training_modules: number;
   shift_templates: number;
   repair_manuals: number;
+  badges: number;
   total_selected: number;
   total_available: number;
 }
@@ -99,6 +100,7 @@ export interface OnboardingEmployee {
   department?: string;
   retail_role: string;
   location_name?: string;
+  reports_to?: string;
   status?: string;
 }
 
@@ -145,7 +147,7 @@ export const createSession = (): Promise<OnboardingSession> =>
   apiFetch(`${BASE}/sessions`, { method: "POST" });
 
 export const getCurrentSession = (): Promise<OnboardingSession | null> =>
-  apiFetch(`${BASE}/sessions/current`).catch(() => null);
+  apiFetch<OnboardingSession>(`${BASE}/sessions/current`).catch(() => null);
 
 // ── Step 1 ───────────────────────────────────────────────────────────────────
 
@@ -242,6 +244,9 @@ export const deleteVendor = (sessionId: string, vendorId: string): Promise<void>
 export const confirmAssets = (sessionId: string): Promise<OnboardingSession> =>
   apiFetch(`${BASE}/sessions/${sessionId}/confirm-assets`, { method: "POST" });
 
+export const confirmVendors = (sessionId: string): Promise<OnboardingSession> =>
+  apiFetch(`${BASE}/sessions/${sessionId}/confirm-vendors`, { method: "POST" });
+
 // ── Step 5: Team ──────────────────────────────────────────────────────────────
 
 export const setEmployeeSource = (sessionId: string, source: string): Promise<OnboardingSession> =>
@@ -277,7 +282,12 @@ export const getRoleMappings = (sessionId: string): Promise<RoleMapping[]> =>
 export const confirmEmployees = (sessionId: string): Promise<OnboardingSession> =>
   apiFetch(`${BASE}/sessions/${sessionId}/confirm-employees`, { method: "POST" });
 
-// ── Step 6: Preview ───────────────────────────────────────────────────────────
+// ── Step 6: Shift Settings ────────────────────────────────────────────────────
+
+export const confirmShiftSettings = (sessionId: string): Promise<OnboardingSession> =>
+  apiFetch(`${BASE}/sessions/${sessionId}/confirm-shift-settings`, { method: "POST" });
+
+// ── Step 7: Preview ───────────────────────────────────────────────────────────
 
 export const getWorkspacePreview = (sessionId: string): Promise<WorkspacePreview> =>
   apiFetch(`${BASE}/sessions/${sessionId}/preview`);
@@ -297,3 +307,24 @@ export const getFirstActions = (
   sessionId: string
 ): Promise<{ actions: { title: string; description: string; icon: string; action_url: string; action_label: string }[] }> =>
   apiFetch(`${BASE}/sessions/${sessionId}/first-actions`);
+
+// ── Package templates (post-onboarding) ─────────────────────────────────────
+
+export interface PackageTemplateItem {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  content: Record<string, unknown>;
+  sort_order: number;
+}
+
+export interface PackageTemplatesResponse {
+  items: PackageTemplateItem[];
+  industry_code: string | null;
+}
+
+export const getPackageTemplates = (category?: string): Promise<PackageTemplatesResponse> => {
+  const qs = category ? `?category=${encodeURIComponent(category)}` : "";
+  return apiFetch(`${BASE}/package-templates${qs}`);
+};

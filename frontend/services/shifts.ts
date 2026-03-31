@@ -54,7 +54,7 @@ export function deleteShiftTemplate(id: string): Promise<{ ok: boolean }> {
 
 export function bulkGenerateShifts(
   templateId: string,
-  body: { date_from: string; date_to: string }
+  body: { date_from: string; date_to: string; location_id?: string }
 ): Promise<{ shifts_created: number }> {
   return apiFetch(`/api/v1/shifts/templates/${templateId}/generate`, {
     method: "POST",

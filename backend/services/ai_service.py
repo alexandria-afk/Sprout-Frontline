@@ -5,6 +5,7 @@ import anthropic
 from fastapi import HTTPException
 from models.forms import GenerateTemplateRequest, CreateFormTemplateRequest
 from config import settings
+from services.industry_context import get_industry_context
 
 
 _client: anthropic.Anthropic | None = None
@@ -62,7 +63,7 @@ Rules:
 """
 
 
-async def _call_with_retries(client: anthropic.Anthropic, messages: list, max_tokens: int = 4096) -> str:
+async def _call_with_retries(client: anthropic.Anthropic, messages: list, max_tokens: int = 4096, system_prompt: str = _SYSTEM_PROMPT) -> str:
     """Call Claude with retry logic. Returns raw text content."""
     max_retries = 3
     last_error: Exception | None = None
@@ -72,7 +73,7 @@ async def _call_with_retries(client: anthropic.Anthropic, messages: list, max_to
         return client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=mt,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=msgs,
         )
 
@@ -150,8 +151,9 @@ async def _fetch_url_content(url: str) -> str:
         raise HTTPException(status_code=400, detail=f"Failed to fetch URL content: {e}")
 
 
-async def generate_template(body: GenerateTemplateRequest) -> CreateFormTemplateRequest:
+async def generate_template(body: GenerateTemplateRequest, org_id: str | None = None) -> CreateFormTemplateRequest:
     client = _get_client()
+    effective_system = get_industry_context(org_id) + _SYSTEM_PROMPT
 
     input_type = body.input_type or "topic"
 
@@ -196,7 +198,7 @@ async def generate_template(body: GenerateTemplateRequest) -> CreateFormTemplate
         )
         messages = [{"role": "user", "content": user_message}]
 
-    text = await _call_with_retries(client, messages)
+    text = await _call_with_retries(client, messages, system_prompt=effective_system)
 
     try:
         data = json.loads(text)

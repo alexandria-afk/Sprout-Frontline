@@ -715,97 +715,90 @@ QSR_ISSUE_CATEGORIES = [
 
 QSR_WORKFLOWS = [
     {
-        "name": "Critical Issue Escalation",
-        "description": "Auto-escalates critical issues to area manager if not resolved within 30 minutes",
+        "name": "New Hire Onboarding",
+        "description": "Assigns mandatory training when a new staff member is created, waits for completion, then prompts manager to schedule a shadow shift",
         "category": "workflow",
         "is_recommended": True,
         "sort_order": 1,
         "content": {
-            "workflow_name": "Critical Issue Escalation",
-            "trigger": {"type": "issue_filed", "conditions": {"priority": "critical"}},
+            "workflow_name": "New Hire Onboarding",
+            "trigger": {
+                "type": "employee_created",
+                "conditions": {"roles": ["staff"]},
+            },
             "stages": [
-                {"type": "notify", "target_role": "manager", "channels": ["push", "sms"], "wait_minutes": 0},
-                {"type": "condition", "check": "issue_status != 'resolved'", "wait_minutes": 30},
-                {"type": "escalate", "target_role": "admin", "channels": ["push", "sms", "email"]},
-                {"type": "condition", "check": "issue_status != 'resolved'", "wait_minutes": 60},
-                {"type": "escalate", "target_role": "super_admin", "channels": ["push", "sms", "email"]},
+                {
+                    "type": "assign_training",
+                    "name": "Assign Onboarding Training",
+                    "assigned_role": "manager",
+                    "course_refs": [
+                        "Food Safety Fundamentals",
+                        "POS System Training",
+                        "Customer Service Excellence",
+                        "Workplace Safety & Emergency Response",
+                    ],
+                    "deadline_days": 7,
+                    "on_deadline_missed": "notify",
+                },
+                {
+                    "type": "wait",
+                    "name": "Wait for Training Completion",
+                    "condition": "all_courses_passed",
+                    "timeout_days": 7,
+                },
+                {
+                    "type": "notify",
+                    "name": "Notify Manager — Training Complete",
+                    "assigned_role": "manager",
+                    "message": "{employee.name} has completed all onboarding training",
+                },
+                {
+                    "type": "create_task",
+                    "name": "Schedule Shadow Shift",
+                    "assigned_role": "manager",
+                    "title": "Schedule shadow shift for {employee.name}",
+                    "priority": "medium",
+                    "deadline_days": 3,
+                    "is_final": True,
+                },
             ],
-        }
+        },
     },
     {
-        "name": "Failed Audit Item → Corrective Action",
-        "description": "Creates a corrective action task when an audit item fails",
+        "name": "Equipment Repair Request",
+        "description": "Routes equipment failure issues through manager assessment, a maintenance log form, and admin sign-off",
         "category": "workflow",
         "is_recommended": True,
         "sort_order": 2,
         "content": {
-            "workflow_name": "Failed Audit Item → Corrective Action",
-            "trigger": {"type": "audit_item_failed", "conditions": {}},
-            "stages": [
-                {"type": "create_task", "assign_to_role": "manager", "title": "Corrective action: {failed_item}", "due_hours": 24},
-                {"type": "notify", "target_role": "manager", "channels": ["push"], "wait_minutes": 0},
-                {"type": "condition", "check": "task_status != 'completed'", "wait_minutes": 1440},
-                {"type": "escalate", "target_role": "admin", "channels": ["push", "email"]},
-            ],
-        }
-    },
-    {
-        "name": "Equipment Repair Request",
-        "description": "Routes equipment failure issues to maintenance and tracks repair",
-        "category": "workflow",
-        "is_recommended": True,
-        "sort_order": 3,
-        "content": {
             "workflow_name": "Equipment Repair Request",
-            "trigger": {"type": "issue_filed", "conditions": {"category": "Equipment Failure"}},
+            "trigger": {
+                "type": "issue_created",
+                "issue_category_ref": "Equipment Failure",
+            },
             "stages": [
-                {"type": "notify", "target_role": "manager", "channels": ["push"], "wait_minutes": 0},
-                {"type": "create_task", "assign_to_role": "manager", "title": "Arrange repair: {issue_title}", "due_hours": 4},
-                {"type": "condition", "check": "task_status != 'completed'", "wait_minutes": 240},
-                {"type": "escalate", "target_role": "admin", "channels": ["push", "email"]},
+                {
+                    "type": "create_task",
+                    "name": "Assess Equipment Failure",
+                    "assigned_role": "manager",
+                    "title": "Assess equipment failure: {issue.title} at {location.name}",
+                    "priority": "high",
+                    "due_hours": 4,
+                },
+                {
+                    "type": "fill_form",
+                    "name": "Complete Maintenance Log",
+                    "assigned_role": "manager",
+                    "form_ref": "Equipment Maintenance Log",
+                },
+                {
+                    "type": "review",
+                    "name": "Admin Review",
+                    "assigned_role": "admin",
+                    "is_final": True,
+                },
             ],
-        }
-    },
-    {
-        "name": "Daily Checklist Reminder",
-        "description": "Sends push reminder to shift manager if opening/closing checklist not completed by scheduled time",
-        "category": "workflow",
-        "is_recommended": True,
-        "sort_order": 4,
-        "content": {
-            "workflow_name": "Daily Checklist Reminder",
-            "trigger": {"type": "schedule", "conditions": {"time": "08:30", "days": ["mon","tue","wed","thu","fri","sat","sun"]}},
-            "stages": [
-                {"type": "condition", "check": "opening_checklist_submitted == false", "wait_minutes": 0},
-                {"type": "notify", "target_role": "manager", "channels": ["push"], "wait_minutes": 0,
-                 "message": "Opening checklist not yet submitted. Please complete before 9AM."},
-                {"type": "condition", "check": "opening_checklist_submitted == false", "wait_minutes": 30},
-                {"type": "escalate", "target_role": "admin", "channels": ["push"]},
-            ],
-        }
-    },
-    {
-        "name": "New Hire Onboarding",
-        "description": "Automatically assigns mandatory training modules and sends welcome message when a new staff member is added",
-        "category": "workflow",
-        "is_recommended": True,
-        "sort_order": 5,
-        "content": {
-            "workflow_name": "New Hire Onboarding",
-            "trigger": {"type": "user_created", "conditions": {"role": "staff"}},
-            "stages": [
-                {"type": "assign_training", "modules": [
-                    "Food Safety Fundamentals",
-                    "Customer Service Excellence",
-                    "Cash Handling Procedures",
-                    "Workplace Safety & Emergency Response",
-                ], "due_days": 7},
-                {"type": "notify", "target_user": "new_hire", "channels": ["push", "email"], "wait_minutes": 0,
-                 "message": "Welcome! You have 4 training modules to complete in your first week."},
-                {"type": "notify", "target_role": "manager", "channels": ["push"], "wait_minutes": 0,
-                 "message": "New hire {user_name} has been added. Training assigned automatically."},
-            ],
-        }
+        },
     },
 ]
 

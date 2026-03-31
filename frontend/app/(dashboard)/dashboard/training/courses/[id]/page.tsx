@@ -6,7 +6,7 @@ import {
   ArrowLeft, Plus, Trash2, GripVertical, ChevronRight,
   Save, Send, Sparkles, BookOpen, HelpCircle, Video, FileText,
   Check, X, ChevronUp, ChevronDown, Loader2, Settings,
-  LayoutList, EyeOff, AlertTriangle, Lock, Copy, Upload,
+  LayoutList, EyeOff, AlertTriangle, Lock, Copy, Upload, RefreshCw,
 } from "lucide-react";
 import {
   DragDropContext, Droppable, Draggable, DropResult,
@@ -733,6 +733,9 @@ export default function CourseBuilderPage() {
   const [unpublishPending, setUnpublishPending] = useState<"keep" | "cancel">("keep");
   const [unpublishing, setUnpublishing] = useState(false);
 
+  // Regenerate content
+  const [regenerating, setRegenerating] = useState(false);
+
   // Load course
   useEffect(() => {
     getCourse(courseId).then(c => {
@@ -925,6 +928,32 @@ export default function CourseBuilderPage() {
     }
   }
 
+  const hasEmptySlides = modules.some(m =>
+    m.module_type === "slides" && (m.slides.length === 0 || m.slides.some(s => !s.body?.trim()))
+  );
+
+  async function handleRegenerate() {
+    if (!course) return;
+    setRegenerating(true);
+    setError("");
+    try {
+      await apiFetch(`/api/v1/lms/courses/${courseId}/regenerate-content`, { method: "POST" });
+      // Reload the course to pull in the new slides
+      const refreshed = await getCourse(courseId);
+      if (refreshed) {
+        const synced = (refreshed.course_modules ?? [])
+          .sort((a, b) => a.display_order - b.display_order)
+          .map(moduleToLocal);
+        setModules(synced);
+        if (synced.length > 0) setSelectedModuleId(synced[0]._id);
+      }
+    } catch (e) {
+      setError((e as Error).message || "Failed to regenerate content.");
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
   const isPublished = course?.is_published ?? false;
 
   function guardLocked(): boolean {
@@ -981,6 +1010,13 @@ export default function CourseBuilderPage() {
           </div>
         </div>
         {error && <p className="text-xs text-red-500 max-w-xs truncate">{error}</p>}
+        {hasEmptySlides && (
+          <button onClick={handleRegenerate} disabled={regenerating || saving || publishing}
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-violet-300 bg-violet-50 text-violet-700 rounded-lg text-sm font-medium hover:bg-violet-100 disabled:opacity-50 transition-colors">
+            {regenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {regenerating ? "Regenerating…" : "Regenerate Content"}
+          </button>
+        )}
         <button onClick={handleSave} disabled={saving || publishing}
           className={clsx(
             "flex items-center gap-1.5 px-3 py-1.5 border rounded-lg text-sm font-medium transition-all",

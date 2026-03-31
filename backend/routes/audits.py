@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dependencies import get_current_user, require_manager_or_above, paginate
+from services.industry_context import get_industry_context
 from models.audits import (
     CreateAuditTemplateRequest,
     UpdateAuditTemplateRequest,
@@ -118,7 +119,7 @@ async def generate_audit_template_draft(
 
     with AITimer() as timer:
         try:
-            text = await _call_claude(_AUDIT_TEMPLATE_SYSTEM, user_message)
+            text = await _call_claude(get_industry_context(org_id) + _AUDIT_TEMPLATE_SYSTEM, user_message)
             success = True
         except Exception as e:
             log_ai_request(

@@ -49,6 +49,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useFormStore } from "@/stores/useFormStore";
 import { createTemplate, deleteTemplate, updateTemplate, generateTemplate, getTemplate, getMyAssignments, getAssignmentDraft, createAssignment, listSubmissions, getSubmission, reviewSubmission, getTemplateStats, type FormAssignment, type FormSubmissionListItem, type FormSubmissionDetail } from "@/services/forms";
+import { getPackageTemplates } from "@/services/onboarding";
 import { listCAPs } from "@/services/caps";
 import type { CAP, CAPStatus } from "@/types";
 import { apiFetch } from "@/services/api/client";
@@ -2637,7 +2638,16 @@ export default function FormsPage() {
 
 // ── NewTemplateModal ──────────────────────────────────────────────────────────
 
-const FORM_STARTERS: { icon: string; name: string; type: "form" | "checklist" | "audit"; description: string; color: string }[] = [
+type FormStarterItem = {
+  icon: string;
+  name: string;
+  type: "form" | "checklist" | "audit";
+  description: string;
+  color: string;
+  prefillSections?: TemplateFormValues["sections"];
+};
+
+const FORM_STARTERS: FormStarterItem[] = [
   { icon: "📋", name: "Daily Store Opening", type: "checklist", description: "Standard opening checklist for staff", color: "bg-blue-50 border-blue-200" },
   { icon: "🍽️", name: "Food Safety Audit", type: "audit", description: "Temperature logs and hygiene checks", color: "bg-green-50 border-green-200" },
   { icon: "🔧", name: "Maintenance Request", type: "form", description: "Equipment issue reporting form", color: "bg-orange-50 border-orange-200" },
@@ -2645,6 +2655,17 @@ const FORM_STARTERS: { icon: string; name: string; type: "form" | "checklist" | 
   { icon: "📦", name: "Inventory Count Sheet", type: "checklist", description: "Stock count per product category", color: "bg-purple-50 border-purple-200" },
   { icon: "🆕", name: "Staff Onboarding", type: "checklist", description: "New hire orientation steps", color: "bg-teal-50 border-teal-200" },
 ];
+
+const FORM_TYPE_ICON: Record<string, string> = {
+  form: "📝",
+  checklist: "✅",
+  audit: "🔍",
+};
+const FORM_TYPE_COLOR: Record<string, string> = {
+  form: "bg-purple-50 border-purple-200",
+  checklist: "bg-blue-50 border-blue-200",
+  audit: "bg-green-50 border-green-200",
+};
 
 function NewTemplateModal({
   onClose,
@@ -2658,14 +2679,50 @@ function NewTemplateModal({
   onSelectStarter: (prefill: TemplateFormValues) => void;
 }) {
   const [mode, setMode] = useState<"select" | "template">("select");
+  const [starters, setStarters] = useState<FormStarterItem[]>(FORM_STARTERS);
 
-  const handleStarterClick = (starter: typeof FORM_STARTERS[number]) => {
+  // Fetch industry-specific form/checklist templates; fall back to generic starters
+  useEffect(() => {
+    Promise.all([
+      getPackageTemplates("form"),
+      getPackageTemplates("checklist"),
+    ]).then(([formsRes, checklistsRes]) => {
+      const combined = [...formsRes.items, ...checklistsRes.items];
+      if (!combined.length) return;
+      const mapped: FormStarterItem[] = combined.map((item) => {
+        const c = item.content as Record<string, unknown>;
+        const formType = ((c.type as string) || item.category) as "form" | "checklist" | "audit";
+        const rawSections = (c.sections as Record<string, unknown>[]) ?? [];
+        const prefillSections: TemplateFormValues["sections"] = rawSections.map((sec) => ({
+          title: (sec.title as string) ?? "Section",
+          fields: ((sec.fields as Record<string, unknown>[]) ?? []).map((f) => ({
+            label: (f.label as string) ?? "",
+            field_type: ((f.type as string) ?? "text") as FormFieldType,
+            is_required: (f.required as boolean) ?? false,
+            placeholder: (f.placeholder as string) ?? "",
+            options: (f.options as string[]) ?? undefined,
+          })),
+        })).filter((s) => s.fields.length > 0);
+        return {
+          icon: FORM_TYPE_ICON[formType] ?? "📄",
+          name: item.name,
+          type: formType,
+          description: item.description,
+          color: FORM_TYPE_COLOR[formType] ?? "bg-gray-50 border-gray-200",
+          prefillSections: prefillSections.length > 0 ? prefillSections : undefined,
+        };
+      });
+      setStarters(mapped);
+    }).catch(() => {});
+  }, []);
+
+  const handleStarterClick = (starter: FormStarterItem) => {
     onSelectStarter({
       title: starter.name,
       description: "",
       type: starter.type,
       passing_score: 80,
-      sections: [],
+      sections: starter.prefillSections ?? [],
     } as TemplateFormValues);
   };
 
@@ -2723,7 +2780,7 @@ function NewTemplateModal({
           <div className="p-5">
             <p className="text-xs text-dark/50 mb-4">Choose a starter to pre-fill the title and type. You can add all fields in the builder.</p>
             <div className="grid grid-cols-2 gap-3">
-              {FORM_STARTERS.map((s) => (
+              {starters.map((s) => (
                 <button key={s.name} onClick={() => handleStarterClick(s)}
                   className={`text-left p-3 rounded-xl border-2 hover:border-sprout-purple/50 hover:shadow-sm transition-all ${s.color}`}>
                   <div className="text-xl mb-1.5">{s.icon}</div>

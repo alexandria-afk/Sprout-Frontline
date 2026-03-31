@@ -6,6 +6,7 @@ from typing import Optional
 import httpx
 import anthropic
 from services.supabase_client import get_supabase
+from services.industry_context import get_industry_context
 from models.lms import (
     CreateCourseRequest,
     UpdateCourseRequest,
@@ -327,7 +328,7 @@ class LmsService:
                 raw = client.messages.create(
                     model="claude-haiku-4-5",
                     max_tokens=8192,
-                    system=_COURSE_SYSTEM_PROMPT,
+                    system=get_industry_context(org_id) + _COURSE_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_content}],
                 ).content[0].text.strip()
 

@@ -522,15 +522,22 @@ class TaskService:
         return tasks
 
     @staticmethod
-    async def summary(org_id: str) -> dict:
+    async def summary(org_id: str, user_id: Optional[str] = None) -> dict:
         db = get_supabase()
-        resp = (
+        query = (
             db.table("tasks")
             .select("id,status,due_at,priority,title,locations(name)", count="exact")
             .eq("organisation_id", org_id)
             .eq("is_deleted", False)
-            .execute()
         )
+        if user_id:
+            # Scope to tasks assigned to this user
+            ta = db.table("task_assignees").select("task_id").eq("user_id", user_id).eq("is_deleted", False).execute()
+            task_ids = [r["task_id"] for r in (ta.data or [])]
+            if not task_ids:
+                return {"total": 0, "by_status": {}, "by_priority": {}, "overdue_count": 0, "overdue_tasks": [], "completion_rate": None}
+            query = query.in_("id", task_ids)
+        resp = query.execute()
         tasks = resp.data or []
         now = datetime.now(timezone.utc)
 

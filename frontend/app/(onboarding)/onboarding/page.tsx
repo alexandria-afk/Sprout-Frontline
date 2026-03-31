@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import clsx from "clsx";
 import * as svc from "@/services/onboarding";
 import { apiFetch } from "@/services/api/client";
+import { getAttendanceRules, updateAttendanceRules } from "@/services/shifts";
 import type {
   OnboardingSession,
   CompanyProfile,
@@ -23,16 +24,21 @@ import type {
 
 const STEPS = [
   { n: 1, label: "Company" },
-  { n: 2, label: "Templates" },
-  { n: 3, label: "Locations" },
+  { n: 2, label: "Team" },
+  { n: 3, label: "Shifts" },
   { n: 4, label: "Assets" },
-  { n: 5, label: "Team" },
-  { n: 6, label: "Preview" },
-  { n: 7, label: "Launch" },
+  { n: 5, label: "Vendors" },
+  { n: 6, label: "Templates" },
+  { n: 7, label: "Preview" },
+  { n: 8, label: "Launch" },
 ];
 
 const INDUSTRIES = [
   { code: "qsr", label: "Quick Service Restaurant" },
+  { code: "casual_dining", label: "Casual Dining Restaurant" },
+  { code: "full_service_restaurant", label: "Full-Service Restaurant" },
+  { code: "cafe_bar", label: "Cafe & Bar" },
+  { code: "bakery", label: "Bakery & Pastry" },
   { code: "retail_fashion", label: "Retail — Fashion & Apparel" },
   { code: "retail_grocery", label: "Retail — Grocery & Convenience" },
   { code: "hospitality", label: "Hospitality & Hotels" },
@@ -57,6 +63,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   training_module: "🎓",
   shift_template: "📅",
   repair_manual: "🔧",
+  badge: "🏅",
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -160,17 +167,141 @@ function Step1({
   session: OnboardingSession;
   onNext: (updated: OnboardingSession) => void;
 }) {
-  const [url, setUrl] = useState("");
+  // Pre-populate from session when navigating back
+  const restoredProfile: CompanyProfile | null = session.company_name
+    ? {
+        company_name: session.company_name,
+        industry_code: session.industry_code ?? "qsr",
+        industry_subcategory: null,
+        estimated_locations: session.estimated_locations ?? null,
+        brand_color_hex: session.brand_color ?? null,
+        logo_url: session.logo_url ?? null,
+        confidence: 1.0,
+      }
+    : null;
+
+  const [url, setUrl] = useState(session.website_url ?? "");
   const [loading, setLoading] = useState(false);
-  const [profile, setProfile] = useState<CompanyProfile | null>(null);
+  const [profile, setProfile] = useState<CompanyProfile | null>(restoredProfile);
   const [error, setError] = useState("");
   const [fallbackMode, setFallbackMode] = useState(false);
   const [fallback, setFallback] = useState({
-    company_name: "",
-    industry_code: "qsr",
-    estimated_locations: "" as string | number,
+    company_name: session.company_name ?? "",
+    industry_code: session.industry_code ?? "qsr",
+    estimated_locations: session.estimated_locations ?? ("" as string | number),
   });
   const [confirming, setConfirming] = useState(false);
+  // True once company has been saved this session (or was already saved on a previous visit)
+  const [companyConfirmed, setCompanyConfirmed] = useState(session.current_step >= 2);
+
+  // ── Locations (embedded in step 1, shown after company confirmed) ────────
+  const [locations, setLocations] = useState<OnboardingLocation[]>([]);
+  const [locSuggestions, setLocSuggestions] = useState<OnboardingLocation[]>([]);
+  const [locSuggestionsVisible, setLocSuggestionsVisible] = useState(50);
+  const [locsLoading, setLocsLoading] = useState(false);
+  const [locForm, setLocForm] = useState({ name: "", address: "" });
+  const [showLocForm, setShowLocForm] = useState(false);
+  const [locSaving, setLocSaving] = useState(false);
+  const [locError, setLocError] = useState("");
+  const locSuggestRan = useRef(false);
+
+  // Load existing locations + fetch AI suggestions (without auto-saving) once confirmed
+  useEffect(() => {
+    if (!companyConfirmed || !profile || locSuggestRan.current) return;
+    locSuggestRan.current = true;
+    setLocsLoading(true);
+    Promise.all([
+      svc.listLocations(session.session_id),
+      svc.suggestLocations(session.session_id),
+    ])
+      .then(([saved, suggested]) => {
+        setLocations(saved);
+        // Only show suggestions that aren't already saved
+        const savedNames = new Set(saved.map((l) => l.name.toLowerCase()));
+        setLocSuggestions(suggested.filter((s) => !savedNames.has(s.name.toLowerCase())));
+        setLocSuggestionsVisible(50);
+      })
+      .catch(() => {})
+      .finally(() => setLocsLoading(false));
+  }, [companyConfirmed, profile, session.session_id]);
+
+  const refreshLocs = () =>
+    svc.listLocations(session.session_id).then(setLocations).catch(() => {});
+
+  const refreshSuggestions = () => {
+    locSuggestRan.current = false;
+    setLocsLoading(true);
+    Promise.all([
+      svc.listLocations(session.session_id),
+      svc.suggestLocations(session.session_id),
+    ])
+      .then(([saved, suggested]) => {
+        setLocations(saved);
+        const savedNames = new Set(saved.map((l) => l.name.toLowerCase()));
+        setLocSuggestions(suggested.filter((s) => !savedNames.has(s.name.toLowerCase())));
+        setLocSuggestionsVisible(50);
+      })
+      .catch(() => {})
+      .finally(() => setLocsLoading(false));
+  };
+
+  const handleAcceptSuggestion = async (suggestion: OnboardingLocation) => {
+    try {
+      await svc.addLocation(session.session_id, { name: suggestion.name, address: suggestion.address || null });
+      setLocSuggestions((prev) => prev.filter((s) => s.name !== suggestion.name));
+      await refreshLocs();
+    } catch {
+      setLocError("Failed to add location.");
+    }
+  };
+
+  const handleDismissSuggestion = (suggestion: OnboardingLocation) => {
+    setLocSuggestions((prev) => prev.filter((s) => s.name !== suggestion.name));
+  };
+
+  const [addingAll, setAddingAll] = useState(false);
+  const handleAddAllSuggestions = async () => {
+    const batch = locSuggestions.slice(0, locSuggestionsVisible);
+    setAddingAll(true);
+    try {
+      await Promise.all(
+        batch.map((s) =>
+          svc.addLocation(session.session_id, { name: s.name, address: s.address || null })
+        )
+      );
+      setLocSuggestions((prev) => prev.slice(locSuggestionsVisible));
+      setLocSuggestionsVisible(50);
+      await refreshLocs();
+    } catch {
+      setLocError("Failed to add some locations.");
+    } finally {
+      setAddingAll(false);
+    }
+  };
+
+  const handleAddLoc = async () => {
+    if (!locForm.name.trim()) return;
+    setLocSaving(true);
+    try {
+      await svc.addLocation(session.session_id, { name: locForm.name.trim(), address: locForm.address.trim() || null });
+      setLocForm({ name: "", address: "" });
+      setShowLocForm(false);
+      await refreshLocs();
+    } catch {
+      setLocError("Failed to add location.");
+    } finally {
+      setLocSaving(false);
+    }
+  };
+
+  const handleDeleteLoc = async (id: string) => {
+    try {
+      await svc.deleteLocation(session.session_id, id);
+      await refreshLocs();
+    } catch {
+      setLocError("Failed to remove location.");
+    }
+  };
 
   const discover = async () => {
     if (!url.trim()) return;
@@ -213,10 +344,24 @@ function Step1({
     if (!profile) return;
     setConfirming(true);
     try {
-      const updated = await svc.confirmCompany(session.session_id, profile);
-      onNext(updated);
+      await svc.confirmCompany(session.session_id, profile);
+      // Don't advance to next step yet — stay on step 1 to set up locations
+      setCompanyConfirmed(true);
+      locSuggestRan.current = false;
+      setConfirming(false);
     } catch {
       setError("Failed to save. Try again.");
+      setConfirming(false);
+    }
+  };
+
+  const handleContinueToTemplates = async () => {
+    setConfirming(true);
+    try {
+      const fresh = await svc.getCurrentSession();
+      onNext(fresh!);
+    } catch {
+      setError("Failed to continue.");
     } finally {
       setConfirming(false);
     }
@@ -227,42 +372,64 @@ function Step1({
       <StepHeader
         step={1}
         title="Tell us about your company"
-        subtitle="We'll analyse your website to pre-fill your workspace — or enter details manually."
+        subtitle="Analyse your website to pre-fill your workspace, or connect your HR system."
       />
 
       {!profile && !fallbackMode && (
-        <Card className="p-6 mb-4">
-          <label className="block text-sm font-medium text-slate-700 mb-2">
-            Company website
-          </label>
-          <div className="flex gap-3">
-            <input
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && discover()}
-              placeholder="https://yourcompany.com"
-              className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            />
+        <div className="space-y-3 mb-4">
+          <Card className="p-6">
+            <label className="block text-sm font-medium text-slate-700 mb-2">
+              Company website
+            </label>
+            <div className="flex gap-3">
+              <input
+                type="url"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && discover()}
+                placeholder="https://yourcompany.com"
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <button
+                onClick={discover}
+                disabled={loading || !url.trim()}
+                className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-2"
+              >
+                {loading ? <><Spinner size={14} /><span>Analysing…</span></> : "Analyse"}
+              </button>
+            </div>
+            {loading && (
+              <p className="text-slate-400 text-xs mt-2">Fetching your company details — this takes about 10 seconds…</p>
+            )}
+            {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
             <button
-              onClick={discover}
-              disabled={loading || !url.trim()}
-              className="px-5 py-2 bg-green-600 text-white rounded-lg text-sm font-semibold disabled:opacity-50 flex items-center gap-2"
+              onClick={() => setFallbackMode(true)}
+              className="text-xs text-slate-400 underline mt-3 block"
             >
-              {loading ? <><Spinner size={14} /><span>Analysing…</span></> : "Analyse"}
+              Enter details manually instead
             </button>
+          </Card>
+
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-px bg-slate-200" />
+            <span className="text-xs text-slate-400 font-medium">or</span>
+            <div className="flex-1 h-px bg-slate-200" />
           </div>
-          {loading && (
-            <p className="text-slate-400 text-xs mt-2">Fetching your company details — this takes about 10 seconds…</p>
-          )}
-          {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
+
           <button
-            onClick={() => setFallbackMode(true)}
-            className="text-xs text-slate-400 underline mt-3 block"
+            disabled
+            className="w-full flex items-center gap-3 p-4 rounded-xl border border-slate-200 bg-slate-50 opacity-60 cursor-not-allowed text-left"
           >
-            Enter details manually instead
+            <span className="text-2xl">🌱</span>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-semibold text-slate-700">Connect to Sprout HR</span>
+                <span className="text-[10px] font-semibold bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full uppercase tracking-wide">Coming Soon</span>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">Automatically sync your company, locations and team from Sprout HR</p>
+            </div>
           </button>
-        </Card>
+        </div>
       )}
 
       {fallbackMode && !profile && (
@@ -399,19 +566,148 @@ function Step1({
 
           <div className="flex gap-3">
             <button
-              onClick={() => { setProfile(null); setUrl(""); }}
+              onClick={() => { setProfile(null); setUrl(""); locSuggestRan.current = false; setLocations([]); }}
               className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg text-sm"
             >
               Start over
             </button>
             <button
               onClick={confirm}
-              disabled={confirming}
+              disabled={confirming || companyConfirmed}
               className="flex-1 px-5 py-2.5 bg-green-600 text-white rounded-xl text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              {confirming ? <Spinner size={16} /> : "Looks good — Continue →"}
+              {confirming ? <Spinner size={16} /> : companyConfirmed ? "Company confirmed ✓" : "Confirm Company →"}
             </button>
           </div>
+
+          {/* ── Locations section (shown after company confirmed) ──────────── */}
+          {companyConfirmed && (
+            <div className="mt-6 pt-6 border-t border-slate-100">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-sm font-semibold text-slate-800">Your locations</h3>
+                <button
+                  onClick={refreshSuggestions}
+                  disabled={locsLoading}
+                  className="text-xs text-slate-400 hover:text-green-600 disabled:opacity-40 flex items-center gap-1 transition-colors"
+                  title="Re-scan website for locations"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={locsLoading ? "animate-spin" : ""}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+                  Re-scan
+                </button>
+              </div>
+              <p className="text-xs text-slate-400 mb-4">
+                Add your branches, stores, or outlets. You can also add locations later when importing your team.
+              </p>
+              {locError && <p className="text-xs text-red-500 mb-2">{locError}</p>}
+              {locsLoading ? (
+                <div className="flex items-center gap-2 text-sm text-slate-400 py-6 justify-center">
+                  <Spinner size={16} />
+                  <span>Scanning website for locations…</span>
+                </div>
+              ) : (
+                <div className="space-y-3 mb-4">
+                  {/* AI suggestions — unconfirmed */}
+                  {locSuggestions.length > 0 && (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="text-xs font-semibold text-amber-700">
+                          ✨ Found from your website — add the ones that apply
+                        </p>
+                        <button
+                          onClick={handleAddAllSuggestions}
+                          disabled={addingAll}
+                          className="text-xs bg-amber-600 hover:bg-amber-700 text-white px-2.5 py-1 rounded-lg disabled:opacity-50 transition-colors shrink-0"
+                        >
+                          {addingAll ? "Adding…" : `Add these ${Math.min(locSuggestionsVisible, locSuggestions.length)}`}
+                        </button>
+                      </div>
+                      <div className="space-y-1.5">
+                        {locSuggestions.slice(0, locSuggestionsVisible).map((s, i) => (
+                          <div key={i} className="flex items-start justify-between gap-2 bg-white border border-amber-100 rounded-lg px-3 py-2">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-slate-800 truncate">{s.name}</p>
+                              {s.address && <p className="text-xs text-slate-400 mt-0.5 truncate">{s.address}</p>}
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                onClick={() => handleAcceptSuggestion(s)}
+                                className="text-xs bg-green-600 text-white px-2.5 py-1 rounded-lg hover:bg-green-700 transition-colors"
+                              >
+                                + Add
+                              </button>
+                              <button
+                                onClick={() => handleDismissSuggestion(s)}
+                                className="text-xs text-slate-300 hover:text-red-400 px-1 py-1"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                        {locSuggestions.length > locSuggestionsVisible && (
+                          <button
+                            onClick={() => setLocSuggestionsVisible((v) => v + 50)}
+                            className="w-full text-xs text-amber-600 hover:text-amber-800 py-2 text-center transition-colors"
+                          >
+                            Show {Math.min(50, locSuggestions.length - locSuggestionsVisible)} more
+                            <span className="text-amber-400 ml-1">({locSuggestions.length - locSuggestionsVisible} remaining)</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Confirmed / saved locations */}
+                  {locations.map((loc) => (
+                    <div key={loc.id} className="flex items-start justify-between bg-slate-50 border border-slate-200 rounded-xl px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-slate-800">{loc.name}</p>
+                        {loc.address && <p className="text-xs text-slate-400 mt-0.5">{loc.address}</p>}
+                      </div>
+                      <button onClick={() => handleDeleteLoc(loc.id!)} className="text-xs text-slate-300 hover:text-red-400 ml-4 mt-0.5">✕</button>
+                    </div>
+                  ))}
+
+                  {/* Manual add form */}
+                  {showLocForm ? (
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 space-y-2">
+                      <input
+                        className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Location name (e.g. Makati Branch)"
+                        value={locForm.name}
+                        onChange={(e) => setLocForm((f) => ({ ...f, name: e.target.value }))}
+                      />
+                      <input
+                        className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                        placeholder="Address (optional)"
+                        value={locForm.address}
+                        onChange={(e) => setLocForm((f) => ({ ...f, address: e.target.value }))}
+                      />
+                      <div className="flex gap-2">
+                        <button onClick={handleAddLoc} disabled={locSaving || !locForm.name.trim()} className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-50">
+                          {locSaving ? "Adding…" : "Add"}
+                        </button>
+                        <button onClick={() => { setShowLocForm(false); setLocForm({ name: "", address: "" }); }} className="text-xs text-slate-400 px-2 py-1.5">Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowLocForm(true)} className="w-full text-sm text-slate-400 hover:text-green-600 border border-dashed border-slate-200 hover:border-green-400 rounded-xl py-3 transition-colors">
+                      + Add location manually
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="flex gap-3">
+                <button
+                  onClick={handleContinueToTemplates}
+                  disabled={confirming}
+                  className="flex-1 px-5 py-2.5 bg-green-600 text-white rounded-xl text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {confirming ? <Spinner size={16} /> : locations.length === 0 ? "Skip locations — Continue →" : "Looks good — Continue →"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -789,18 +1085,14 @@ function Step4Assets({
   session: OnboardingSession;
   onNext: (updated: OnboardingSession) => void;
 }) {
-  const [tab, setTab] = useState<"assets" | "vendors">("assets");
   const [assets, setAssets] = useState<OnboardingAsset[]>([]);
-  const [vendors, setVendors] = useState<OnboardingVendor[]>([]);
   const [locations, setLocations] = useState<OnboardingLocation[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [assetForm, setAssetForm] = useState({ name: "", category: "", model: "", manufacturer: "", location_name: "" });
-  const [vendorForm, setVendorForm] = useState({ name: "", service_type: "", contact_email: "", contact_phone: "" });
   const [showAssetForm, setShowAssetForm] = useState(false);
-  const [showVendorForm, setShowVendorForm] = useState(false);
   const suggestRanRef = useRef(false);
 
   useEffect(() => {
@@ -809,11 +1101,9 @@ function Step4Assets({
     setLoading(true);
     Promise.all([
       svc.listAssets(session.session_id),
-      svc.listVendors(session.session_id),
       svc.listLocations(session.session_id),
-    ]).then(([a, v, l]) => {
+    ]).then(([a, l]) => {
       setAssets(a);
-      setVendors(v);
       setLocations(l);
       if (a.length === 0) {
         return svc.suggestAssets(session.session_id)
@@ -826,7 +1116,6 @@ function Step4Assets({
   }, [session.session_id]);
 
   const refreshAssets = () => svc.listAssets(session.session_id).then(setAssets).catch(() => {});
-  const refreshVendors = () => svc.listVendors(session.session_id).then(setVendors).catch(() => {});
 
   const handleAddAsset = async () => {
     if (!assetForm.name.trim() || !assetForm.category.trim()) return;
@@ -848,6 +1137,103 @@ function Step4Assets({
       setSaving(false);
     }
   };
+
+  const handleContinue = async () => {
+    setSubmitting(true);
+    try {
+      const updated = await svc.confirmAssets(session.session_id);
+      onNext(updated);
+    } catch {
+      setError("Failed to continue. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <StepHeader
+        step={4}
+        title="Assets"
+        subtitle="Register your equipment. AI will generate repair guides for each asset. You can skip this and add later."
+      />
+
+      {error && <p className="text-sm text-red-500">{error}</p>}
+
+      {loading ? (
+        <div className="text-sm text-slate-400 py-8 text-center">AI is suggesting assets for your industry…</div>
+      ) : (
+        <div className="space-y-2">
+          {assets.map((a) => (
+            <div key={a.id} className="flex items-start justify-between bg-white border border-slate-200 rounded-xl px-4 py-3">
+              <div>
+                <p className="text-sm font-medium text-slate-800">{a.name}</p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {a.category}{a.model ? ` · ${a.model}` : ""}{a.location_name ? ` · ${a.location_name}` : ""}
+                </p>
+              </div>
+              <button onClick={() => svc.deleteAsset(session.session_id, a.id!).then(refreshAssets)} className="text-xs text-slate-300 hover:text-red-400 transition-colors ml-4 mt-0.5">✕</button>
+            </div>
+          ))}
+          {showAssetForm ? (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 space-y-2">
+              <input className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Asset name*" value={assetForm.name} onChange={(e) => setAssetForm((f) => ({ ...f, name: e.target.value }))} />
+              <input className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Category*" value={assetForm.category} onChange={(e) => setAssetForm((f) => ({ ...f, category: e.target.value }))} />
+              <div className="grid grid-cols-2 gap-2">
+                <input className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Model (optional)" value={assetForm.model} onChange={(e) => setAssetForm((f) => ({ ...f, model: e.target.value }))} />
+                <input className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Manufacturer (optional)" value={assetForm.manufacturer} onChange={(e) => setAssetForm((f) => ({ ...f, manufacturer: e.target.value }))} />
+              </div>
+              {locations.length > 0 && (
+                <select className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" value={assetForm.location_name} onChange={(e) => setAssetForm((f) => ({ ...f, location_name: e.target.value }))}>
+                  <option value="">Location (optional)</option>
+                  {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+                </select>
+              )}
+              <div className="flex gap-2">
+                <button onClick={handleAddAsset} disabled={saving || !assetForm.name.trim() || !assetForm.category.trim()} className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-50">{saving ? "Adding…" : "Add"}</button>
+                <button onClick={() => { setShowAssetForm(false); setAssetForm({ name: "", category: "", model: "", manufacturer: "", location_name: "" }); }} className="text-xs text-slate-400 px-2 py-1.5">Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setShowAssetForm(true)} className="w-full text-sm text-slate-400 hover:text-green-600 border border-dashed border-slate-200 hover:border-green-400 rounded-xl py-3 transition-colors">+ Add asset</button>
+          )}
+        </div>
+      )}
+
+      <div className="flex gap-3">
+        <button onClick={handleContinue} disabled={submitting || loading} className="flex-1 bg-green-600 text-white text-sm font-semibold py-3 rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors">
+          {submitting ? "Saving…" : assets.length === 0 ? "Skip assets — Continue →" : "Continue →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STEP 5 — Vendors
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function Step5Vendors({
+  session,
+  onNext,
+}: {
+  session: OnboardingSession;
+  onNext: (updated: OnboardingSession) => void;
+}) {
+  const [vendors, setVendors] = useState<OnboardingVendor[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [vendorForm, setVendorForm] = useState({ name: "", service_type: "", contact_email: "", contact_phone: "" });
+  const [showVendorForm, setShowVendorForm] = useState(false);
+
+  useEffect(() => {
+    svc.listVendors(session.session_id).then(setVendors).catch(() => setVendors([])).finally(() => setLoading(false));
+  }, [session.session_id]);
+
+  const refreshVendors = () => svc.listVendors(session.session_id).then(setVendors).catch(() => {});
 
   const handleAddVendor = async () => {
     if (!vendorForm.name.trim()) return;
@@ -872,7 +1258,7 @@ function Step4Assets({
   const handleContinue = async () => {
     setSubmitting(true);
     try {
-      const updated = await svc.confirmAssets(session.session_id);
+      const updated = await svc.confirmVendors(session.session_id);
       onNext(updated);
     } catch {
       setError("Failed to continue. Please try again.");
@@ -883,205 +1269,58 @@ function Step4Assets({
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-bold text-slate-800">Assets & Vendors</h2>
-        <p className="text-sm text-slate-500 mt-1">
-          Register your equipment and service providers. AI will generate specific repair guides for each asset.
-        </p>
-      </div>
+      <StepHeader
+        step={5}
+        title="Vendors"
+        subtitle="Add your service providers and suppliers. AI will link them to your assets. You can skip this and add later."
+      />
 
       {error && <p className="text-sm text-red-500">{error}</p>}
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-slate-100 rounded-xl p-1">
-        {(["assets", "vendors"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={clsx(
-              "flex-1 text-sm font-medium py-2 rounded-lg transition-colors capitalize",
-              tab === t ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"
-            )}
-          >
-            {t === "assets" ? `Assets${assets.length ? ` (${assets.length})` : ""}` : `Vendors${vendors.length ? ` (${vendors.length})` : ""}`}
-          </button>
-        ))}
-      </div>
-
       {loading ? (
-        <div className="text-sm text-slate-400 py-8 text-center">AI is suggesting assets for your industry…</div>
-      ) : tab === "assets" ? (
-        <div className="space-y-2">
-          {assets.map((a) => (
-            <div key={a.id} className="flex items-start justify-between bg-white border border-slate-200 rounded-xl px-4 py-3">
-              <div>
-                <p className="text-sm font-medium text-slate-800">{a.name}</p>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {a.category}{a.model ? ` · ${a.model}` : ""}{a.location_name ? ` · ${a.location_name}` : ""}
-                </p>
-              </div>
-              <button
-                onClick={() => svc.deleteAsset(session.session_id, a.id!).then(refreshAssets)}
-                className="text-xs text-slate-300 hover:text-red-400 transition-colors ml-4 mt-0.5"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-
-          {showAssetForm ? (
-            <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 space-y-2">
-              <input
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                placeholder="Asset name (e.g. Commercial Fryer)*"
-                value={assetForm.name}
-                onChange={(e) => setAssetForm((f) => ({ ...f, name: e.target.value }))}
-              />
-              <input
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                placeholder="Category (e.g. Kitchen Equipment)*"
-                value={assetForm.category}
-                onChange={(e) => setAssetForm((f) => ({ ...f, category: e.target.value }))}
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Model (optional)"
-                  value={assetForm.model}
-                  onChange={(e) => setAssetForm((f) => ({ ...f, model: e.target.value }))}
-                />
-                <input
-                  className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Manufacturer (optional)"
-                  value={assetForm.manufacturer}
-                  onChange={(e) => setAssetForm((f) => ({ ...f, manufacturer: e.target.value }))}
-                />
-              </div>
-              {locations.length > 0 && (
-                <select
-                  className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                  value={assetForm.location_name}
-                  onChange={(e) => setAssetForm((f) => ({ ...f, location_name: e.target.value }))}
-                >
-                  <option value="">Location (optional)</option>
-                  {locations.map((l) => (
-                    <option key={l.id} value={l.name}>{l.name}</option>
-                  ))}
-                </select>
-              )}
-              <div className="flex gap-2">
-                <button
-                  onClick={handleAddAsset}
-                  disabled={saving || !assetForm.name.trim() || !assetForm.category.trim()}
-                  className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
-                >
-                  {saving ? "Adding…" : "Add"}
-                </button>
-                <button
-                  onClick={() => { setShowAssetForm(false); setAssetForm({ name: "", category: "", model: "", manufacturer: "", location_name: "" }); }}
-                  className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1.5"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowAssetForm(true)}
-              className="w-full text-sm text-slate-400 hover:text-green-600 border border-dashed border-slate-200 hover:border-green-400 rounded-xl py-3 transition-colors"
-            >
-              + Add asset
-            </button>
-          )}
-        </div>
+        <div className="text-sm text-slate-400 py-8 text-center"><Spinner size={20} /></div>
       ) : (
         <div className="space-y-2">
           {vendors.map((v) => (
             <div key={v.id} className="flex items-start justify-between bg-white border border-slate-200 rounded-xl px-4 py-3">
               <div>
                 <p className="text-sm font-medium text-slate-800">{v.name}</p>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {[v.service_type, v.contact_email, v.contact_phone].filter(Boolean).join(" · ")}
-                </p>
+                <p className="text-xs text-slate-400 mt-0.5">{[v.service_type, v.contact_email, v.contact_phone].filter(Boolean).join(" · ")}</p>
               </div>
-              <button
-                onClick={() => svc.deleteVendor(session.session_id, v.id!).then(refreshVendors)}
-                className="text-xs text-slate-300 hover:text-red-400 transition-colors ml-4 mt-0.5"
-              >
-                ✕
-              </button>
+              <button onClick={() => svc.deleteVendor(session.session_id, v.id!).then(refreshVendors)} className="text-xs text-slate-300 hover:text-red-400 ml-4 mt-0.5">✕</button>
             </div>
           ))}
-
           {showVendorForm ? (
             <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 space-y-2">
-              <input
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                placeholder="Vendor name*"
-                value={vendorForm.name}
-                onChange={(e) => setVendorForm((f) => ({ ...f, name: e.target.value }))}
-              />
-              <input
-                className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                placeholder="Service type (e.g. Equipment Repair)"
-                value={vendorForm.service_type}
-                onChange={(e) => setVendorForm((f) => ({ ...f, service_type: e.target.value }))}
-              />
+              <input className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Vendor name*" value={vendorForm.name} onChange={(e) => setVendorForm((f) => ({ ...f, name: e.target.value }))} />
+              <input className="w-full text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Service type (e.g. Equipment Repair)" value={vendorForm.service_type} onChange={(e) => setVendorForm((f) => ({ ...f, service_type: e.target.value }))} />
               <div className="grid grid-cols-2 gap-2">
-                <input
-                  className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Email"
-                  value={vendorForm.contact_email}
-                  onChange={(e) => setVendorForm((f) => ({ ...f, contact_email: e.target.value }))}
-                />
-                <input
-                  className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="Phone"
-                  value={vendorForm.contact_phone}
-                  onChange={(e) => setVendorForm((f) => ({ ...f, contact_phone: e.target.value }))}
-                />
+                <input className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Email" value={vendorForm.contact_email} onChange={(e) => setVendorForm((f) => ({ ...f, contact_email: e.target.value }))} />
+                <input className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500" placeholder="Phone" value={vendorForm.contact_phone} onChange={(e) => setVendorForm((f) => ({ ...f, contact_phone: e.target.value }))} />
               </div>
               <div className="flex gap-2">
-                <button
-                  onClick={handleAddVendor}
-                  disabled={saving || !vendorForm.name.trim()}
-                  className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50"
-                >
-                  {saving ? "Adding…" : "Add"}
-                </button>
-                <button
-                  onClick={() => { setShowVendorForm(false); setVendorForm({ name: "", service_type: "", contact_email: "", contact_phone: "" }); }}
-                  className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1.5"
-                >
-                  Cancel
-                </button>
+                <button onClick={handleAddVendor} disabled={saving || !vendorForm.name.trim()} className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-50">{saving ? "Adding…" : "Add"}</button>
+                <button onClick={() => { setShowVendorForm(false); setVendorForm({ name: "", service_type: "", contact_email: "", contact_phone: "" }); }} className="text-xs text-slate-400 px-2 py-1.5">Cancel</button>
               </div>
             </div>
           ) : (
-            <button
-              onClick={() => setShowVendorForm(true)}
-              className="w-full text-sm text-slate-400 hover:text-green-600 border border-dashed border-slate-200 hover:border-green-400 rounded-xl py-3 transition-colors"
-            >
-              + Add vendor
-            </button>
+            <button onClick={() => setShowVendorForm(true)} className="w-full text-sm text-slate-400 hover:text-green-600 border border-dashed border-slate-200 hover:border-green-400 rounded-xl py-3 transition-colors">+ Add vendor</button>
           )}
         </div>
       )}
 
-      <button
-        onClick={handleContinue}
-        disabled={submitting || loading}
-        className="w-full bg-green-600 text-white text-sm font-semibold py-3 rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors"
-      >
-        {submitting ? "Saving…" : "Continue →"}
-      </button>
+      <div className="flex gap-3">
+        <button onClick={handleContinue} disabled={submitting || loading} className="flex-1 bg-green-600 text-white text-sm font-semibold py-3 rounded-xl hover:bg-green-700 disabled:opacity-50 transition-colors">
+          {submitting ? "Saving…" : vendors.length === 0 ? "Skip vendors — Continue →" : "Continue →"}
+        </button>
+      </div>
     </div>
   );
 }
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STEP 5 — Employee Setup
+// STEP 5 — Employee Setup (now step 3)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function Step5Team({
@@ -1099,13 +1338,20 @@ function Step5Team({
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [locations, setLocations] = useState<OnboardingLocation[]>([]);
   const [manualForm, setManualForm] = useState<Omit<OnboardingEmployee, "id" | "status">>({
     full_name: "",
     email: "",
     phone: "",
     position: "",
     retail_role: "staff",
+    location_name: "",
+    reports_to: "",
   });
+
+  useEffect(() => {
+    svc.listLocations(session.session_id).then(setLocations).catch(() => {});
+  }, [session.session_id]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1172,7 +1418,7 @@ function Step5Team({
       await svc.addEmployee(session.session_id, manualForm);
       const r = await svc.listEmployees(session.session_id);
       setEmployees(r.employees ?? []);
-      setManualForm({ full_name: "", email: "", phone: "", position: "", retail_role: "staff" });
+      setManualForm({ full_name: "", email: "", phone: "", position: "", retail_role: "staff", location_name: "", reports_to: "" });
     } catch {
       setError("Failed to add employee.");
     } finally {
@@ -1207,7 +1453,7 @@ function Step5Team({
     return (
       <div>
         <StepHeader
-          step={5}
+          step={3}
           title="Set up your team"
           subtitle="Choose how you'd like to add your employees to the workspace."
         />
@@ -1238,7 +1484,7 @@ function Step5Team({
   return (
     <div>
       <StepHeader
-        step={5}
+        step={3}
         title={source === "invite_link" ? "Invite your team" : source === "csv" ? "Import from CSV" : "Add employees manually"}
         subtitle={
           source === "invite_link"
@@ -1287,14 +1533,14 @@ function Step5Team({
 
           {/* Download template */}
           <div className="flex items-center justify-between mb-3">
-            <p className="text-xs text-slate-500 font-medium">Required columns: <code className="bg-slate-100 px-1 rounded">full_name, email, role</code> &nbsp;Optional: <code className="bg-slate-100 px-1 rounded">phone_number, position</code></p>
+            <p className="text-xs text-slate-500 font-medium">Required: <code className="bg-slate-100 px-1 rounded">full_name, email, role</code>&nbsp; Optional: <code className="bg-slate-100 px-1 rounded">phone_number, position, work_location, reports_to</code></p>
             <button
               type="button"
               onClick={() => {
-                const hint = "# role options: staff | manager | admin";
-                const header = "full_name,email,role,phone_number,position";
-                const example1 = "Juan dela Cruz,juan@example.com,staff,+63 917 000 0001,Barista";
-                const example2 = "Maria Santos,maria@example.com,manager,,Store Manager";
+                const hint = "# role options: staff | manager | admin | super_admin";
+                const header = "full_name,email,role,phone_number,position,work_location,reports_to";
+                const example1 = "Juan dela Cruz,juan@example.com,staff,+63 917 000 0001,Barista,Makati Branch,Maria Santos";
+                const example2 = "Maria Santos,maria@example.com,manager,,Store Manager,Makati Branch,";
                 const csv = [hint, header, example1, example2].join("\n");
                 const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
                 const a = document.createElement("a");
@@ -1404,6 +1650,26 @@ function Step5Team({
                 ))}
               </select>
             </div>
+            <div>
+              <label className="text-xs font-medium text-slate-600 block mb-1">Work location</label>
+              <select
+                value={manualForm.location_name ?? ""}
+                onChange={(e) => setManualForm((f) => ({ ...f, location_name: e.target.value }))}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                <option value="">— Select location —</option>
+                {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="text-xs font-medium text-slate-600 block mb-1">Reports to (name or email)</label>
+              <input
+                value={manualForm.reports_to ?? ""}
+                onChange={(e) => setManualForm((f) => ({ ...f, reports_to: e.target.value }))}
+                placeholder="e.g. Maria Santos"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              />
+            </div>
           </div>
           <button
             onClick={addEmployee}
@@ -1466,10 +1732,173 @@ function Step5Team({
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STEP 4 — Workspace Preview
+// STEP 6 — Shift Settings
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function Step6Preview({
+function Step6ShiftSettings({
+  session,
+  onNext,
+}: {
+  session: OnboardingSession;
+  onNext: (updated: OnboardingSession) => void;
+}) {
+  const [form, setForm] = useState({
+    late_threshold_mins: 5,
+    early_departure_threshold_mins: 10,
+    overtime_threshold_hours: 8,
+    weekly_overtime_threshold_hours: 40,
+    break_duration_mins: 30,
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    getAttendanceRules()
+      .then((r) => {
+        setForm({
+          late_threshold_mins: r.late_threshold_mins,
+          early_departure_threshold_mins: r.early_departure_threshold_mins,
+          overtime_threshold_hours: r.overtime_threshold_hours,
+          weekly_overtime_threshold_hours: r.weekly_overtime_threshold_hours,
+          break_duration_mins: r.break_duration_mins,
+        });
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleAdvance = async (saveRules: boolean) => {
+    setSaving(true);
+    setError("");
+    try {
+      if (saveRules) await updateAttendanceRules(form);
+      const updated = await svc.confirmShiftSettings(session.session_id);
+      onNext(updated);
+    } catch {
+      setError(saveRules ? "Failed to save shift settings. Try again." : "Failed to proceed. Try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const Field = ({
+    label,
+    hint,
+    field,
+    unit,
+    min,
+    step: stepVal = 1,
+  }: {
+    label: string;
+    hint: string;
+    field: keyof typeof form;
+    unit: string;
+    min?: number;
+    step?: number;
+  }) => (
+    <div className="flex items-center justify-between gap-4 py-3 border-b border-slate-100 last:border-0">
+      <div className="flex-1">
+        <div className="text-sm font-medium text-slate-800">{label}</div>
+        <div className="text-xs text-slate-400 mt-0.5">{hint}</div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <input
+          type="number"
+          min={min ?? 0}
+          step={stepVal}
+          value={form[field]}
+          onChange={(e) => setForm((f) => ({ ...f, [field]: Number(e.target.value) }))}
+          className="w-20 border border-slate-200 rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-green-500"
+        />
+        <span className="text-xs text-slate-400 w-12">{unit}</span>
+      </div>
+    </div>
+  );
+
+  return (
+    <div>
+      <StepHeader
+        step={6}
+        title="Configure shift settings"
+        subtitle="Set attendance rules for your organisation. You can change these any time in Settings."
+      />
+
+      {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+
+      <Card className="p-5 mb-5">
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <Spinner size={24} />
+          </div>
+        ) : (
+          <>
+            <Field
+              label="Late threshold"
+              hint="Minutes after shift start before an arrival is marked late"
+              field="late_threshold_mins"
+              unit="mins"
+              min={0}
+            />
+            <Field
+              label="Early departure threshold"
+              hint="Minutes before shift end that counts as leaving early"
+              field="early_departure_threshold_mins"
+              unit="mins"
+              min={0}
+            />
+            <Field
+              label="Daily overtime threshold"
+              hint="Hours worked in a single day before overtime kicks in"
+              field="overtime_threshold_hours"
+              unit="hrs"
+              min={1}
+              step={0.5}
+            />
+            <Field
+              label="Weekly overtime threshold"
+              hint="Total hours per week before weekly overtime applies"
+              field="weekly_overtime_threshold_hours"
+              unit="hrs"
+              min={1}
+              step={0.5}
+            />
+            <Field
+              label="Default break duration"
+              hint="Standard break length automatically deducted from worked hours"
+              field="break_duration_mins"
+              unit="mins"
+              min={0}
+            />
+          </>
+        )}
+      </Card>
+
+      <div className="flex gap-3">
+        <button
+          onClick={() => handleAdvance(false)}
+          disabled={saving}
+          className="px-5 py-3 border border-slate-200 text-slate-600 rounded-xl text-sm font-medium disabled:opacity-50"
+        >
+          Use defaults
+        </button>
+        <button
+          onClick={() => handleAdvance(true)}
+          disabled={saving || loading}
+          className="flex-1 px-5 py-3 bg-green-600 text-white rounded-xl text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-2"
+        >
+          {saving ? <><Spinner size={16} /><span>Saving…</span></> : "Save & Continue →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STEP 7 — Workspace Preview
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function Step7Preview({
   session,
   onNext,
 }: {
@@ -1524,7 +1953,7 @@ function Step6Preview({
   return (
     <div>
       <StepHeader
-        step={6}
+        step={7}
         title="Preview your workspace"
         subtitle="Here's everything that will be created for you. It's all editable after launch."
       />
@@ -1714,7 +2143,7 @@ function Step7Launch({
   return (
     <div>
       <StepHeader
-        step={7}
+        step={8}
         title={done ? "Your workspace is ready! 🎉" : "Launching your workspace…"}
         subtitle={
           done
@@ -1877,7 +2306,7 @@ export default function OnboardingPage() {
             <span className="text-white text-sm font-bold">S</span>
           </div>
           <span className="font-bold text-slate-800">Sprout</span>
-          {step > 1 && step < 7 && (
+          {step > 1 && step < 8 && (
             <button
               type="button"
               onClick={() => setDisplayStep(step - 1)}
@@ -1886,7 +2315,7 @@ export default function OnboardingPage() {
               ← Back
             </button>
           )}
-          {!(step > 1 && step < 7) && (
+          {!(step > 1 && step < 8) && (
             <span className="ml-auto text-xs text-slate-400">Setup Wizard</span>
           )}
         </div>
@@ -1895,12 +2324,13 @@ export default function OnboardingPage() {
 
         <div className="min-h-[400px]">
           {step === 1 && <Step1 session={session} onNext={handleNext} />}
-          {step === 2 && <Step2 session={session} onNext={handleNext} />}
-          {step === 3 && <Step3Locations session={session} onNext={handleNext} />}
+          {step === 2 && <Step5Team session={session} onNext={handleNext} />}
+          {step === 3 && <Step6ShiftSettings session={session} onNext={handleNext} />}
           {step === 4 && <Step4Assets session={session} onNext={handleNext} />}
-          {step === 5 && <Step5Team session={session} onNext={handleNext} />}
-          {step === 6 && <Step6Preview session={session} onNext={handleNext} />}
-          {step === 7 && <Step7Launch session={session} onComplete={handleComplete} />}
+          {step === 5 && <Step5Vendors session={session} onNext={handleNext} />}
+          {step === 6 && <Step2 session={session} onNext={handleNext} />}
+          {step === 7 && <Step7Preview session={session} onNext={handleNext} />}
+          {step === 8 && <Step7Launch session={session} onComplete={handleComplete} />}
         </div>
       </div>
     </div>

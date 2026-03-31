@@ -1,10 +1,14 @@
 """
 LMS API — /api/v1/lms
 """
+import asyncio
+import json
 from typing import Optional
+import anthropic as _anthropic
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, UploadFile
 from dependencies import get_current_user, require_manager_or_above
 from services.supabase_client import get_admin_client
+from config import settings
 from models.lms import (
     CreateCourseRequest,
     UpdateCourseRequest,
@@ -16,6 +20,21 @@ from models.lms import (
 from services.lms_service import LmsService
 
 router = APIRouter()
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove markdown code fences from an LLM response."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text[3:]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()
+        elif "```" in text:
+            text = text[: text.index("```")].strip()
+    return text
 
 # ── Published Courses (learner) ───────────────────────────────────────────────
 
@@ -66,6 +85,98 @@ async def get_course(
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await LmsService.get_course(course_id, org_id)
+
+@router.post("/courses/{course_id}/regenerate-content")
+async def regenerate_course_content(
+    course_id: str,
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Delete empty slides/quiz questions and re-generate them with Claude Haiku."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    sb = get_admin_client()
+
+    # Fetch course (org ownership check)
+    course_res = sb.table("courses").select("id, title, description").eq("id", course_id).eq("organisation_id", org_id).maybe_single().execute()
+    if not course_res.data:
+        raise HTTPException(status_code=404, detail="Course not found.")
+    course = course_res.data
+    course_title = course["title"]
+    industry = course.get("description", "retail")
+
+    # Fetch modules
+    mods_res = sb.table("course_modules").select("id, title, type").eq("course_id", course_id).order("display_order").execute()
+    module_records = mods_res.data or []
+    if not module_records:
+        raise HTTPException(status_code=400, detail="Course has no modules to regenerate.")
+
+    # Delete existing empty slides and quiz questions
+    for mod in module_records:
+        if mod["type"] == "slides":
+            sb.table("course_slides").delete().eq("module_id", mod["id"]).execute()
+        else:
+            sb.table("quiz_questions").delete().eq("module_id", mod["id"]).execute()
+
+    # Generate content with Claude Haiku
+    if not settings.anthropic_api_key:
+        raise HTTPException(status_code=503, detail="AI content generation is not configured.")
+
+    client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    module_outline = [{"title": m["title"], "type": m["type"]} for m in module_records]
+
+    def _call():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": (
+                f"Generate training content for a course titled '{course_title}'. "
+                f"Modules: {json.dumps(module_outline)}. "
+                f"For each 'slides' module: write 3-4 slides. Each slide MUST have exactly two keys: \"title\" (short heading) and \"body\" (2-3 sentence explanation of a key concept). Do NOT use any other key name — only \"title\" and \"body\". "
+                f"For each 'quiz' or 'video' module: write 3-4 multiple_choice quiz questions with 4 options (exactly 1 correct), and a brief explanation. "
+                f"Respond ONLY with JSON array matching the module order: "
+                f'[{{"type": "slides", "slides": [{{"title": "...", "body": "..."}}]}}, '
+                f'{{"type": "quiz", "questions": [{{"question": "...", "question_type": "multiple_choice", "options": [{{"text": "...", "is_correct": true}}], "explanation": "..."}}]}}]'
+            )}],
+        )
+
+    resp = await asyncio.to_thread(_call)
+    content_text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+    content_list = json.loads(_strip_code_fence(content_text))
+
+    slide_rows: list[dict] = []
+    quiz_rows: list[dict] = []
+    for idx, mod in enumerate(module_records):
+        if idx >= len(content_list):
+            break
+        mod_content = content_list[idx]
+        if mod["type"] == "slides":
+            for s_order, slide in enumerate(mod_content.get("slides") or []):
+                slide_rows.append({
+                    "module_id": mod["id"],
+                    "title": slide.get("title", f"Slide {s_order + 1}"),
+                    "body": slide.get("body") or slide.get("content") or slide.get("text") or slide.get("description") or "",
+                    "display_order": s_order,
+                })
+        else:
+            for q_order, q in enumerate(mod_content.get("questions") or []):
+                qtype = q.get("question_type", "multiple_choice")
+                if qtype not in ("multiple_choice", "true_false", "image_based"):
+                    qtype = "multiple_choice"
+                quiz_rows.append({
+                    "module_id": mod["id"],
+                    "question": q.get("question", "Question"),
+                    "question_type": qtype,
+                    "options": q.get("options", []),
+                    "explanation": q.get("explanation", ""),
+                    "display_order": q_order,
+                })
+
+    if slide_rows:
+        sb.table("course_slides").insert(slide_rows).execute()
+    if quiz_rows:
+        sb.table("quiz_questions").insert(quiz_rows).execute()
+
+    return {"ok": True, "message": "Content regenerated successfully."}
+
 
 @router.put("/courses/{course_id}")
 async def update_course(

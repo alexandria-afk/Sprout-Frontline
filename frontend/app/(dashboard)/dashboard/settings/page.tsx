@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin, Sparkles } from "lucide-react";
+import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin, Sparkles, CalendarClock } from "lucide-react";
 
 const SETTINGS_ITEMS = [
   {
@@ -58,6 +58,13 @@ const SETTINGS_ITEMS = [
     icon: ShieldCheck,
     label: "Roles & Access",
     description: "View the current access matrix showing what each role can see and do across the platform.",
+    roles: "Admin",
+  },
+  {
+    href: "/dashboard/shifts?tab=settings",
+    icon: CalendarClock,
+    label: "Shift Settings",
+    description: "Configure attendance rules — late thresholds, overtime limits, and break durations for your organisation.",
     roles: "Admin",
   },
   {

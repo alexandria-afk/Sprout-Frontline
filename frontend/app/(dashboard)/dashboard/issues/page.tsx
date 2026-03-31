@@ -117,9 +117,9 @@ const TASK_STATUS_CONFIG: Record<string, { label: string; color: string; icon: R
   cancelled:   { label: "Cancelled",   color: "bg-gray-100 text-gray-400",            icon: XCircle      },
 };
 
-const MANAGER_COLS: TaskStatus[] = ["pending", "in_progress", "completed", "overdue", "cancelled"];
+const MANAGER_COLS: TaskStatus[] = ["pending", "in_progress", "completed", "cancelled"];
 const MANAGER_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed", "cancelled"];
-const STAFF_COLS: TaskStatus[] = ["overdue", "pending", "in_progress", "completed"];
+const STAFF_COLS: TaskStatus[] = ["pending", "in_progress", "completed"];
 const STAFF_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed"];
 
 // ── Incidents types & helpers ─────────────────────────────────────────────────
@@ -3099,7 +3099,7 @@ function TaskDetailModal({
     }
   };
 
-  const STATUSES: TaskStatus[] = ["pending", "in_progress", "completed", "overdue", "cancelled"];
+  const STATUSES: TaskStatus[] = ["pending", "in_progress", "completed", "cancelled"];
   const messages = (task?.task_messages ?? []).sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
   const assignees = task?.task_assignees ?? [];
   const history = [...(task?.task_status_history ?? [])].sort((a, b) => new Date(b.changed_at).getTime() - new Date(a.changed_at).getTime());
@@ -3166,7 +3166,7 @@ function TaskDetailModal({
               <div className="px-5 py-4">
                 <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide mb-3">Update Status</p>
                 <div className="flex flex-wrap gap-2">
-                  {STATUSES.filter((s) => s !== task.status && s !== "overdue").map((s) => {
+                  {STATUSES.filter((s) => s !== task.status).map((s) => {
                     const cfg = TASK_STATUS_CONFIG[s];
                     const Icon = cfg.icon;
                     return (
@@ -3432,7 +3432,7 @@ function KanbanBoard({
       {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-2 rounded-lg">{error}</div>}
 
       <DragDropContext onDragEnd={handleDragEnd}>
-        <div className="flex gap-4 overflow-x-auto pb-4 -mx-4 md:-mx-0 px-4 md:px-0 md:grid md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+        <div className="flex gap-4 overflow-x-auto pb-4 -mx-4 md:-mx-0 px-4 md:px-0 md:grid md:grid-cols-2 xl:grid-cols-2 2xl:grid-cols-4">
           {grouped.map(({ status, items }) => {
             const cfg = TASK_STATUS_CONFIG[status];
             const Icon = cfg.icon;
@@ -3445,7 +3445,6 @@ function KanbanBoard({
                     "text-gray-500":     status === "pending" || status === "cancelled",
                     "text-blue-600":     status === "in_progress",
                     "text-sprout-green": status === "completed",
-                    "text-red-500":      status === "overdue",
                   })} />
                   <span className="text-sm font-semibold text-dark">{cfg.label}</span>
                   {!isDroppable && (
@@ -3820,12 +3819,12 @@ function IssuesHubPageInner() {
             { label: "Open Issues",   value: openIssues,                    tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
             { label: "In Progress",   value: inProgressIssues,              tab: "issues", icon: RefreshCw,     bg: "bg-blue-50",          color: "text-blue-600"     },
             { label: "Total Tasks",   value: taskSum?.total ?? "—",          tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500"    },
+            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
           ];
           const staffCards: typeof managerCards = [
             { label: "Open Issues", value: openIssues,                      tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
             { label: "Tasks",       value: taskSum?.total ?? "—",            tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Overdue",     value: taskSum?.overdue_count ?? "—",    tab: "tasks",  icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500"    },
+            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
           ];
           const cards = isManager ? managerCards : staffCards;
           return (

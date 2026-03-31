@@ -36,6 +36,9 @@ export interface WorkflowDefinition {
   trigger_type: string;
   trigger_config?: Record<string, unknown> | null;
   form_template_id?: string | null;
+  trigger_form_template_id?: string | null;
+  trigger_issue_category_id?: string | null;
+  trigger_conditions?: Record<string, unknown> | null;
   is_active: boolean;
   created_at: string;
   updated_at?: string;

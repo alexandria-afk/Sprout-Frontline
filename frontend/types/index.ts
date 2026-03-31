@@ -582,7 +582,7 @@ export type AttendanceStatus = 'present' | 'late' | 'early_departure' | 'absent'
 export type ClockInMethod = 'gps' | 'selfie' | 'facial_recognition' | 'qr_code' | 'manager_override';
 
 export interface ShiftTemplate {
-  id: string; organisation_id: string; location_id: string;
+  id: string; organisation_id: string; location_id: string | null;
   name: string; role: string | null;
   start_time: string; end_time: string;
   days_of_week: number[];

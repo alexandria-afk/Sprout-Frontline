@@ -11,20 +11,28 @@ const ENTITY_CONFIG: Record<
   string,
   { label: string; borderColor: string; emoji: string; filterKey: string }
 > = {
-  task:        { label: "Task",        borderColor: "border-l-blue-500",   emoji: "📋", filterKey: "task"       },
-  issue:       { label: "Issue",       borderColor: "border-l-orange-500", emoji: "⚠️",  filterKey: "issue"      },
-  form:        { label: "Form",        borderColor: "border-l-green-500",  emoji: "📝", filterKey: "form"       },
-  workflow:    { label: "Workflow",    borderColor: "border-l-purple-500", emoji: "⚡", filterKey: "workflow"   },
-  incident:    { label: "Incident",    borderColor: "border-l-red-500",    emoji: "🚨", filterKey: "incident"   },
-  onboarding:  { label: "Onboarding", borderColor: "border-l-teal-500",   emoji: "🚀", filterKey: "onboarding" },
+  task:         { label: "Task",         borderColor: "border-l-blue-500",    emoji: "📋", filterKey: "task"         },
+  issue:        { label: "Issue",        borderColor: "border-l-orange-500",  emoji: "⚠️",  filterKey: "issue"        },
+  form:         { label: "Form",         borderColor: "border-l-green-500",   emoji: "📝", filterKey: "form"         },
+  workflow:     { label: "Workflow",     borderColor: "border-l-purple-500",  emoji: "⚡", filterKey: "workflow"     },
+  shift:        { label: "Shift",        borderColor: "border-l-cyan-500",    emoji: "🕐", filterKey: "shift"        },
+  training:     { label: "Training",     borderColor: "border-l-emerald-500", emoji: "🎓", filterKey: "training"     },
+  announcement: { label: "Announcement", borderColor: "border-l-amber-500",   emoji: "📣", filterKey: "announcement" },
+  badge:        { label: "Badge",        borderColor: "border-l-yellow-500",  emoji: "🏅", filterKey: "badge"        },
+  incident:     { label: "Incident",     borderColor: "border-l-red-500",     emoji: "🚨", filterKey: "incident"     },
+  onboarding:   { label: "Onboarding",  borderColor: "border-l-teal-500",    emoji: "🚀", filterKey: "onboarding"   },
 };
 
 const FILTERS = [
-  { key: "",         label: "All"       },
-  { key: "task",     label: "Tasks"     },
-  { key: "issue",    label: "Issues"    },
-  { key: "form",     label: "Forms"     },
-  { key: "workflow", label: "Workflows" },
+  { key: "",             label: "All"           },
+  { key: "task",         label: "Tasks"         },
+  { key: "issue",        label: "Issues"        },
+  { key: "form",         label: "Forms"         },
+  { key: "workflow",     label: "Workflows"     },
+  { key: "shift",        label: "Shifts"        },
+  { key: "training",     label: "Training"      },
+  { key: "announcement", label: "Announcements" },
+  { key: "badge",        label: "Badges"        },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

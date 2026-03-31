@@ -7,6 +7,7 @@ from typing import List, Optional
 from dependencies import get_current_user, require_manager_or_above
 from config import settings
 from services.ai_logger import log_ai_request, AITimer
+from services.industry_context import get_industry_context
 
 router = APIRouter()
 
@@ -171,8 +172,9 @@ async def generate_repair_guide(
     current_user: dict = Depends(get_current_user),
 ):
     """Use AI to generate a repair guide from a plain-text description."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     text = await _call_claude(
-        system_prompt=_REPAIR_GUIDE_SYSTEM,
+        system_prompt=get_industry_context(org_id) + _REPAIR_GUIDE_SYSTEM,
         user_message=body.prompt.strip(),
     )
     try:
@@ -217,8 +219,9 @@ async def generate_issue_categories(
     current_user: dict = Depends(require_manager_or_above),
 ):
     """Use AI to generate issue category suggestions."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     text = await _call_claude(
-        system_prompt=_ISSUE_CATEGORIES_SYSTEM,
+        system_prompt=get_industry_context(org_id) + _ISSUE_CATEGORIES_SYSTEM,
         user_message=body.prompt.strip(),
     )
     try:
@@ -266,8 +269,9 @@ async def generate_badges(
     current_user: dict = Depends(require_manager_or_above),
 ):
     """Use AI to generate safety badge suggestions."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     text = await _call_claude(
-        system_prompt=_SAFETY_BADGES_SYSTEM,
+        system_prompt=get_industry_context(org_id) + _SAFETY_BADGES_SYSTEM,
         user_message=body.prompt.strip(),
     )
     try:
@@ -322,8 +326,9 @@ async def generate_workflow(
     current_user: dict = Depends(require_manager_or_above),
 ):
     """Use AI to generate a workflow definition from a plain-text description."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     text = await _call_claude(
-        system_prompt=_WORKFLOW_SYSTEM,
+        system_prompt=get_industry_context(org_id) + _WORKFLOW_SYSTEM,
         user_message=body.prompt.strip(),
     )
     try:
@@ -659,7 +664,7 @@ async def generate_audit_template_ai(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user.get("sub")
 
-    system_prompt = """You are an audit template designer for QSR and retail compliance.
+    system_prompt = get_industry_context(org_id) + """You are an audit template designer for QSR and retail compliance.
 Generate a fully scored audit template that frontline managers use during inspections.
 
 Always respond with ONLY valid JSON — no markdown fences, no explanation.
@@ -750,7 +755,7 @@ async def generate_quiz(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user.get("sub")
 
-    system_prompt = f"""You are an instructional designer creating quiz questions for retail/QSR training courses.
+    system_prompt = get_industry_context(org_id) + f"""You are an instructional designer creating quiz questions for retail/QSR training courses.
 Generate exactly {body.num_questions} multiple-choice questions based on the provided slide content.
 
 Always respond with ONLY valid JSON — no markdown fences, no explanation.
@@ -837,7 +842,7 @@ async def translate_course(
             detail=f"Unsupported language. Supported: {', '.join(SUPPORTED_LANGUAGES)}",
         )
 
-    system_prompt = f"""You are a professional translator specialising in retail and QSR training content.
+    system_prompt = get_industry_context(org_id) + f"""You are a professional translator specialising in retail and QSR training content.
 Translate the provided course content to {body.target_language}.
 
 Always respond with ONLY valid JSON — no markdown fences, no explanation.
@@ -896,7 +901,7 @@ async def knowledge_gaps(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user.get("sub")
 
-    system_prompt = """You are a training specialist analysing quiz performance to identify knowledge gaps.
+    system_prompt = get_industry_context(org_id) + """You are a training specialist analysing quiz performance to identify knowledge gaps.
 Based on wrong answers, identify patterns and recommend corrective actions.
 
 Always respond with ONLY valid JSON — no markdown fences, no explanation.
@@ -975,7 +980,7 @@ async def learning_path(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user.get("sub")
 
-    system_prompt = """You are a learning and development specialist for retail/QSR.
+    system_prompt = get_industry_context(org_id) + """You are a learning and development specialist for retail/QSR.
 Recommend a personalised learning path based on the learner's role, progress, and performance.
 
 Always respond with ONLY valid JSON — no markdown fences, no explanation.
@@ -1076,6 +1081,7 @@ async def sidekick_chat(
     client = _get_client()
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user.get("sub")
+    sidekick_system = get_industry_context(org_id) + SIDEKICK_SYSTEM
 
     sdk_messages = [{"role": m.role, "content": m.content} for m in body.messages]
 
@@ -1083,7 +1089,7 @@ async def sidekick_chat(
         return client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=1024,
-            system=SIDEKICK_SYSTEM,
+            system=sidekick_system,
             messages=sdk_messages,
         )
 

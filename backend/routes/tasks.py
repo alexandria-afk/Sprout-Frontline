@@ -87,9 +87,13 @@ async def my_tasks(current_user: dict = Depends(get_current_user)):
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 @router.get("/summary")
-async def task_summary(current_user: dict = Depends(require_manager_or_above)):
+async def task_summary(current_user: dict = Depends(get_current_user)):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await TaskService.summary(org_id)
+    role = (current_user.get("app_metadata") or {}).get("role", "staff")
+    is_manager = role in ("super_admin", "admin", "manager")
+    # Managers see org-wide summary; staff see only their assigned tasks
+    scoped_user_id = None if is_manager else current_user["sub"]
+    return await TaskService.summary(org_id, user_id=scoped_user_id)
 
 
 # ── Tasks CRUD ────────────────────────────────────────────────────────────────

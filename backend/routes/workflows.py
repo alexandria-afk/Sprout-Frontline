@@ -52,6 +52,7 @@ from services.workflow_service import (
     get_my_tasks,
     get_instance_detail,
     trigger_workflow,
+    tick_wait_stages,
 )
 from services.supabase_client import get_admin_client
 
@@ -80,6 +81,8 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
     trigger_type = def_data.get("trigger_type", "manual")
     trigger_config = def_data.get("trigger_config") or {}
     auto_linked_triggers = {"audit_submitted", "form_submitted"}
+    # Triggers that don't require a fill_form first stage
+    no_form_first_triggers = {"employee_created", "issue_created", "incident_created", "scheduled"}
 
     # Fetch stages — include top-level form_template_id column in addition to config JSONB
     stages_res = db.table("workflow_stages") \
@@ -94,25 +97,28 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
               "assigned_role": s.get("assigned_role"), "form_template_id": s.get("form_template_id"),
               "is_final": s.get("is_final")} for s in stages]))
 
-    # Stage 1 must be fill_form with a linked form template
+    # Stage validation
     if not stages:
-        errors.append("Stage 1 (Starting Form) is missing. The workflow needs a starting fill_form stage.")
+        errors.append("This workflow has no stages.")
         return errors  # no point checking further
 
     first_stage = stages[0]
-    if first_stage.get("action_type") != "fill_form":
-        errors.append("Stage 1 must be a Fill Form stage (Starting Form).")
-    else:
-        first_config = first_stage.get("config") or {}
-        if trigger_type in auto_linked_triggers:
-            # Template comes from trigger_config, not stage config
-            if not trigger_config.get("form_template_id"):
-                errors.append("Stage 1: the trigger's linked template is not set. Configure the template in the Trigger section.")
+
+    # For manual/form triggers, Stage 1 must be fill_form with a linked template
+    if trigger_type not in no_form_first_triggers:
+        if first_stage.get("action_type") != "fill_form":
+            errors.append("Stage 1 must be a Fill Form stage (Starting Form).")
         else:
-            # Check both top-level column and config JSONB (either location is valid)
-            first_form_tpl = first_stage.get("form_template_id") or first_config.get("form_template_id")
-            if not first_form_tpl:
-                errors.append(f"Stage \"{first_stage.get('name', 'Starting Form')}\" has no linked form.")
+            first_config = first_stage.get("config") or {}
+            if trigger_type in auto_linked_triggers:
+                # Template comes from trigger_config, not stage config
+                if not trigger_config.get("form_template_id"):
+                    errors.append("Stage 1: the trigger's linked template is not set. Configure the template in the Trigger section.")
+            else:
+                # Check both top-level column and config JSONB (either location is valid)
+                first_form_tpl = first_stage.get("form_template_id") or first_config.get("form_template_id")
+                if not first_form_tpl:
+                    errors.append(f"Stage \"{first_stage.get('name', 'Starting Form')}\" has no linked form.")
 
     # Per-stage validation
     for idx, stage in enumerate(stages):
@@ -136,6 +142,17 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
         if action_type == "wait":
             if not config.get("hours"):
                 errors.append(f"Stage \"{stage_name}\" has no wait duration.")
+
+        # assign_training must have at least one course
+        if action_type == "assign_training":
+            import json as _json
+            course_ids_raw = config.get("course_ids", "[]")
+            try:
+                course_ids = _json.loads(course_ids_raw) if isinstance(course_ids_raw, str) else (course_ids_raw or [])
+            except Exception:
+                course_ids = []
+            if not course_ids:
+                errors.append(f"Stage \"{stage_name}\" has no courses selected.")
 
     # Routing rules: every non-final stage must have at least one outgoing rule
     # OR an implicit sequential connection to the next stage (always-fallback).
@@ -967,3 +984,15 @@ async def submit_form_for_stage(
     await advance_workflow(str(instance_id), str(stage_instance_id), current_user["sub"])
 
     return {"success": True, "form_submission_id": sub_id}
+
+
+# ─── Internal: Wait Stage Ticker ─────────────────────────────────────────────
+
+@router.post("/internal/tick")
+async def tick(current_user: dict = Depends(require_admin)):
+    """
+    Advance condition-based and timed-out wait stages.
+    Call every 5 minutes via a server cron or Supabase Edge Function scheduler.
+    Requires admin role to prevent accidental public exposure.
+    """
+    return await tick_wait_stages()

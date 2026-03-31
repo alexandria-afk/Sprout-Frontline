@@ -8,6 +8,7 @@ Supports stage types: review, approve, fill_form, sign, create_task, create_issu
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 FAIL_VALUES = {"false", "0", "fail", "no", "n/a", ""}
 
 # System stage types that auto-complete without human action
-SYSTEM_STAGE_TYPES = {"create_task", "create_issue", "create_incident", "notify", "wait"}
+SYSTEM_STAGE_TYPES = {"create_task", "create_issue", "create_incident", "notify", "wait", "assign_training"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,22 +201,42 @@ def _execute_system_stage(
         logger.info(f"[notify stage] message={cfg.get('message')} roles={cfg.get('roles')}")
 
     elif action_type == "wait":
-        hours = int(cfg.get("hours", 24))
+        timeout_days = cfg.get("timeout_days")
+        if timeout_days:
+            hours = int(float(timeout_days) * 24)
+        else:
+            hours = int(cfg.get("hours", 24))
         due_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
-        # Mark as in_progress, not auto_completed — cron will advance it
+        # Mark as in_progress — tick_wait_stages advances when condition met or timed out
         update = {"status": "in_progress", "due_at": due_at}
 
     elif action_type == "create_task":
-        task_res = db.table("tasks").insert({
+        # Resolve assignee: prefer stage.assigned_role, fall back to cfg key variants
+        task_role = stage.get("assigned_role") or cfg.get("assign_role") or cfg.get("assigned_role")
+        task_due_at = None
+        deadline_days = cfg.get("deadline_days")
+        due_hours = cfg.get("due_hours")
+        if deadline_days:
+            task_due_at = (datetime.now(timezone.utc) + timedelta(days=int(deadline_days))).isoformat()
+        elif due_hours:
+            task_due_at = (datetime.now(timezone.utc) + timedelta(hours=int(due_hours))).isoformat()
+        task_row: dict = {
             "organisation_id": org_id,
             "title": cfg.get("title", "Workflow Task"),
             "priority": cfg.get("priority", "medium"),
             "status": "pending",
             "source_type": "workflow",
             "created_by": triggered_by,
-            **({"location_id": location_id} if location_id else {}),
-            **({"assigned_to": _resolve_role_sync(db, cfg.get("assign_role", "staff"), org_id, location_id)} if cfg.get("assign_role") else {}),
-        }).execute()
+        }
+        if location_id:
+            task_row["location_id"] = location_id
+        if task_due_at:
+            task_row["due_at"] = task_due_at
+        if task_role:
+            resolved = _resolve_role_sync(db, task_role, org_id, location_id)
+            if resolved:
+                task_row["assigned_to"] = resolved
+        task_res = db.table("tasks").insert(task_row).execute()
         if task_res.data:
             spawned_id = task_res.data[0]["id"]
             db.table("workflow_stage_instances").update({"spawned_task_id": spawned_id}).eq("id", stage_instance_id).execute()
@@ -248,6 +269,48 @@ def _execute_system_stage(
             spawned_id = incident_res.data[0]["id"]
             db.table("workflow_stage_instances").update({"spawned_incident_id": spawned_id}).eq("id", stage_instance_id).execute()
             logger.info(f"[create_incident stage] spawned incident {spawned_id}")
+
+    elif action_type == "assign_training":
+        course_ids_raw = cfg.get("course_ids", "[]")
+        try:
+            course_ids: list = json.loads(course_ids_raw) if isinstance(course_ids_raw, str) else list(course_ids_raw or [])
+        except Exception:
+            course_ids = []
+        # Resolve course_refs (name strings) to IDs for this org
+        course_refs = cfg.get("course_refs") or []
+        if course_refs:
+            refs_res = db.table("courses").select("id").in_("title", course_refs).eq("organisation_id", org_id).eq("is_deleted", False).execute()
+            course_ids += [r["id"] for r in (refs_res.data or [])]
+        subject_user_id = instance.get("subject_user_id") or triggered_by
+        if subject_user_id and course_ids:
+            deadline_dt = None
+            deadline_days = cfg.get("deadline_days")
+            if deadline_days:
+                try:
+                    deadline_dt = (datetime.now(timezone.utc) + timedelta(days=int(deadline_days))).isoformat()
+                except (ValueError, TypeError):
+                    pass
+            # Single query to find already-enrolled courses (avoids N+1)
+            existing_res = db.table("course_enrollments") \
+                .select("course_id") \
+                .eq("user_id", subject_user_id) \
+                .in_("course_id", course_ids) \
+                .execute()
+            already_enrolled = {r["course_id"] for r in (existing_res.data or [])}
+            enrolled_by = triggered_by or _get_first_admin(db, org_id)
+            enrollment_rows = [
+                {
+                    "course_id": cid,
+                    "user_id": subject_user_id,
+                    "enrolled_by": enrolled_by,
+                    "status": "not_started",
+                    **({"cert_expires_at": deadline_dt} if deadline_dt else {}),
+                }
+                for cid in course_ids if cid not in already_enrolled
+            ]
+            if enrollment_rows:
+                db.table("course_enrollments").insert(enrollment_rows).execute()
+                logger.info(f"[assign_training stage] enrolled user {subject_user_id} in {len(enrollment_rows)} courses")
 
     return update
 
@@ -359,6 +422,7 @@ async def trigger_workflow(
     submission_id: Optional[str] = None,
     submission_responses: Optional[dict] = None,
     overall_score: float = 0.0,
+    subject_user_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Create a workflow instance for the given definition and activate the first stage.
@@ -409,6 +473,7 @@ async def trigger_workflow(
         **({"source_id": source_id} if source_id else {}),
         **({"location_id": location_id} if location_id else {}),
         **({"submission_id": submission_id} if submission_id else {}),
+        **({"subject_user_id": subject_user_id} if subject_user_id else {}),
     }).execute()
 
     instance = inst_res.data[0]
@@ -437,6 +502,8 @@ async def trigger_workflows_for_event(
     triggered_by: str,
     location_id: Optional[str] = None,
     category_id: Optional[str] = None,
+    template_id: Optional[str] = None,
+    subject_user_id: Optional[str] = None,
 ) -> list[dict]:
     """
     Find all active workflows matching trigger_type and auto-start them.
@@ -444,7 +511,7 @@ async def trigger_workflows_for_event(
     """
     db = get_admin_client()
     q = db.table("workflow_definitions") \
-        .select("id") \
+        .select("id, trigger_form_template_id, trigger_issue_category_id, trigger_conditions") \
         .eq("trigger_type", event_type) \
         .eq("organisation_id", org_id) \
         .eq("is_active", True) \
@@ -453,6 +520,18 @@ async def trigger_workflows_for_event(
 
     instances = []
     for wf in (res.data or []):
+        # Filter by form template if applicable
+        if event_type in ("form_submitted", "audit_submitted") and template_id:
+            wf_tpl_id = wf.get("trigger_form_template_id")
+            if wf_tpl_id and str(wf_tpl_id) != str(template_id):
+                continue  # This workflow is scoped to a different template
+
+        # Filter by issue category if applicable
+        if event_type == "issue_created" and category_id:
+            wf_cat_id = wf.get("trigger_issue_category_id")
+            if wf_cat_id and str(wf_cat_id) != str(category_id):
+                continue  # This workflow is scoped to a different category
+
         instance = await trigger_workflow(
             definition_id=wf["id"],
             org_id=org_id,
@@ -460,10 +539,160 @@ async def trigger_workflows_for_event(
             triggered_by=triggered_by,
             source_id=source_id,
             location_id=location_id,
+            subject_user_id=subject_user_id,
         )
         if instance:
             instances.append(instance)
     return instances
+
+
+async def trigger_workflows_for_employee_created(
+    org_id: str,
+    new_user_id: str,
+    triggered_by: str,
+    role: Optional[str] = None,
+    department: Optional[str] = None,
+    location_id: Optional[str] = None,
+) -> list[dict]:
+    """
+    Find all active workflows with trigger_type='employee_created' and evaluate
+    trigger_conditions against the new employee profile. If conditions match, start workflow.
+    """
+    db = get_admin_client()
+    res = db.table("workflow_definitions") \
+        .select("id, trigger_conditions") \
+        .eq("trigger_type", "employee_created") \
+        .eq("organisation_id", org_id) \
+        .eq("is_active", True) \
+        .eq("is_deleted", False) \
+        .execute()
+
+    instances = []
+    for wf in (res.data or []):
+        conditions = wf.get("trigger_conditions") or {}
+
+        # Role filter
+        allowed_roles = conditions.get("roles")
+        if allowed_roles and isinstance(allowed_roles, list) and role:
+            if role not in allowed_roles:
+                continue
+
+        # Department filter
+        required_dept = conditions.get("department")
+        if required_dept and department:
+            if str(required_dept).strip().lower() != str(department).strip().lower():
+                continue
+
+        instance = await trigger_workflow(
+            definition_id=wf["id"],
+            org_id=org_id,
+            source_type="employee_created",
+            triggered_by=triggered_by,
+            source_id=new_user_id,
+            location_id=location_id,
+            subject_user_id=new_user_id,
+        )
+        if instance:
+            instances.append(instance)
+    return instances
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Wait Stage Ticker — advance condition-based and timed-out wait stages
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def tick_wait_stages() -> dict:
+    """
+    Advance all in-progress wait stage instances that are either:
+      - Timed out (due_at <= now), or
+      - Condition met (e.g. all_courses_passed for the subject_user_id).
+    Call this every 5 minutes via an internal cron endpoint.
+    """
+    db = get_admin_client()
+    now = datetime.now(timezone.utc)
+    advanced = 0
+    timed_out_count = 0
+
+    res = db.table("workflow_stage_instances") \
+        .select(
+            "id, workflow_instance_id, due_at, stage_id,"
+            "workflow_stages(action_type, config, workflow_definition_id),"
+            "workflow_instances(organisation_id, subject_user_id)"
+        ) \
+        .eq("status", "in_progress") \
+        .execute()
+
+    for si in (res.data or []):
+        stage_meta = si.get("workflow_stages") or {}
+        if stage_meta.get("action_type") != "wait":
+            continue
+
+        instance_meta = si.get("workflow_instances") or {}
+        org_id = instance_meta.get("organisation_id")
+        subject_user_id = instance_meta.get("subject_user_id")
+        cfg = stage_meta.get("config") or {}
+        condition = cfg.get("condition")
+
+        # ── Timeout check ────────────────────────────────────────────────────
+        due_at_str = si.get("due_at")
+        if due_at_str:
+            due_dt = datetime.fromisoformat(due_at_str.replace("Z", "+00:00"))
+            if now >= due_dt:
+                db.table("workflow_stage_instances").update({
+                    "status": "auto_completed",
+                    "completed_at": now.isoformat(),
+                    "comment": "Wait timed out",
+                }).eq("id", si["id"]).execute()
+                await advance_workflow(si["workflow_instance_id"], si["id"], None)
+                timed_out_count += 1
+                continue
+
+        # ── Condition check ───────────────────────────────────────────────────
+        if condition == "all_courses_passed" and subject_user_id and org_id:
+            wf_def_id = stage_meta.get("workflow_definition_id")
+            # Resolve course_refs from the sibling assign_training stage definition
+            at_res = db.table("workflow_stages") \
+                .select("config") \
+                .eq("workflow_definition_id", wf_def_id) \
+                .eq("action_type", "assign_training") \
+                .limit(1) \
+                .execute()
+            if not at_res.data:
+                continue
+            at_cfg = at_res.data[0].get("config") or {}
+            course_refs = at_cfg.get("course_refs") or []
+            raw_ids = at_cfg.get("course_ids") or []
+            if isinstance(raw_ids, str):
+                try:
+                    raw_ids = json.loads(raw_ids)
+                except Exception:
+                    raw_ids = []
+            all_course_ids: list = list(raw_ids)
+            if course_refs:
+                refs_res = db.table("courses").select("id").in_("title", course_refs).eq("organisation_id", org_id).eq("is_deleted", False).execute()
+                all_course_ids += [r["id"] for r in (refs_res.data or [])]
+
+            if not all_course_ids:
+                continue
+
+            enroll_res = db.table("course_enrollments") \
+                .select("status") \
+                .eq("user_id", subject_user_id) \
+                .in_("course_id", all_course_ids) \
+                .execute()
+            enrollments = enroll_res.data or []
+            # All courses must be enrolled and passed
+            if len(enrollments) == len(all_course_ids) and all(e["status"] == "passed" for e in enrollments):
+                db.table("workflow_stage_instances").update({
+                    "status": "auto_completed",
+                    "completed_at": now.isoformat(),
+                    "comment": "All required courses passed",
+                }).eq("id", si["id"]).execute()
+                await advance_workflow(si["workflow_instance_id"], si["id"], None)
+                advanced += 1
+
+    logger.info(f"[tick_wait_stages] advanced={advanced} timed_out={timed_out_count}")
+    return {"advanced": advanced, "timed_out": timed_out_count}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

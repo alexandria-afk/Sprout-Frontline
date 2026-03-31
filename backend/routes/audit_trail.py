@@ -19,7 +19,13 @@ def _safe_str(val) -> str:
 async def get_audit_trail(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=200, description="Results per page"),
-    entity_type: Optional[str] = Query(None, description="Filter by entity type: task, issue, form, workflow, incident"),
+    entity_type: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by entity type: task, issue, form, workflow, "
+            "shift, training, announcement, badge, incident"
+        ),
+    ),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
@@ -156,7 +162,190 @@ async def get_audit_trail(
         except Exception:
             pass
 
-    # ── 5. Onboarding provisioning events ────────────────────────────────────
+    # ── 5. Workflow definitions (created — includes provisioned workflows) ────
+    if entity_type is None or entity_type == "workflow":
+        try:
+            res = (
+                db.table("workflow_definitions")
+                .select("id, name, created_at, created_by, organisation_id")
+                .eq("organisation_id", org_id)
+                .execute()
+            )
+            # Build a set of definition_ids that already appear as triggered instances
+            # so we can label the event correctly without duplicating the card.
+            for row in res.data or []:
+                name = row.get("name") or "Untitled Workflow"
+                events.append({
+                    "id": f"wfdef-{_safe_str(row.get('id'))}",
+                    "event_type": "workflow_created",
+                    "entity_type": "workflow",
+                    "entity_id": _safe_str(row.get("id")),
+                    "entity_title": name,
+                    "actor_name": "System",
+                    "actor_id": _safe_str(row.get("created_by")),
+                    "description": f"Workflow created: {name}",
+                    "timestamp": _safe_str(row.get("created_at")),
+                    "metadata": {},
+                })
+        except Exception:
+            pass
+
+    # ── 6. Form templates (created — includes provisioned forms) ─────────────
+    if entity_type is None or entity_type == "form":
+        try:
+            res = (
+                db.table("form_templates")
+                .select("id, title, created_at, created_by, organisation_id")
+                .eq("organisation_id", org_id)
+                .execute()
+            )
+            for row in res.data or []:
+                title = row.get("title") or "Untitled Form"
+                events.append({
+                    "id": f"fmtpl-{_safe_str(row.get('id'))}",
+                    "event_type": "form_created",
+                    "entity_type": "form",
+                    "entity_id": _safe_str(row.get("id")),
+                    "entity_title": title,
+                    "actor_name": "System",
+                    "actor_id": _safe_str(row.get("created_by")),
+                    "description": f"Form created: {title}",
+                    "timestamp": _safe_str(row.get("created_at")),
+                    "metadata": {},
+                })
+        except Exception:
+            pass
+
+    # ── 7. Published shifts ───────────────────────────────────────────────────
+    if entity_type is None or entity_type == "shift":
+        try:
+            res = (
+                db.table("shifts")
+                .select(
+                    "id, role, start_at, location_id, status, created_at, created_by, "
+                    "profiles!shifts_created_by_fkey(full_name)"
+                )
+                .eq("organisation_id", org_id)
+                .eq("status", "published")
+                .order("created_at", desc=True)
+                .limit(200)
+                .execute()
+            )
+            for row in res.data or []:
+                profile = row.get("profiles") or {}
+                role = row.get("role") or "Shift"
+                start = (row.get("start_at") or "")[:10]
+                events.append({
+                    "id": f"shift-{_safe_str(row.get('id'))}",
+                    "event_type": "shift_published",
+                    "entity_type": "shift",
+                    "entity_id": _safe_str(row.get("id")),
+                    "entity_title": f"{role} — {start}",
+                    "actor_name": profile.get("full_name") or "Manager",
+                    "actor_id": _safe_str(row.get("created_by")),
+                    "description": f"Shift published: {role} on {start}",
+                    "timestamp": _safe_str(row.get("created_at")),
+                    "metadata": {"status": "published"},
+                })
+        except Exception:
+            pass
+
+    # ── 8. Training completions ───────────────────────────────────────────────
+    if entity_type is None or entity_type == "training":
+        try:
+            res = (
+                db.table("course_enrollments")
+                .select(
+                    "id, course_id, completed_at, user_id, "
+                    "courses!inner(title, organisation_id), "
+                    "profiles!course_enrollments_user_id_fkey(full_name)"
+                )
+                .eq("courses.organisation_id", org_id)
+                .not_.is_("completed_at", "null")
+                .execute()
+            )
+            for row in res.data or []:
+                course = row.get("courses") or {}
+                profile = row.get("profiles") or {}
+                title = course.get("title") or "Course"
+                events.append({
+                    "id": f"enroll-{_safe_str(row.get('id'))}",
+                    "event_type": "training_completed",
+                    "entity_type": "training",
+                    "entity_id": _safe_str(row.get("course_id")),
+                    "entity_title": title,
+                    "actor_name": profile.get("full_name") or "Staff",
+                    "actor_id": _safe_str(row.get("user_id")),
+                    "description": f"Training completed: {title}",
+                    "timestamp": _safe_str(row.get("completed_at")),
+                    "metadata": {},
+                })
+        except Exception:
+            pass
+
+    # ── 9. Announcements ─────────────────────────────────────────────────────
+    if entity_type is None or entity_type == "announcement":
+        try:
+            res = (
+                db.table("announcements")
+                .select(
+                    "id, title, created_at, created_by, organisation_id, "
+                    "profiles!announcements_created_by_fkey(full_name)"
+                )
+                .eq("organisation_id", org_id)
+                .execute()
+            )
+            for row in res.data or []:
+                profile = row.get("profiles") or {}
+                title = row.get("title") or "Announcement"
+                events.append({
+                    "id": f"ann-{_safe_str(row.get('id'))}",
+                    "event_type": "announcement_created",
+                    "entity_type": "announcement",
+                    "entity_id": _safe_str(row.get("id")),
+                    "entity_title": title,
+                    "actor_name": profile.get("full_name") or "Manager",
+                    "actor_id": _safe_str(row.get("created_by")),
+                    "description": f"Announcement posted: {title}",
+                    "timestamp": _safe_str(row.get("created_at")),
+                    "metadata": {},
+                })
+        except Exception:
+            pass
+
+    # ── 10. Badge awards ──────────────────────────────────────────────────────
+    if entity_type is None or entity_type == "badge":
+        try:
+            res = (
+                db.table("user_badges")
+                .select(
+                    "id, badge_config_id, awarded_at, user_id, "
+                    "badge_configs!inner(name, organisation_id), "
+                    "profiles!user_badges_user_id_fkey(full_name)"
+                )
+                .eq("badge_configs.organisation_id", org_id)
+                .execute()
+            )
+            for row in res.data or []:
+                badge = row.get("badge_configs") or {}
+                profile = row.get("profiles") or {}
+                name = badge.get("name") or "Badge"
+                events.append({
+                    "id": f"badge-{_safe_str(row.get('id'))}",
+                    "event_type": "badge_awarded",
+                    "entity_type": "badge",
+                    "entity_id": _safe_str(row.get("badge_config_id")),
+                    "entity_title": name,
+                    "actor_name": profile.get("full_name") or "Staff",
+                    "actor_id": _safe_str(row.get("user_id")),
+                    "description": f"Badge awarded: {name}",
+                    "timestamp": _safe_str(row.get("awarded_at")),
+                    "metadata": {},
+                })
+        except Exception:
+            pass
+
+    # ── 11. Onboarding provisioning events ───────────────────────────────────
     if entity_type is None:
         try:
             res = (

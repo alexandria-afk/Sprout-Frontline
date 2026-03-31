@@ -11,6 +11,10 @@ class IndustryCode(str, Enum):
     HEALTHCARE_CLINIC = "healthcare_clinic"
     MANUFACTURING = "manufacturing"
     LOGISTICS = "logistics"
+    CASUAL_DINING = "casual_dining"
+    FULL_SERVICE_RESTAURANT = "full_service_restaurant"
+    CAFE_BAR = "cafe_bar"
+    BAKERY = "bakery"
 
 
 INDUSTRY_DISPLAY = {
@@ -21,6 +25,10 @@ INDUSTRY_DISPLAY = {
     "healthcare_clinic": "Healthcare — Clinics",
     "manufacturing": "Manufacturing",
     "logistics": "Logistics & Warehousing",
+    "casual_dining": "Casual Dining Restaurant",
+    "full_service_restaurant": "Full-Service Restaurant",
+    "cafe_bar": "Cafe & Bar",
+    "bakery": "Bakery & Pastry",
 }
 
 
@@ -105,6 +113,7 @@ class SelectionSummary(BaseModel):
     training_modules: int = 0
     shift_templates: int = 0
     repair_manuals: int = 0
+    badges: int = 0
     total_selected: int = 0
     total_available: int = 0
 

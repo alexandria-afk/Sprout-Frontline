@@ -25,13 +25,39 @@ import {
   type BadgeConfig,
 } from "@/services/gamification";
 import { listUsers } from "@/services/users";
+import { getPackageTemplates } from "@/services/onboarding";
 import { createClient } from "@/services/supabase/client";
 import { friendlyError } from "@/lib/errors";
 import type { Profile } from "@/types";
 
 // ── Template data ─────────────────────────────────────────────────────────────
 
-const TEMPLATE_BADGE_GROUPS = [
+type TemplateBadgeEntry = {
+  name: string;
+  icon: string;
+  description: string;
+  criteria_type: string;
+  criteria_value: number;
+  points_awarded: number;
+};
+type TemplateBadgeGroup = { group: string; badges: TemplateBadgeEntry[] };
+
+const CRITERIA_ICON: Record<string, string> = {
+  issues_reported:        "⚠️",
+  issues_resolved:        "🔧",
+  checklists_completed:   "✅",
+  checklist_streak_days:  "🔥",
+  audit_perfect_score:    "🏆",
+  audit_score_improvement:"📈",
+  training_completed:     "🎓",
+  training_perfect_score: "⭐",
+  attendance_streak_days: "📅",
+  tasks_completed:        "📋",
+  points_total:           "💎",
+  manual:                 "🏅",
+};
+
+const TEMPLATE_BADGE_GROUPS: TemplateBadgeGroup[] = [
   {
     group: "Safety & Issues",
     badges: [
@@ -1249,16 +1275,44 @@ function NewBadgeModal({ onClose, onSuccess, initialMode = "select" }: { onClose
 }
 
 function BadgeTemplateSubView({ onSuccess }: { onSuccess: () => void }) {
-  const allKeys = TEMPLATE_BADGE_GROUPS.flatMap((g) => g.badges.map((b) => `${g.group}::${b.name}`));
-  const [selected, setSelected] = useState<Set<string>>(new Set(allKeys));
+  const [groups, setGroups] = useState<TemplateBadgeGroup[]>(TEMPLATE_BADGE_GROUPS);
+  const [selected, setSelected] = useState<Set<string>>(
+    new Set(TEMPLATE_BADGE_GROUPS.flatMap((g) => g.badges.map((b) => `${g.group}::${b.name}`)))
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  type TemplateBadgeLocal = (typeof TEMPLATE_BADGE_GROUPS)[number]["badges"][number];
+
+  // Fetch industry-specific badge templates; fall back to generic if none
+  useEffect(() => {
+    getPackageTemplates("badge").then((res) => {
+      if (!res.items.length) return;
+      const apiGroups: TemplateBadgeGroup[] = [
+        {
+          group: "Industry Badges",
+          badges: res.items.map((item) => {
+            const c = item.content as Record<string, unknown>;
+            return {
+              name: item.name,
+              icon: CRITERIA_ICON[(c.criteria_type as string) ?? ""] ?? "🏅",
+              description: (c.description as string) || item.description,
+              criteria_type: (c.criteria_type as string) ?? "manual",
+              criteria_value: (c.threshold as number) ?? 1,
+              points_awarded: (c.points_awarded as number) ?? 0,
+            };
+          }),
+        },
+      ];
+      setGroups(apiGroups);
+      setSelected(new Set(apiGroups[0].badges.map((b) => `Industry Badges::${b.name}`)));
+    }).catch(() => {});
+  }, []);
+
+  const allKeys = groups.flatMap((g) => g.badges.map((b) => `${g.group}::${b.name}`));
 
   const toggleBadge = (key: string) =>
     setSelected((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; });
 
-  const toggleGroup = (group: string, badges: readonly TemplateBadgeLocal[]) => {
+  const toggleGroup = (group: string, badges: TemplateBadgeEntry[]) => {
     const keys = badges.map((b) => `${group}::${b.name}`);
     const allSel = keys.every((k) => selected.has(k));
     setSelected((prev) => {
@@ -1271,7 +1325,7 @@ function BadgeTemplateSubView({ onSuccess }: { onSuccess: () => void }) {
   const handleLoad = async () => {
     if (!selected.size) return;
     setError(""); setLoading(true);
-    const toCreate = TEMPLATE_BADGE_GROUPS.flatMap((g) => g.badges.filter((b) => selected.has(`${g.group}::${b.name}`)));
+    const toCreate = groups.flatMap((g) => g.badges.filter((b) => selected.has(`${g.group}::${b.name}`)));
     for (const badge of toCreate) {
       try { await createBadgeConfig({ name: badge.name, icon: badge.icon, description: badge.description, criteria_type: badge.criteria_type, criteria_value: badge.criteria_value, criteria_window: "all_time", points_awarded: badge.points_awarded }); }
       catch { /* skip duplicates */ }
@@ -1284,7 +1338,7 @@ function BadgeTemplateSubView({ onSuccess }: { onSuccess: () => void }) {
     <div className="p-5 flex flex-col gap-4">
       <p className="text-sm text-dark-secondary">Select the badges you want to create. Badges that already exist will be skipped.</p>
       <div className="flex flex-col gap-4">
-        {TEMPLATE_BADGE_GROUPS.map((group) => {
+        {groups.map((group) => {
           const groupKeys = group.badges.map((b) => `${group.group}::${b.name}`);
           const allGroupSel = groupKeys.every((k) => selected.has(k));
           const someGroupSel = groupKeys.some((k) => selected.has(k));

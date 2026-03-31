@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import clsx from "clsx";
 import {
   CalendarClock, ChevronLeft, ChevronRight, Plus, Clock,
   CheckCircle2, XCircle, AlertCircle, User, MapPin,
   Loader2, X, Sparkles, ToggleLeft, ToggleRight,
-  Calendar, Coffee, ArrowRightLeft, FileText, Settings,
+  Calendar, Coffee, ArrowRightLeft, FileText,
   ClipboardList, TimerReset, TrendingUp, BarChart3,
   RefreshCw, Check, Ban, Globe, Filter,
 } from "lucide-react";
@@ -92,6 +93,23 @@ function fmtDate(d: Date): string {
 
 function fmtTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+}
+
+/** Display a shift wall-clock time without timezone conversion.
+ *  Shifts are stored as UTC but represent local business hours (e.g. "T08:00"
+ *  means 8 AM at the store). Reading the ISO chars directly avoids the browser
+ *  adding a UTC→local offset that would show "4 PM" instead of "8 AM". */
+function fmtWallTime(iso: string): string {
+  // Extract "HH:MM" from "YYYY-MM-DDTHH:MM:SS..." regardless of TZ suffix
+  const timePart = iso.slice(11, 16);
+  if (!timePart || timePart.length < 5) return iso;
+  const [hStr, mStr] = timePart.split(":");
+  const h = parseInt(hStr, 10);
+  const m = parseInt(mStr, 10);
+  if (isNaN(h) || isNaN(m)) return iso;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  return `${h12}:${String(m).padStart(2, "0")} ${period}`;
 }
 
 function fmtShortDate(iso: string): string {
@@ -223,7 +241,7 @@ function ShiftPill({ shift, onClick }: { shift: Shift; onClick: () => void }) {
       <div className="flex items-center gap-1">
         <span className={clsx("w-1.5 h-1.5 rounded-full shrink-0", cfg.dot)} />
         <span className="truncate">
-          {fmtTime(shift.start_at)}
+          {fmtWallTime(shift.start_at)}
           {shift.assigned_to_user_id
             ? ` · ${(shift as Shift & { assigned_to?: { full_name: string } | null }).assigned_to?.full_name ?? "Staff"}`
             : " · Open"}
@@ -536,7 +554,7 @@ function ShiftDetailModal({
           <div>
             <p className="font-semibold text-dark">{shift.role || "Unspecified role"}</p>
             <p className="text-sm text-dark-secondary mt-0.5">
-              {fmtShortDate(shift.start_at)} · {fmtTime(shift.start_at)} – {fmtTime(shift.end_at)}
+              {fmtShortDate(shift.start_at)} · {fmtWallTime(shift.start_at)} – {fmtWallTime(shift.end_at)}
             </p>
           </div>
           <ShiftBadge status={shift.status} isOpenShift={shift.is_open_shift} testId="shift-status-badge" />
@@ -1088,7 +1106,7 @@ function CreateTemplateModal({
 
 // ── Manager Tabs ──────────────────────────────────────────────────────────────
 
-type ManagerTab = "roster" | "open" | "swaps" | "timesheets" | "leave" | "templates" | "settings";
+type ManagerTab = "roster" | "open" | "swaps" | "timesheets" | "leave" | "templates";
 type StaffTab = "schedule" | "clockin" | "timesheet" | "leave" | "availability";
 
 // ── Manager: Roster ───────────────────────────────────────────────────────────
@@ -1264,7 +1282,10 @@ function ManagerRoster({
           locations={locations}
           users={users}
           onClose={() => setShowBulkPublish(false)}
-          onPublished={(count) => setBanner({ type: "success", msg: `${count} shift${count !== 1 ? "s" : ""} published.` })}
+          onPublished={(count) => {
+            setBanner({ type: "success", msg: `${count} shift${count !== 1 ? "s" : ""} published.` });
+            fetchShifts();
+          }}
         />
       )}
     </div>
@@ -1324,7 +1345,7 @@ function ManagerOpenShifts({ locationId }: { locationId: string }) {
                   <tr key={claim.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-dark">{claim.profiles?.full_name ?? "Staff"}</td>
                     <td className="px-4 py-3 text-dark-secondary">{s ? fmtShortDate(s.start_at) : "—"}</td>
-                    <td className="px-4 py-3 text-dark-secondary">{s ? `${fmtTime(s.start_at)} – ${fmtTime(s.end_at)}` : "—"}</td>
+                    <td className="px-4 py-3 text-dark-secondary">{s ? `${fmtWallTime(s.start_at)} – ${fmtWallTime(s.end_at)}` : "—"}</td>
                     <td className="px-4 py-3 text-dark-secondary">{s?.role ?? "—"}</td>
                     <td className="px-4 py-3 text-dark-secondary">{new Date(claim.claimed_at).toLocaleDateString()}</td>
                     <td className="px-4 py-3">
@@ -1632,6 +1653,7 @@ function ManagerTemplates({
   const [generatingFor, setGeneratingFor] = useState<string | null>(null);
   const [genDateFrom, setGenDateFrom] = useState(fmtDate(getMondayOfWeek(new Date())));
   const [genDateTo, setGenDateTo] = useState(fmtDate(addDays(getMondayOfWeek(new Date()), 6)));
+  const [genLocationId, setGenLocationId] = useState("");
   const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   const fetchTemplates = useCallback(async () => {
@@ -1645,13 +1667,23 @@ function ManagerTemplates({
 
   useEffect(() => { fetchTemplates(); }, [fetchTemplates]);
 
-  async function handleGenerate(templateId: string) {
+  const [generating, setGenerating] = useState(false);
+  async function handleGenerate(templateId: string, templateLocationId: string | null) {
+    setGenerating(true);
     try {
-      const r = await bulkGenerateShifts(templateId, { date_from: genDateFrom, date_to: genDateTo });
+      const body: { date_from: string; date_to: string; location_id?: string } = {
+        date_from: genDateFrom,
+        date_to: genDateTo,
+      };
+      if (!templateLocationId && genLocationId) body.location_id = genLocationId;
+      const r = await bulkGenerateShifts(templateId, body);
       setBanner({ type: "success", msg: `${r.shifts_created} draft shift${r.shifts_created !== 1 ? "s" : ""} created.` });
       setGeneratingFor(null);
+      setGenLocationId("");
     } catch (e) {
-      setBanner({ type: "error", msg: (e as Error).message });
+      setBanner({ type: "error", msg: (e as Error).message || "Failed to generate shifts. Please try again." });
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -1717,13 +1749,29 @@ function ManagerTemplates({
               {generatingFor === t.id ? (
                 <div className="mt-3 p-3 bg-gray-50 rounded-lg space-y-2">
                   <p className="text-xs font-medium text-dark">Generate shifts for date range</p>
+                  {!t.location_id && (
+                    <select
+                      value={genLocationId}
+                      onChange={e => setGenLocationId(e.target.value)}
+                      className={clsx(inputCls, "text-xs")}
+                    >
+                      <option value="">Select location…</option>
+                      {locations.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+                    </select>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <input type="date" className={clsx(inputCls, "text-xs")} value={genDateFrom} onChange={e => setGenDateFrom(e.target.value)} />
                     <input type="date" className={clsx(inputCls, "text-xs")} value={genDateTo} onChange={e => setGenDateTo(e.target.value)} />
                   </div>
                   <div className="flex gap-2">
-                    <button className={clsx(btnSecondary, "text-xs")} onClick={() => setGeneratingFor(null)}>Cancel</button>
-                    <button className={clsx(btnPrimary, "text-xs")} onClick={() => handleGenerate(t.id)}>Generate</button>
+                    <button className={clsx(btnSecondary, "text-xs")} onClick={() => setGeneratingFor(null)} disabled={generating}>Cancel</button>
+                    <button
+                      className={clsx(btnPrimary, "text-xs")}
+                      onClick={() => handleGenerate(t.id, t.location_id)}
+                      disabled={generating || (!t.location_id && !genLocationId)}
+                    >
+                      {generating ? "Generating…" : "Generate"}
+                    </button>
                   </div>
                 </div>
               ) : (
@@ -1902,7 +1950,7 @@ function StaffSchedule({ userId }: { userId: string }) {
                       <div>
                         <p className="font-medium text-dark">{shift.role ?? "Shift"}</p>
                         <p className="text-sm text-dark-secondary mt-0.5">
-                          {fmtTime(shift.start_at)} – {fmtTime(shift.end_at)}
+                          {fmtWallTime(shift.start_at)} – {fmtWallTime(shift.end_at)}
                         </p>
                       </div>
                       <ShiftBadge status={shift.status} isOpenShift={shift.is_open_shift} />
@@ -1915,7 +1963,7 @@ function StaffSchedule({ userId }: { userId: string }) {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="font-medium text-blue-800">{shift.role ?? "Open Shift"}</p>
-                        <p className="text-sm text-blue-600 mt-0.5">{fmtTime(shift.start_at)} – {fmtTime(shift.end_at)}</p>
+                        <p className="text-sm text-blue-600 mt-0.5">{fmtWallTime(shift.start_at)} – {fmtWallTime(shift.end_at)}</p>
                       </div>
                       <button
                         onClick={() => handleClaim(shift.id)}
@@ -2475,7 +2523,9 @@ export default function ShiftsPage() {
   const [hoursThisWeek, setHoursThisWeek] = useState<number | null>(null);
   const [myShiftsCount, setMyShiftsCount] = useState(0);
 
-  const [managerTab, setManagerTab] = useState<ManagerTab>("roster");
+  const searchParams = useSearchParams();
+  const initialTab = (searchParams.get("tab") as ManagerTab) ?? "roster";
+  const [managerTab, setManagerTab] = useState<ManagerTab>(initialTab);
   const [staffTab, setStaffTab] = useState<StaffTab>("schedule");
 
   const isManager = ["super_admin", "admin", "manager"].includes(role);
@@ -2550,7 +2600,6 @@ export default function ShiftsPage() {
     { id: "timesheets", label: "Timesheets", icon: Clock          },
     { id: "leave",      label: "Leave",      icon: Coffee         },
     { id: "templates",  label: "Templates",  icon: ClipboardList  },
-    { id: "settings",   label: "Settings",   icon: Settings       },
   ];
 
   const STAFF_TABS: { id: StaffTab; label: string; icon: React.ElementType }[] = [
@@ -2686,7 +2735,6 @@ export default function ShiftsPage() {
               {managerTab === "timesheets" && <ManagerTimesheets />}
               {managerTab === "leave"      && <ManagerLeave />}
               {managerTab === "templates"  && <ManagerTemplates locationId={locationId} isAdmin={isAdmin} locations={locations} />}
-              {managerTab === "settings"   && <ManagerSettings />}
             </>
           ) : (
             <>

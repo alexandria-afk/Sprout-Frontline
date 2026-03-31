@@ -57,6 +57,7 @@ class BulkGenerateShiftsRequest(BaseModel):
     template_id: str
     date_from: date
     date_to: date
+    location_id: Optional[str] = None  # required when template is org-wide (no location_id)
 
 
 class PublishShiftsRequest(BaseModel):

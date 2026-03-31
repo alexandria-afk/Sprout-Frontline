@@ -66,6 +66,21 @@ def _get_anthropic() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=60.0)
 
 
+def _strip_code_fence(text: str) -> str:
+    """Remove markdown code fences from an AI response (```json ... ``` or ``` ... ```)."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text[3:]                          # drop opening ```
+        if text.startswith("json"):
+            text = text[4:]                      # drop language tag
+        text = text.strip()
+        if text.endswith("```"):
+            text = text[:-3].strip()             # drop closing ```
+        elif "```" in text:
+            text = text[:text.index("```")].strip()
+    return text
+
+
 def _get_org_id(current_user: dict) -> str:
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     if not org_id:
@@ -121,12 +136,13 @@ CATEGORY_META = {
     "training_module": {"display": "Training Modules",   "icon": "graduation-cap"},
     "shift_template":  {"display": "Shift Templates",    "icon": "calendar-clock"},
     "repair_manual":   {"display": "Manuals & SOPs",     "icon": "book-open"},
+    "badge":           {"display": "Badges",             "icon": "award"},
 }
 
 DISPLAY_CATEGORY_ORDER = [
     "form", "checklist", "audit",
     "issue_category", "workflow",
-    "training_module", "shift_template", "repair_manual",
+    "training_module", "shift_template", "repair_manual", "badge",
 ]
 
 
@@ -181,7 +197,7 @@ async def _scrape_website(url: str) -> dict:
     if not url.startswith("http"):
         url = "https://" + url
 
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; SproutBot/1.0; +https://sprout.ph)"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
     scraped = {"url": url, "title": "", "description": "", "og": {}, "headings": [], "logo_url": None, "text_sample": ""}
 
     try:
@@ -221,9 +237,44 @@ async def _scrape_website(url: str) -> dict:
             src = f"{parsed.scheme}://{parsed.netloc}{src}"
         scraped["logo_url"] = src
 
-    # Body text sample
+    # Body text sample from homepage
     body_text = soup.get_text(separator=" ", strip=True)
     scraped["text_sample"] = body_text[:3000]
+
+    # Try to find and scrape a locations / store-locator sub-page.
+    # Large chains keep store listings on a separate page; the homepage is just marketing copy.
+    _LOCATION_KEYWORDS = [
+        "/stores",  # exact top-level path — highest priority
+        "store-locator", "store_locator", "find-a-store", "find-store",
+        "store-finder", "storefinder", "branch", "branches",
+        "our-stores", "our-locations", "locations", "outlets", "stores",
+    ]
+    # Collect ALL candidates then pick the shortest href.
+    # Shortest = listing page (/stores) rather than individual page (/stores/branch-xyz).
+    loc_candidates = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower().split("?")[0]  # ignore query params for matching
+        if any(kw in href for kw in _LOCATION_KEYWORDS):
+            loc_candidates.append(a["href"])
+    loc_link = min(loc_candidates, key=lambda h: len(h)) if loc_candidates else None
+
+    if loc_link:
+        from urllib.parse import urljoin
+        loc_url = urljoin(url, loc_link)
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as loc_client:
+                loc_resp = await loc_client.get(loc_url, headers=headers)
+                loc_resp.raise_for_status()
+                loc_soup = BeautifulSoup(loc_resp.text, "html.parser")
+                loc_text = loc_soup.get_text(separator=" ", strip=True)
+                # Append sub-page content so Claude has real location data to work with
+                scraped["text_sample"] = (
+                    scraped["text_sample"]
+                    + "\n\n[Store Locator Page: " + loc_url + "]\n"
+                    + loc_text[:6000]
+                )
+        except Exception:
+            pass  # Sub-page failure is non-fatal; homepage text is still available
 
     return scraped
 
@@ -240,7 +291,7 @@ Respond ONLY with valid JSON — no markdown fences, no explanation.
 JSON schema:
 {
   "company_name": "string",
-  "industry_code": "one of: qsr, retail_fashion, retail_grocery, hospitality, healthcare_clinic, manufacturing, logistics",
+  "industry_code": "one of: qsr, casual_dining, full_service_restaurant, cafe_bar, bakery, retail_fashion, retail_grocery, hospitality, healthcare_clinic, manufacturing, logistics",
   "industry_subcategory": "string (e.g. 'Fast Food — Multi-brand franchise') or null",
   "estimated_locations": integer_or_null,
   "brand_color_hex": "hex color string like #FF0000 or null",
@@ -401,7 +452,7 @@ async def confirm_company(
     return _session_to_response(updated)
 
 
-# ── Step 2: Template Selection ─────────────────────────────────────────────────
+# ── Step 6: Template Selection ─────────────────────────────────────────────────
 
 def _build_content_preview(category: str, content: dict) -> dict:
     """Extract a lightweight preview subset from full template content."""
@@ -453,7 +504,7 @@ async def get_templates(session_id: str, current_user: dict = Depends(get_curren
     """Load industry package with current selections for this session."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 2)
+    _require_step(session, 6)
 
     industry_code = session.get("industry_code", "qsr")
     sb = get_supabase()
@@ -561,6 +612,7 @@ async def get_selection_summary(session_id: str, current_user: dict = Depends(ge
         training_modules=counts.get("training_module", 0),
         shift_templates=counts.get("shift_template", 0),
         repair_manuals=counts.get("repair_manual", 0),
+        badges=counts.get("badge", 0),
         total_selected=total_selected,
         total_available=total_available,
     )
@@ -568,15 +620,15 @@ async def get_selection_summary(session_id: str, current_user: dict = Depends(ge
 
 @router.post("/sessions/{session_id}/confirm-templates", response_model=OnboardingSessionResponse)
 async def confirm_templates(session_id: str, current_user: dict = Depends(require_admin)):
-    """Confirm template selections. Advance to step 3."""
+    """Confirm template selections. Advance to step 7 (Preview)."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 2)
-    _advance_step(session_id, 3)
+    _require_step(session, 6)
+    _advance_step(session_id, 7)
     return _session_to_response(_get_session(session_id, org_id))
 
 
-# ── Step 3: Employee Setup ─────────────────────────────────────────────────────
+# ── Step 2: Team Setup ─────────────────────────────────────────────────────────
 
 @router.post("/sessions/{session_id}/employee-source")
 async def set_employee_source(
@@ -586,7 +638,7 @@ async def set_employee_source(
 ):
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 5)
+    _require_step(session, 2)
     get_supabase().table("onboarding_sessions").update(
         {"employee_source": req.source, "updated_at": datetime.now(timezone.utc).isoformat()}
     ).eq("id", session_id).execute()
@@ -602,7 +654,7 @@ async def upload_employee_csv(
     """Upload CSV/XLSX, validate rows, AI-map roles."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 5)
+    _require_step(session, 2)
 
     try:
         import pandas as pd
@@ -628,7 +680,8 @@ async def upload_employee_csv(
         "phone": ["phone", "mobile", "contact_number", "phone_number"],
         "position": ["position", "job_title", "title", "role", "designation"],
         "department": ["department", "dept", "team", "division"],
-        "location": ["location", "branch", "store", "outlet"],
+        "location": ["location", "branch", "store", "outlet", "work_location"],
+        "reports_to": ["reports_to", "manager", "supervisor", "manager_name", "reports_to_name"],
     }
 
     mapped: dict[str, Optional[str]] = {}
@@ -675,6 +728,10 @@ async def upload_employee_csv(
         if mapped.get("location") and pd.notna(row.get(mapped["location"], "")):
             location_name = str(row[mapped["location"]]).strip()
 
+        reports_to = ""
+        if mapped.get("reports_to") and pd.notna(row.get(mapped["reports_to"], "")):
+            reports_to = str(row[mapped["reports_to"]]).strip()
+
         valid_employees.append({
             "full_name": full_name,
             "email": email,
@@ -682,6 +739,7 @@ async def upload_employee_csv(
             "position": position,
             "department": department,
             "location_name": location_name,
+            "reports_to": reports_to or None,
         })
 
     # AI role mapping for unique positions
@@ -721,6 +779,7 @@ async def upload_employee_csv(
                 "position": emp["position"],
                 "department": emp["department"],
                 "location_name": emp["location_name"],
+                "reports_to": emp.get("reports_to"),
                 "retail_role": retail_role,
                 "status": "pending",
             })
@@ -786,11 +845,7 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
         response = await asyncio.to_thread(_call)
         text = "".join(b.text for b in response.content if hasattr(b, "text"))
         text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```", 2)[-1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.rsplit("```", 1)[0]
+        text = _strip_code_fence(text)
         mappings = json.loads(text.strip())
     except Exception:
         mappings = [{"source_title": t, "source_department": d, "retail_role": "staff", "confidence": 0.5}
@@ -840,7 +895,7 @@ async def add_employee_manual(
     """Manually add a single employee during onboarding."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 5)
+    _require_step(session, 2)
     sb = get_supabase()
     res = sb.table("onboarding_employees").insert({
         "session_id": session_id,
@@ -851,6 +906,7 @@ async def add_employee_manual(
         "department": employee.department,
         "retail_role": employee.retail_role,
         "location_name": employee.location_name,
+        "reports_to": getattr(employee, "reports_to", None),
         "status": "pending",
     }).execute()
     return res.data[0]
@@ -885,7 +941,7 @@ async def generate_invite_link(
     """Generate invite URL + base64 QR code."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 5)
+    _require_step(session, 2)
 
     token = str(uuid.uuid4()).replace("-", "")[:16]
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.expiry_hours)).isoformat()
@@ -954,57 +1010,93 @@ async def update_role_mapping(
 
 @router.post("/sessions/{session_id}/confirm-employees", response_model=OnboardingSessionResponse)
 async def confirm_employees(session_id: str, current_user: dict = Depends(require_admin)):
-    """Confirm employee setup. Advance to step 6."""
+    """Confirm employee setup. Advance to step 3 (Shift Settings)."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 5)
-    _advance_step(session_id, 6)
+    _require_step(session, 2)
+    _advance_step(session_id, 3)
     return _session_to_response(_get_session(session_id, org_id))
 
 
-# ── Step 3: Locations ─────────────────────────────────────────────────────────
+# ── Step 1: Locations (part of Company step) ──────────────────────────────────
 
 
 @router.get("/sessions/{session_id}/suggest-locations")
 async def suggest_locations(session_id: str, current_user: dict = Depends(require_admin)):
-    """AI suggests branch/location names based on company profile."""
+    """AI extracts real branch/location names from the company website, or generates plausible ones as fallback."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 3)
+    _require_step(session, 2)
 
     company_name = session.get("company_name") or "the company"
-    estimated = session.get("estimated_locations") or 1
+    estimated = session.get("estimated_locations") or 3
     industry = INDUSTRY_DISPLAY.get(session.get("industry_code", ""), session.get("industry_code", "retail"))
+    website_url = session.get("website_url")
+
+    # Try to get real location data from the website
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    website_text = ""
+    if website_url:
+        try:
+            scraped = await _scrape_website(website_url)
+            website_text = scraped.get("text_sample", "")
+            _log.info("suggest_locations: website_url=%s text_len=%d", website_url, len(website_text))
+            _log.info("suggest_locations: text_preview=%s", website_text[:500])
+        except Exception as e:
+            _log.warning("suggest_locations: scrape failed for %s: %s", website_url, e)
+    else:
+        _log.info("suggest_locations: no website_url in session, falling back to generated names")
 
     client = _get_anthropic()
+
+    if website_text:
+        prompt = (
+            f"The following is scraped content from the website of {company_name} ({website_url}):\n\n"
+            f"{website_text[:9000]}\n\n"
+            f"Your task: Extract real branch, store, or outlet names and addresses from this content. "
+            f"Look for any mentions of specific locations, branches, stores, offices, or outlets. "
+            f"If you find real locations in the content, return ALL of them. "
+            f"If the content does not mention specific locations, generate {estimated} realistic "
+            f"location names for a {industry} business in the Philippines.\n"
+            f"Respond ONLY with a JSON array (no other text): "
+            f'[{{"name": "Branch/store name", "address": "Full address or empty string"}}]'
+        )
+    else:
+        prompt = (
+            f"Generate {estimated} realistic branch/location names for {company_name}, "
+            f"a {industry} business in the Philippines. "
+            f"Each location should have a descriptive name (e.g. 'Makati Branch', 'SM Megamall Outlet') "
+            f"and an optional address. "
+            f"Respond ONLY with a JSON array: "
+            f'[{{"name": "...", "address": "..."}}]'
+        )
 
     def _call():
         return client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=512,
-            messages=[{"role": "user", "content": (
-                f"Generate {estimated} realistic branch/location names for {company_name}, "
-                f"a {industry} business in the Philippines. "
-                f"Each location should have a name (e.g. 'Makati Branch', 'SM Megamall Outlet') "
-                f"and an optional address. "
-                f"Respond ONLY with a JSON array: "
-                f'[{{"name": "...", "address": "..."}}]'
-            )}],
+            max_tokens=8192,
+            messages=[{"role": "user", "content": prompt}],
         )
 
     try:
         response = await asyncio.to_thread(_call)
         text = "".join(b.text for b in response.content if hasattr(b, "text"))
+        _log.info("suggest_locations: raw claude response=%s", text[:300])
         text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```", 2)[-1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.rsplit("```", 1)[0]
+        text = _strip_code_fence(text)
         suggestions = json.loads(text.strip())
         if not isinstance(suggestions, list):
             suggestions = []
-    except Exception:
+        # Normalise — ensure every item has name and address keys
+        suggestions = [
+            {"name": s.get("name", "").strip(), "address": (s.get("address") or "").strip()}
+            for s in suggestions
+            if isinstance(s, dict) and s.get("name", "").strip()
+        ]
+        _log.info("suggest_locations: returning %d suggestions", len(suggestions))
+    except Exception as e:
+        _log.warning("suggest_locations: claude call/parse failed: %s", e)
         suggestions = [{"name": f"{company_name} Main Branch", "address": ""}]
 
     return suggestions
@@ -1018,7 +1110,7 @@ async def add_location(
 ):
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 3)
+    _require_step(session, 2)
     sb = get_supabase()
     res = sb.table("onboarding_locations").insert({
         "session_id": session_id,
@@ -1046,15 +1138,15 @@ async def delete_location(session_id: str, loc_id: str, current_user: dict = Dep
 
 @router.post("/sessions/{session_id}/confirm-locations", response_model=OnboardingSessionResponse)
 async def confirm_locations(session_id: str, current_user: dict = Depends(require_admin)):
-    """Confirm locations. Advance to step 4 (Assets)."""
+    """Confirm locations (part of Company & Locations step). No step advance."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 3)
-    _advance_step(session_id, 4)
+    _require_step(session, 2)
+    # Locations are confirmed as part of Step 1; no step advance needed here.
     return _session_to_response(_get_session(session_id, org_id))
 
 
-# ── Step 4: Assets & Vendors ───────────────────────────────────────────────────
+# ── Steps 4–5: Assets & Vendors ───────────────────────────────────────────────
 
 
 @router.get("/sessions/{session_id}/suggest-assets")
@@ -1087,11 +1179,7 @@ async def suggest_assets(session_id: str, current_user: dict = Depends(require_a
         response = await asyncio.to_thread(_call)
         text = "".join(b.text for b in response.content if hasattr(b, "text"))
         text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```", 2)[-1]
-            if text.startswith("json"):
-                text = text[4:]
-            text = text.rsplit("```", 1)[0]
+        text = _strip_code_fence(text)
         suggestions = json.loads(text.strip())
         if not isinstance(suggestions, list):
             suggestions = []
@@ -1169,7 +1257,7 @@ async def delete_vendor(session_id: str, vendor_id: str, current_user: dict = De
 
 @router.post("/sessions/{session_id}/confirm-assets", response_model=OnboardingSessionResponse)
 async def confirm_assets(session_id: str, current_user: dict = Depends(require_admin)):
-    """Confirm assets & vendors. Advance to step 5 (Team)."""
+    """Confirm assets (or skip). Advance to step 5 (Vendors)."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
     _require_step(session, 4)
@@ -1177,14 +1265,34 @@ async def confirm_assets(session_id: str, current_user: dict = Depends(require_a
     return _session_to_response(_get_session(session_id, org_id))
 
 
-# ── Step 6: Workspace Preview ──────────────────────────────────────────────────
+@router.post("/sessions/{session_id}/confirm-vendors", response_model=OnboardingSessionResponse)
+async def confirm_vendors(session_id: str, current_user: dict = Depends(require_admin)):
+    """Confirm vendors (or skip). Advance to step 6 (Shift Settings)."""
+    org_id = _get_org_id(current_user)
+    session = _get_session(session_id, org_id)
+    _require_step(session, 5)
+    _advance_step(session_id, 6)
+    return _session_to_response(_get_session(session_id, org_id))
+
+
+@router.post("/sessions/{session_id}/confirm-shift-settings", response_model=OnboardingSessionResponse)
+async def confirm_shift_settings(session_id: str, current_user: dict = Depends(require_admin)):
+    """Confirm shift settings (or skip). Advance to step 4 (Assets)."""
+    org_id = _get_org_id(current_user)
+    session = _get_session(session_id, org_id)
+    _require_step(session, 3)
+    _advance_step(session_id, 4)
+    return _session_to_response(_get_session(session_id, org_id))
+
+
+# ── Step 7: Workspace Preview ──────────────────────────────────────────────────
 
 @router.get("/sessions/{session_id}/preview", response_model=WorkspacePreview)
 async def get_workspace_preview(session_id: str, current_user: dict = Depends(get_current_user)):
     """Aggregate all onboarding data into a preview (read-only)."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 6)
+    _require_step(session, 7)
     sb = get_supabase()
 
     # Fetch selected templates with content
@@ -1221,6 +1329,7 @@ async def get_workspace_preview(session_id: str, current_user: dict = Depends(ge
         training_modules=len(by_cat.get("training_module", [])),
         shift_templates=len(by_cat.get("shift_template", [])),
         repair_manuals=len(by_cat.get("repair_manual", [])),
+        badges=len(by_cat.get("badge", [])),
         total_selected=len(selected_res.data),
         total_available=len(selected_res.data),
     )
@@ -1265,15 +1374,15 @@ async def edit_template_inline(
 
 @router.post("/sessions/{session_id}/confirm-preview", response_model=OnboardingSessionResponse)
 async def confirm_preview(session_id: str, current_user: dict = Depends(require_admin)):
-    """Advance to step 7."""
+    """Advance to step 8."""
     org_id = _get_org_id(current_user)
     session = _get_session(session_id, org_id)
-    _require_step(session, 6)
-    _advance_step(session_id, 7)
+    _require_step(session, 7)
+    _advance_step(session_id, 8)
     return _session_to_response(_get_session(session_id, org_id))
 
 
-# ── Step 5: Launch ─────────────────────────────────────────────────────────────
+# ── Step 8: Launch ─────────────────────────────────────────────────────────────
 
 LAUNCH_STEPS = [
     "Creating locations",
@@ -1319,6 +1428,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         wf_ids = [r["id"] for r in (sb.table("workflow_definitions").select("id").eq("organisation_id", org_id).execute().data or [])]
         if wf_ids:
             sb.table("workflow_stages").delete().in_("workflow_definition_id", wf_ids).execute()
+            sb.table("workflow_routing_rules").delete().in_("workflow_definition_id", wf_ids).execute()
         # course_modules + slides + quiz questions: join through courses
         course_ids = [r["id"] for r in (sb.table("courses").select("id").eq("organisation_id", org_id).execute().data or [])]
         if course_ids:
@@ -1327,11 +1437,33 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 sb.table("course_slides").delete().in_("module_id", mod_ids).execute()
                 sb.table("quiz_questions").delete().in_("module_id", mod_ids).execute()
             sb.table("course_modules").delete().in_("course_id", course_ids).execute()
-        for tbl in ["repair_guides", "courses", "shift_templates", "workflow_definitions", "issue_categories", "form_templates", "badge_configs", "locations", "assets", "vendors"]:
+        # Delete children that RESTRICT form_templates deletion (form_sections CASCADE, so skip)
+        ft_ids = [r["id"] for r in (sb.table("form_templates").select("id").eq("organisation_id", org_id).execute().data or [])]
+        if ft_ids:
+            sb.table("form_assignments").delete().in_("form_template_id", ft_ids).execute()
+            sb.table("audit_configs").delete().in_("form_template_id", ft_ids).execute()
+            sb.table("form_submissions").delete().in_("form_template_id", ft_ids).execute()
+        # Order matters: delete children before parents (FK constraints)
+        for tbl in [
+            "repair_guides", "courses",
+            "assets", "vendors",          # reference locations
+            "shift_templates",            # cascades from locations but be explicit
+            "workflow_definitions",       # references form_templates
+            "issue_categories",
+            "form_templates",
+            "badge_configs",
+            "locations",
+        ]:
             sb.table(tbl).delete().eq("organisation_id", org_id).execute()
 
         session = sb.table("onboarding_sessions").select("*").eq("id", session_id).execute().data[0]
         industry = INDUSTRY_DISPLAY.get(session.get("industry_code", ""), session.get("industry_code", "retail"))
+
+        # Stamp industry_code on the organisation so AI endpoints can use it post-onboarding
+        if session.get("industry_code"):
+            sb.table("organisations").update({
+                "industry_code": session["industry_code"],
+            }).eq("id", org_id).execute()
 
         # Fetch all selected templates
         selected_res = sb.table("onboarding_selections").select(
@@ -1412,6 +1544,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             "signature", "datetime", "time", "yes_no", "boolean", "rating",
             "select", "radio", "file", "textarea", "audit_item",
         }
+        form_name_to_id: dict[str, str] = {}
         for item in by_cat.get("form", []) + by_cat.get("checklist", []) + by_cat.get("audit", []):
             c = item["content"]
             raw_type = c.get("type", "checklist")
@@ -1430,6 +1563,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 continue
             tmpl_res = sb.table("form_templates").insert(row).execute()
             tmpl_id = tmpl_res.data[0]["id"]
+            form_name_to_id[item["name"]] = tmpl_id
 
             # Create sections + fields
             for s_order, section in enumerate(c.get("sections") or []):
@@ -1459,6 +1593,18 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                     "form_template_id": tmpl_id,
                     "passing_score": int(passing),
                 }).execute()
+        # Create a daily form_assignment for the Daily Store Opening Checklist
+        daily_checklist_id = form_name_to_id.get("Daily Store Opening Checklist")
+        if daily_checklist_id:
+            sb.table("form_assignments").insert({
+                "form_template_id": daily_checklist_id,
+                "organisation_id": org_id,
+                "recurrence": "daily",
+                "due_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+                "is_active": True,
+                "is_deleted": False,
+            }).execute()
+
         completed_steps.append("Creating forms & checklists")
         _update_progress("Setting up issue categories", 20)
 
@@ -1476,67 +1622,103 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         completed_steps.append("Setting up issue categories")
         _update_progress("Configuring workflows", 35)
 
+        # Build category name → id lookup for trigger_issue_category_ref resolution
+        cat_name_to_id: dict[str, str] = {}
+        for cat_row in (sb.table("issue_categories").select("id, name").eq("organisation_id", org_id).execute().data or []):
+            cat_name_to_id[cat_row["name"]] = cat_row["id"]
+
         # Step 3: Workflows — definitions + stages
-        _VALID_TRIGGER_TYPES = {"manual", "audit_submitted", "issue_created", "incident_created", "scheduled", "form_submitted"}
+        _VALID_TRIGGER_TYPES = {
+            "manual", "audit_submitted", "issue_created", "incident_created",
+            "scheduled", "form_submitted", "employee_created",
+        }
         _TRIGGER_MAP = {
             "issue_filed": "issue_created", "issue_raised": "issue_created",
             "audit_complete": "audit_submitted", "audit_done": "audit_submitted",
             "audit_item_failed": "audit_submitted",
             "form_complete": "form_submitted", "form_done": "form_submitted",
             "incident_raised": "incident_created", "incident_filed": "incident_created",
+            "user_created": "employee_created",
         }
-        _VALID_ACTION_TYPES = {"review", "approve", "fill_form", "sign", "create_task", "create_issue", "create_incident", "notify", "wait"}
+        _VALID_ACTION_TYPES = {
+            "review", "approve", "fill_form", "sign", "create_task",
+            "create_issue", "create_incident", "notify", "wait", "assign_training",
+        }
         _STAGE_ACTION_MAP = {
             "condition": "wait", "escalate": "notify", "delay": "wait",
             "assign": "review", "send_notification": "notify",
         }
         _VALID_ROLES = {"staff", "manager", "admin", "super_admin", "vendor"}
+        _STAGE_EXCLUDE_KEYS = {"type", "target_role", "assign_to_role", "assigned_role", "is_final", "form_ref", "name"}
+
         for item in by_cat.get("workflow", []):
             c = item["content"]
-            raw_trigger = (c.get("trigger") or {}).get("type", "manual")
+            trigger = c.get("trigger") or {}
+            raw_trigger = trigger.get("type", "manual")
             trigger_type = _TRIGGER_MAP.get(raw_trigger, raw_trigger if raw_trigger in _VALID_TRIGGER_TYPES else "manual")
-            wf_res = sb.table("workflow_definitions").insert({
+
+            # Trigger scoping
+            trigger_conditions = trigger.get("conditions") or None
+            issue_cat_ref = trigger.get("issue_category_ref")
+            trigger_issue_category_id = cat_name_to_id.get(issue_cat_ref) if issue_cat_ref else None
+
+            wf_insert: dict = {
                 "organisation_id": org_id,
                 "name": c.get("workflow_name", item["name"]) or item["name"] or "Untitled Workflow",
                 "trigger_type": trigger_type,
-                "trigger_config": c.get("trigger", {}),
+                "trigger_config": trigger,
                 "is_active": False,
-            }).execute()
+            }
+            if trigger_conditions:
+                wf_insert["trigger_conditions"] = trigger_conditions
+            if trigger_issue_category_id:
+                wf_insert["trigger_issue_category_id"] = trigger_issue_category_id
+
+            wf_res = sb.table("workflow_definitions").insert(wf_insert).execute()
             wf_id = wf_res.data[0]["id"]
 
-            for s_order, stage in enumerate(c.get("stages") or []):
+            stages = c.get("stages") or []
+            for s_order, stage in enumerate(stages):
                 raw_action = stage.get("type", "notify")
                 action_type = _STAGE_ACTION_MAP.get(raw_action, raw_action if raw_action in _VALID_ACTION_TYPES else "notify")
                 raw_role = stage.get("target_role") or stage.get("assign_to_role") or stage.get("assigned_role")
                 assigned_role = raw_role if raw_role in _VALID_ROLES else None
+
+                # Resolve form_ref to form_template_id for fill_form stages
+                resolved_form_id = form_name_to_id.get(stage["form_ref"]) if action_type == "fill_form" and stage.get("form_ref") else None
+
                 stage_row: dict = {
                     "workflow_definition_id": wf_id,
                     "name": stage.get("name") or stage.get("title") or f"Step {s_order + 1}",
                     "stage_order": s_order,
                     "action_type": action_type,
-                    "is_final": bool(stage.get("is_final", s_order == len(c.get("stages", [])) - 1)),
-                    "config": {k: v for k, v in stage.items() if k not in ("type", "target_role", "assign_to_role")},
+                    "is_final": bool(stage.get("is_final", s_order == len(stages) - 1)),
+                    "config": {k: v for k, v in stage.items() if k not in _STAGE_EXCLUDE_KEYS},
                 }
                 if assigned_role:
                     stage_row["assigned_role"] = assigned_role
+                if resolved_form_id:
+                    stage_row["form_template_id"] = resolved_form_id
                 if stage.get("sla_hours") or stage.get("due_hours"):
                     stage_row["sla_hours"] = stage.get("sla_hours") or stage.get("due_hours")
                 sb.table("workflow_stages").insert(stage_row).execute()
         completed_steps.append("Configuring workflows")
         _update_progress("Importing training modules", 50)
 
-        # Step 4: Training modules → courses + course_modules
+        # Step 4: Training modules → courses + course_modules + AI content (parallel)
         _MODULE_TYPE_MAP = {
             "text_with_images": "slides", "text": "slides", "slides": "slides",
             "video_with_quiz": "video", "video": "video",
             "scenario_based": "quiz", "quiz": "quiz",
             "pdf": "pdf",
         }
+
+        # Phase 4a: Create all course + module rows (fast DB ops, sequential)
+        pending_ai: list[dict] = []  # {course_title, module_records}
         for item in by_cat.get("training_module", []):
             c = item["content"]
             if not created_by:
                 continue
-            target_roles = c.get("target_roles", [])
             course_row: dict = {
                 "organisation_id": org_id,
                 "created_by": created_by,
@@ -1544,12 +1726,12 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 "description": c.get("description", ""),
                 "passing_score": int(c.get("passing_score", 80)),
                 "is_mandatory": bool(c.get("auto_assign_on_hire", False)),
-                "target_roles": target_roles,
+                "target_roles": c.get("target_roles", []),
                 "estimated_duration_mins": c.get("estimated_minutes"),
                 "is_published": False,
                 "is_active": True,
                 "is_deleted": False,
-                "ai_generated": False,
+                "ai_generated": True,
             }
             if c.get("renewal_days"):
                 course_row["cert_validity_days"] = int(c["renewal_days"])
@@ -1557,11 +1739,9 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             course_id = course_res.data[0]["id"]
             course_title = course_row["title"]
 
-            # Build module records and collect ids for content generation
-            module_records: list[dict] = []  # {id, title, mtype}
+            module_records: list[dict] = []
             for m_order, section in enumerate(c.get("sections") or []):
-                raw_mtype = section.get("content_type", "slides")
-                mtype = _MODULE_TYPE_MAP.get(raw_mtype, "slides")
+                mtype = _MODULE_TYPE_MAP.get(section.get("content_type", "slides"), "slides")
                 mod_res = sb.table("course_modules").insert({
                     "course_id": course_id,
                     "title": section.get("title", f"Module {m_order + 1}"),
@@ -1575,62 +1755,73 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                     "title": section.get("title", f"Module {m_order + 1}"),
                     "type": mtype,
                 })
+            pending_ai.append({"course_title": course_title, "module_records": module_records})
 
-            # Generate AI content for each module (slides + quiz questions)
-            try:
-                module_outline = [{"title": m["title"], "type": m["type"]} for m in module_records]
-                client = _get_anthropic()
-                def _content_call():
-                    return client.messages.create(
-                        model="claude-haiku-4-5-20251001",
-                        max_tokens=4000,
-                        messages=[{"role": "user", "content": (
-                            f"Generate training content for a {industry} course titled '{course_title}'. "
-                            f"Modules: {json.dumps(module_outline)}. "
-                            f"For each 'slides' module: write 3-4 slides with a short title and 2-3 sentence body explaining a key concept. "
-                            f"For each 'quiz' or 'video' module: write 3-4 multiple_choice quiz questions with 4 options (exactly 1 correct), and a brief explanation. "
-                            f"Respond ONLY with JSON array matching the module order: "
-                            f'[{{"type": "slides", "slides": [{{"title": "...", "body": "..."}}]}}, '
-                            f'{{"type": "quiz", "questions": [{{"question": "...", "question_type": "multiple_choice", "options": [{{"text": "...", "is_correct": true}}], "explanation": "..."}}]}}]'
-                        )}],
-                    )
-                content_resp = await asyncio.to_thread(_content_call)
-                content_text = "".join(b.text for b in content_resp.content if hasattr(b, "text"))
-                # Strip markdown code fences if present (e.g. ```json ... ```)
-                content_text = content_text.strip()
-                if content_text.startswith("```"):
-                    content_text = content_text.split("```", 2)[-1]  # strip opening fence
-                    if content_text.startswith("json"):
-                        content_text = content_text[4:]
-                    content_text = content_text.rsplit("```", 1)[0]  # strip closing fence
-                content_list = json.loads(content_text.strip())
-                for idx, mod in enumerate(module_records):
-                    if idx >= len(content_list):
-                        break
-                    mod_content = content_list[idx]
-                    if mod["type"] == "slides":
-                        for s_order, slide in enumerate(mod_content.get("slides") or []):
-                            sb.table("course_slides").insert({
-                                "module_id": mod["id"],
-                                "title": slide.get("title", f"Slide {s_order + 1}"),
-                                "body": slide.get("body", ""),
-                                "display_order": s_order,
-                            }).execute()
-                    else:  # quiz / video
-                        for q_order, q in enumerate(mod_content.get("questions") or []):
-                            qtype = q.get("question_type", "multiple_choice")
-                            if qtype not in ("multiple_choice", "true_false", "image_based"):
-                                qtype = "multiple_choice"
-                            sb.table("quiz_questions").insert({
-                                "module_id": mod["id"],
-                                "question": q.get("question", "Question"),
-                                "question_type": qtype,
-                                "options": q.get("options", []),
-                                "explanation": q.get("explanation", ""),
-                                "display_order": q_order,
-                            }).execute()
-            except Exception:
-                pass  # Content generation failed — modules exist but are empty; non-blocking
+        # Phase 4b: Fire all AI content calls in parallel
+        async def _generate_course_content(course_title: str, module_records: list[dict]) -> tuple[str, list]:
+            module_outline = [{"title": m["title"], "type": m["type"]} for m in module_records]
+            client = _get_anthropic()
+            def _call():
+                return client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=4000,
+                    messages=[{"role": "user", "content": (
+                        f"Generate training content for a {industry} course titled '{course_title}'. "
+                        f"Modules: {json.dumps(module_outline)}. "
+                        f"For each 'slides' module: write 3-4 slides. Each slide MUST have exactly two keys: \"title\" (short heading) and \"body\" (2-3 sentence explanation of a key concept). Do NOT use any other key name — only \"title\" and \"body\". "
+                        f"For each 'quiz' or 'video' module: write 3-4 multiple_choice quiz questions with 4 options (exactly 1 correct), and a brief explanation. "
+                        f"Respond ONLY with JSON array matching the module order: "
+                        f'[{{"type": "slides", "slides": [{{"title": "...", "body": "..."}}]}}, '
+                        f'{{"type": "quiz", "questions": [{{"question": "...", "question_type": "multiple_choice", "options": [{{"text": "...", "is_correct": true}}], "explanation": "..."}}]}}]'
+                    )}],
+                )
+            resp = await asyncio.to_thread(_call)
+            text = _strip_code_fence("".join(b.text for b in resp.content if hasattr(b, "text")))
+            return course_title, json.loads(text)
+
+        ai_results = await asyncio.gather(
+            *[_generate_course_content(p["course_title"], p["module_records"]) for p in pending_ai],
+            return_exceptions=True,
+        )
+
+        # Phase 4c: Batch-insert slides and quiz questions
+        slide_rows: list[dict] = []
+        quiz_rows: list[dict] = []
+        for pending, result in zip(pending_ai, ai_results):
+            if isinstance(result, Exception):
+                _log.warning("Course content generation failed for '%s': %s", pending["course_title"], result)
+                continue
+            _, content_list = result
+            for idx, mod in enumerate(pending["module_records"]):
+                if idx >= len(content_list):
+                    break
+                mod_content = content_list[idx]
+                if mod["type"] == "slides":
+                    for s_order, slide in enumerate(mod_content.get("slides") or []):
+                        slide_rows.append({
+                            "module_id": mod["id"],
+                            "title": slide.get("title", f"Slide {s_order + 1}"),
+                            "body": slide.get("body") or slide.get("content") or slide.get("text") or slide.get("description") or "",
+                            "display_order": s_order,
+                        })
+                else:
+                    for q_order, q in enumerate(mod_content.get("questions") or []):
+                        qtype = q.get("question_type", "multiple_choice")
+                        if qtype not in ("multiple_choice", "true_false", "image_based"):
+                            qtype = "multiple_choice"
+                        quiz_rows.append({
+                            "module_id": mod["id"],
+                            "question": q.get("question", "Question"),
+                            "question_type": qtype,
+                            "options": q.get("options", []),
+                            "explanation": q.get("explanation", ""),
+                            "display_order": q_order,
+                        })
+        if slide_rows:
+            sb.table("course_slides").insert(slide_rows).execute()
+        if quiz_rows:
+            sb.table("quiz_questions").insert(quiz_rows).execute()
+
         completed_steps.append("Importing training modules")
         _update_progress("Creating shift templates", 65)
 
@@ -1688,13 +1879,8 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                     )
                 repair_resp = await asyncio.to_thread(_repair_call)
                 repair_text = "".join(b.text for b in repair_resp.content if hasattr(b, "text"))
-                repair_text = repair_text.strip()
-                if repair_text.startswith("```"):
-                    repair_text = repair_text.split("```", 2)[-1]
-                    if repair_text.startswith("json"):
-                        repair_text = repair_text[4:]
-                    repair_text = repair_text.rsplit("```", 1)[0]
-                repair_guides = json.loads(repair_text.strip())
+                repair_text = _strip_code_fence(repair_text)
+                repair_guides = json.loads(repair_text)
                 for g in repair_guides:
                     sb.table("repair_guides").insert({
                         "organisation_id": org_id,
@@ -1721,50 +1907,63 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 }).execute()
         completed_steps.append("Loading repair manuals")
 
-        # Step 10: Safety badges — AI suggests based on industry
+        # Step 10: Badges — use package templates when available, else AI
         _update_progress("Setting up badges", 88)
+        valid_criteria = {
+            "issues_reported", "issues_resolved", "checklists_completed",
+            "checklist_streak_days", "training_completed", "attendance_streak_days",
+            "tasks_completed", "manual",
+        }
         try:
-            client = _get_anthropic()
-            def _badge_call():
-                return client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=512,
-                    messages=[{"role": "user", "content": (
-                        f"Suggest 4-5 employee achievement badges for a {industry} business. "
-                        f"Each badge should reward a specific positive behavior. "
-                        f"Available criteria_type values: issues_reported, issues_resolved, checklists_completed, checklist_streak_days, training_completed, attendance_streak_days, tasks_completed, manual. "
-                        f"Respond ONLY with JSON array: "
-                        f'[{{"name": "...", "description": "...", "points": 50, "criteria_type": "..."}}]'
-                    )}],
-                )
-            badge_resp = await asyncio.to_thread(_badge_call)
-            badge_text = "".join(b.text for b in badge_resp.content if hasattr(b, "text"))
-            badge_text = badge_text.strip()
-            if badge_text.startswith("```"):
-                badge_text = badge_text.split("```", 2)[-1]
-                if badge_text.startswith("json"):
-                    badge_text = badge_text[4:]
-                badge_text = badge_text.rsplit("```", 1)[0]
-            badges = json.loads(badge_text.strip())
-            badge_rows = []
-            for b in badges:
-                valid_criteria = {
-                    "issues_reported", "issues_resolved", "checklists_completed",
-                    "checklist_streak_days", "training_completed", "attendance_streak_days",
-                    "tasks_completed", "manual",
-                }
-                criteria = b.get("criteria_type", "manual")
-                if criteria not in valid_criteria:
-                    criteria = "manual"
-                badge_rows.append({
-                    "organisation_id": org_id,
-                    "name": b.get("name", "Badge"),
-                    "description": b.get("description", ""),
-                    "points_awarded": int(b.get("points", 50)),
-                    "criteria_type": criteria,
-                })
-            if badge_rows:
-                sb.table("badge_configs").insert(badge_rows).execute()
+            badge_templates = by_cat.get("badge", [])
+            if badge_templates:
+                badge_rows = []
+                for item in badge_templates:
+                    c = item.get("content", {})
+                    criteria = c.get("criteria_type", "manual")
+                    if criteria not in valid_criteria:
+                        criteria = "manual"
+                    badge_rows.append({
+                        "organisation_id": org_id,
+                        "name": c.get("badge_name", item.get("name", "Badge")),
+                        "description": c.get("description", ""),
+                        "points_awarded": int(c.get("points_awarded", 50)),
+                        "criteria_type": criteria,
+                    })
+                if badge_rows:
+                    sb.table("badge_configs").insert(badge_rows).execute()
+            else:
+                client = _get_anthropic()
+                def _badge_call():
+                    return client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=512,
+                        messages=[{"role": "user", "content": (
+                            f"Suggest 4-5 employee achievement badges for a {industry} business. "
+                            f"Each badge should reward a specific positive behavior. "
+                            f"Available criteria_type values: issues_reported, issues_resolved, checklists_completed, checklist_streak_days, training_completed, attendance_streak_days, tasks_completed, manual. "
+                            f"Respond ONLY with JSON array: "
+                            f'[{{"name": "...", "description": "...", "points": 50, "criteria_type": "..."}}]'
+                        )}],
+                    )
+                badge_resp = await asyncio.to_thread(_badge_call)
+                badge_text = "".join(b.text for b in badge_resp.content if hasattr(b, "text"))
+                badge_text = _strip_code_fence(badge_text)
+                badges = json.loads(badge_text)
+                badge_rows = []
+                for b in badges:
+                    criteria = b.get("criteria_type", "manual")
+                    if criteria not in valid_criteria:
+                        criteria = "manual"
+                    badge_rows.append({
+                        "organisation_id": org_id,
+                        "name": b.get("name", "Badge"),
+                        "description": b.get("description", ""),
+                        "points_awarded": int(b.get("points", 50)),
+                        "criteria_type": criteria,
+                    })
+                if badge_rows:
+                    sb.table("badge_configs").insert(badge_rows).execute()
         except Exception:
             pass  # don't fail provisioning if badge generation fails
         completed_steps.append("Setting up badges")
@@ -1774,18 +1973,18 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         emp_res = sb.table("onboarding_employees").select("*").eq("session_id", session_id).execute()
         role_map = {"admin": "admin", "manager": "manager", "staff": "staff"}
         for emp in emp_res.data:
-            try:
-                email = emp.get("email", "").strip()
-                if not email:
-                    continue
-                full_name = emp.get("full_name", email)
-                role = role_map.get(emp.get("retail_role", "staff"), "staff")
-                location_name = emp.get("location_name")
-                # Resolve location_id from the location_name → id map built earlier
-                loc_id = location_id_map.get(location_name) if location_name else None
+            email = emp.get("email", "").strip()
+            if not email:
+                continue
+            full_name = emp.get("full_name", email)
+            role = role_map.get(emp.get("retail_role", "staff"), "staff")
+            location_name = emp.get("location_name")
+            loc_id = location_id_map.get(location_name) if location_name else None
 
-                # Create auth user without sending an invite email
-                # email_confirm=True means account is confirmed; user must reset password to log in
+            # 1. Create auth user; if the email already exists (re-provision),
+            #    fall back to finding the existing user's ID via admin list.
+            new_user_id = None
+            try:
                 auth_resp = sb.auth.admin.create_user({
                     "email": email,
                     "email_confirm": True,
@@ -1793,27 +1992,42 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                     "user_metadata": {"full_name": full_name},
                 })
                 new_user_id = str(auth_resp.user.id)
+            except Exception:
+                # Auth user likely already exists — find them by email
+                try:
+                    users_resp = sb.auth.admin.list_users()
+                    user_list = getattr(users_resp, "users", users_resp) or []
+                    for u in user_list:
+                        if getattr(u, "email", None) == email:
+                            new_user_id = str(u.id)
+                            break
+                except Exception:
+                    pass
 
-                profile_data = {
-                    "id": new_user_id,
-                    "organisation_id": org_id,
-                    "full_name": full_name,
-                    "role": role,
-                    "language": "en",
-                    "is_active": True,
-                    "is_deleted": False,
-                }
-                if loc_id:
-                    profile_data["location_id"] = loc_id
-                if emp.get("phone"):
-                    profile_data["phone_number"] = emp["phone"]
-                if emp.get("position"):
-                    profile_data["position"] = emp["position"]
+            if not new_user_id:
+                continue
 
-                sb.table("profiles").insert(profile_data).execute()
+            # 2. Upsert profile so re-provisioning never fails on duplicate id.
+            profile_data = {
+                "id": new_user_id,
+                "organisation_id": org_id,
+                "full_name": full_name,
+                "role": role,
+                "language": "en",
+                "is_active": True,
+                "is_deleted": False,
+            }
+            if loc_id:
+                profile_data["location_id"] = loc_id
+            if emp.get("phone"):
+                profile_data["phone_number"] = emp["phone"]
+            if emp.get("position"):
+                profile_data["position"] = emp["position"]
+
+            try:
+                sb.table("profiles").upsert(profile_data, on_conflict="id").execute()
                 sb.table("onboarding_employees").update({"status": "invited"}).eq("id", emp["id"]).execute()
             except Exception:
-                # Skip duplicates or failed creates — don't block provisioning
                 pass
         completed_steps.append("Activating employee accounts")
 
@@ -1826,7 +2040,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         # Mark session complete
         sb.table("onboarding_sessions").update({
             "status": "completed",
-            "current_step": 7,
+            "current_step": 8,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "launch_progress": {
                 "status": "completed",
@@ -1901,13 +2115,25 @@ async def get_launch_progress(session_id: str, current_user: dict = Depends(get_
     if not res.data:
         raise HTTPException(status_code=404, detail="Onboarding session not found.")
     session = res.data[0]
-    # Verify ownership — org_id from current token must match the session
-    try:
-        org_id = _get_org_id(current_user)
-    except HTTPException:
-        org_id = None
-    if org_id and session.get("organisation_id") != org_id:
-        raise HTTPException(status_code=403, detail="Access denied.")
+    # Verify ownership — check that the authenticated user belongs to the session's org.
+    # We query the profiles table directly instead of comparing cached org_id values,
+    # because the JWT's app_metadata can be stale (e.g. after multiple demo-start runs
+    # that create new orgs) causing false 403s even for the legitimate session owner.
+    user_id = current_user.get("sub")
+    session_org_id = session.get("organisation_id")
+    if user_id and session_org_id:
+        _sb = get_supabase()
+        membership = (
+            _sb.table("profiles")
+            .select("id")
+            .eq("id", user_id)
+            .eq("organisation_id", session_org_id)
+            .eq("is_deleted", False)
+            .maybe_single()
+            .execute()
+        )
+        if not membership.data:
+            raise HTTPException(status_code=403, detail="Access denied.")
     progress = session.get("launch_progress") or {}
 
     if session.get("status") == "completed":
@@ -1921,6 +2147,68 @@ async def get_launch_progress(session_id: str, current_user: dict = Depends(get_
         steps_remaining=progress.get("steps_remaining", LAUNCH_STEPS),
         error=progress.get("error"),
     )
+
+
+@router.get("/package-templates")
+async def get_package_templates(
+    category: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return template items for the authenticated org's industry package.
+
+    Falls back to QSR if the org has no industry_code or the package isn't seeded.
+    Optionally filter by ``category`` (e.g. badge, workflow, form, checklist).
+    """
+    sb = get_supabase()
+
+    # 1. Infer industry_code from the org
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    industry_code: Optional[str] = None
+    if org_id:
+        org_res = (
+            sb.table("organisations")
+            .select("industry_code")
+            .eq("id", org_id)
+            .maybe_single()
+            .execute()
+        )
+        if org_res.data:
+            industry_code = (org_res.data.get("industry_code") or "").strip() or None
+
+    # 2. Find the matching package — fallback to QSR
+    def _find_package(code: str):
+        res = (
+            sb.table("industry_packages")
+            .select("id")
+            .eq("industry_code", code)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+
+    pkg = _find_package(industry_code) if industry_code else None
+    if not pkg:
+        pkg = _find_package("qsr")
+        industry_code = "qsr" if pkg else None
+
+    if not pkg:
+        return {"items": [], "industry_code": industry_code}
+
+    # 3. Fetch items (optionally filtered by category)
+    q = (
+        sb.table("template_items")
+        .select("id, name, description, category, content, sort_order")
+        .eq("package_id", pkg["id"])
+    )
+    if category:
+        q = q.eq("category", category)
+    items_res = q.order("sort_order").execute()
+
+    return {
+        "items": items_res.data or [],
+        "industry_code": industry_code,
+    }
 
 
 @router.get("/sessions/{session_id}/first-actions", response_model=list[GuidedAction])

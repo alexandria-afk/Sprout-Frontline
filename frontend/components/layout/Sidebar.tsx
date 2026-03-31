@@ -10,11 +10,11 @@ import { getDashboardSummary } from "@/services/dashboard";
 
 const NAV_ITEMS = [
   { href: "/dashboard",                         label: "Dashboard",         icon: LayoutDashboard, roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/insights",                label: "Insights",          icon: BarChart2,       roles: ["super_admin","admin","manager"] },
   { href: "/dashboard/forms?tab=my_assignments", label: "Forms & Submissions", icon: ClipboardList, roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/issues",                  label: "Tasks & Issues",    icon: AlertTriangle,   roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/announcements",           label: "Announcements",     icon: Megaphone,       roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/workflows",               label: "Workflows",         icon: GitBranch,       roles: ["super_admin","admin","manager"] },
-  { href: "/dashboard/insights",                label: "Insights",          icon: BarChart2,       roles: ["super_admin","admin","manager"] },
   { href: "/dashboard/training",                label: "Training",          icon: GraduationCap,   roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/shifts",                  label: "Shifts",            icon: CalendarClock,   roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/safety",                  label: "Leaderboard",       icon: Trophy,          roles: ["super_admin","admin","manager","staff"] },

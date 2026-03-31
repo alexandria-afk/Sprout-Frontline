@@ -32,6 +32,7 @@ import {
   FileText,
   RefreshCw,
   Loader2,
+  GraduationCap,
 } from "lucide-react";
 import { clsx } from "clsx";
 import {
@@ -52,6 +53,9 @@ import {
   RoutingRule,
 } from "@/services/workflows";
 import { listTemplates, generateTemplate, createTemplate } from "@/services/forms";
+import { listManagedCourses } from "@/services/lms";
+import { listIssueCategories } from "@/services/issues";
+import { apiFetch } from "@/services/api/client";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -65,6 +69,7 @@ const STAGE_TYPES = [
   { value: "create_incident",  label: "Create Incident",  icon: Siren,         color: "text-red-600",    bg: "bg-red-50" },
   { value: "notify",           label: "Notify",           icon: Bell,          color: "text-purple-600", bg: "bg-purple-50" },
   { value: "wait",             label: "Wait",             icon: Timer,         color: "text-slate-600",  bg: "bg-slate-50" },
+  { value: "assign_training", label: "Assign Training", icon: GraduationCap, color: "text-emerald-600", bg: "bg-emerald-50" },
 ];
 
 const TRIGGER_TYPES = [
@@ -74,6 +79,7 @@ const TRIGGER_TYPES = [
   { value: "incident_created", label: "Incident Created" },
   { value: "scheduled",        label: "Scheduled" },
   { value: "form_submitted",   label: "Form Submitted" },
+  { value: "employee_created", label: "Employee Created" },
 ];
 
 const ROLES = [
@@ -97,7 +103,7 @@ const CONDITION_TYPES = [
   { value: "sla_breached",      label: "SLA breached" },
 ];
 
-const SYSTEM_TYPES = new Set(["create_task", "create_issue", "create_incident", "notify", "wait"]);
+const SYSTEM_TYPES = new Set(["create_task", "create_issue", "create_incident", "notify", "wait", "assign_training"]);
 
 function getStageType(value: string) {
   return STAGE_TYPES.find((t) => t.value === value) ?? STAGE_TYPES[0];
@@ -129,6 +135,7 @@ export default function WorkflowBuilderPage() {
   const pendingUpdates = useRef(0);
   const drawerRef = useRef<{ saveNow: () => Promise<void> }>(null);
   const [triggerTemplates, setTriggerTemplates] = useState<{ id: string; title: string; type: string }[]>([]);
+  const [triggerIssueCategories, setTriggerIssueCategories] = useState<{id:string; name:string}[]>([]);
 
   // Drawer / modal state
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
@@ -205,6 +212,11 @@ export default function WorkflowBuilderPage() {
     if (!needsPicker) return;
     loadTriggerTemplates();
   }, [triggerType, loadTriggerTemplates]);
+
+  useEffect(() => {
+    if (triggerType !== "issue_created") return;
+    listIssueCategories().then((res) => setTriggerIssueCategories(res.data)).catch(() => {});
+  }, [triggerType]);
 
   // Track dirty state whenever name or trigger changes
   useEffect(() => {
@@ -517,14 +529,11 @@ export default function WorkflowBuilderPage() {
               <p className="text-[10px] text-dark/40 mt-1 leading-snug">Deactivate to change the trigger.</p>
             )}
 
-            {/* Trigger template config */}
-            {["audit_submitted", "form_submitted", "issue_created", "incident_created"].includes(triggerType) && (
+            {/* Trigger config */}
+            {["audit_submitted", "form_submitted"].includes(triggerType) && (
               <div className="mt-2">
                 <label className="block text-[10px] text-dark/50 font-semibold mb-1">
-                  {triggerType === "audit_submitted" && <>Audit Template <span className="text-red-500">*</span></>}
-                  {triggerType === "form_submitted" && <>Form Template <span className="text-red-500">*</span></>}
-                  {triggerType === "issue_created" && "Investigation Form"}
-                  {triggerType === "incident_created" && "Investigation Form"}
+                  {triggerType === "audit_submitted" ? <>Audit Template <span className="text-red-500">*</span></> : <>Form Template <span className="text-red-500">*</span></>}
                 </label>
                 {isActive ? (
                   <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-[#E8EDF2] text-xs text-dark/50 truncate">
@@ -569,9 +578,62 @@ export default function WorkflowBuilderPage() {
                     </div>
                   </>
                 )}
-                {(triggerType === "audit_submitted" || triggerType === "form_submitted") && (
-                  <p className="text-[10px] text-dark/30 mt-1 leading-snug">Stage 1 will be a read-only review of this submission</p>
+                <p className="text-[10px] text-dark/30 mt-1 leading-snug">Stage 1 will be a read-only review of this submission</p>
+              </div>
+            )}
+
+            {triggerType === "issue_created" && (
+              <div className="mt-2">
+                <label className="block text-[10px] text-dark/50 font-semibold mb-1">Issue Category</label>
+                {isActive ? (
+                  <div className="px-2 py-1.5 rounded-lg bg-gray-50 border border-[#E8EDF2] text-xs text-dark/50 truncate">
+                    {triggerIssueCategories.find((c) => c.id === triggerConfig.issue_category_id)?.name ?? "Any category"}
+                  </div>
+                ) : (
+                  <select
+                    value={(triggerConfig.issue_category_id as string) ?? ""}
+                    onChange={(e) => {
+                      const newCfg = { ...triggerConfig, issue_category_id: e.target.value || null };
+                      setTriggerConfig(newCfg);
+                      updateWorkflowDefinition(id, { trigger_config: newCfg }).catch(console.error);
+                    }}
+                    className="w-full border border-[#E8EDF2] rounded-lg px-2 py-1.5 text-xs text-dark focus:outline-none bg-white">
+                    <option value="">— Any category —</option>
+                    {triggerIssueCategories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
                 )}
+              </div>
+            )}
+
+            {triggerType === "employee_created" && (
+              <div className="mt-2 space-y-2">
+                <label className="block text-[10px] text-dark/50 font-semibold">Trigger for roles</label>
+                <div className="space-y-1">
+                  {["staff", "manager", "admin"].map((r) => {
+                    const cond = (triggerConfig.conditions as Record<string, unknown>) ?? {};
+                    const roles = (cond.roles as string[]) ?? [];
+                    return (
+                      <label key={r} className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          disabled={isActive}
+                          checked={roles.includes(r)}
+                          onChange={(e) => {
+                            const currentCond = (triggerConfig.conditions as Record<string, unknown>) ?? {};
+                            const currentRoles = (currentCond.roles as string[]) ?? [];
+                            const newRoles = e.target.checked ? [...currentRoles, r] : currentRoles.filter((x) => x !== r);
+                            const newConditions = { ...currentCond, roles: newRoles };
+                            const newCfg = { ...triggerConfig, conditions: newConditions };
+                            setTriggerConfig(newCfg);
+                            updateWorkflowDefinition(id, { trigger_config: newCfg }).catch(console.error);
+                          }}
+                          className="rounded"
+                        />
+                        <span className="text-xs text-dark capitalize">{r}</span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -748,6 +810,7 @@ export default function WorkflowBuilderPage() {
             isFirstStage={selectedStage.id === stages[0]?.id}
             triggerType={triggerType}
             triggerConfig={triggerConfig}
+            isActive={isActive}
             onUpdate={(patch) => handleUpdateStage(selectedStage.id, patch)}
             onClose={() => setSelectedStageId(null)}
           />
@@ -923,6 +986,7 @@ function StageConfigDrawer({
   isFirstStage,
   triggerType,
   triggerConfig,
+  isActive,
   onUpdate,
   onClose,
   saveRef,
@@ -933,6 +997,7 @@ function StageConfigDrawer({
   isFirstStage: boolean;
   triggerType: string;
   triggerConfig: Record<string, unknown>;
+  isActive: boolean;
   onUpdate: (patch: Partial<WorkflowStage>) => Promise<void>;
   onClose: () => void;
   saveRef?: React.MutableRefObject<{ saveNow: () => Promise<void> } | null>;
@@ -941,6 +1006,7 @@ function StageConfigDrawer({
     fill_form: "Fill Form", approve: "Approval", sign: "Sign Off",
     review: "Review", create_task: "Create Task", create_issue: "Create Issue",
     create_incident: "Create Incident", notify: "Notify", wait: "Wait",
+    assign_training: "Assign Training",
   };
 
   const [name, setName] = useState(stage.name);
@@ -1273,6 +1339,10 @@ function StageConfigDrawer({
           </div>
         )}
 
+        {stage.action_type === "assign_training" && (
+          <AssignTrainingConfig config={config} isActive={isActive} onChange={(newConfig) => { setConfig(newConfig as Record<string, string>); setStageSaved(false); }} />
+        )}
+
         {saveError && (
           <p className="text-[10px] text-red-500 text-center">⚠️ {saveError}</p>
         )}
@@ -1285,6 +1355,78 @@ function StageConfigDrawer({
         </button>
       </div>
     </div>
+  );
+}
+
+
+// ─── Assign Training Config ───────────────────────────────────────────────────
+
+function AssignTrainingConfig({
+  config,
+  isActive,
+  onChange,
+}: {
+  config: Record<string, string>;
+  isActive: boolean;
+  onChange: (c: Record<string, unknown>) => void;
+}) {
+  const [courses, setCourses] = useState<{id: string; title: string}[]>([]);
+
+  useEffect(() => {
+    listManagedCourses().then((r) => setCourses(r.items)).catch(() => {});
+  }, []);
+
+  const selectedIds: string[] = (() => {
+    try { return JSON.parse(config.course_ids ?? "[]"); } catch { return []; }
+  })();
+
+  function toggleCourse(courseId: string) {
+    const next = selectedIds.includes(courseId)
+      ? selectedIds.filter((x) => x !== courseId)
+      : [...selectedIds, courseId];
+    onChange({ ...config, course_ids: JSON.stringify(next) });
+  }
+
+  return (
+    <>
+      <div>
+        <label className="block text-xs font-semibold text-dark/60 mb-1.5">Courses to assign <span className="text-red-500">*</span></label>
+        {courses.length === 0 ? (
+          <p className="text-xs text-dark/40">No published courses found.</p>
+        ) : (
+          <div className="space-y-1 max-h-40 overflow-y-auto border border-[#E8EDF2] rounded-lg p-2">
+            {courses.map((c) => (
+              <label key={c.id} className={clsx("flex items-center gap-2 cursor-pointer", isActive && "opacity-50 pointer-events-none")}>
+                <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleCourse(c.id)} className="rounded" />
+                <span className="text-xs text-dark">{c.title}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <label className="block text-xs font-semibold text-dark/60 mb-1.5">Deadline (days)</label>
+        <input
+          type="number" min="1"
+          value={config.deadline_days ?? ""}
+          disabled={isActive}
+          onChange={(e) => onChange({ ...config, deadline_days: e.target.value })}
+          placeholder="e.g. 30"
+          className="w-full border border-[#E8EDF2] rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-sprout-purple/30 disabled:opacity-50"
+        />
+      </div>
+      <div>
+        <label className="block text-xs font-semibold text-dark/60 mb-1.5">On deadline missed</label>
+        <select
+          value={config.on_deadline_missed ?? "notify_manager"}
+          disabled={isActive}
+          onChange={(e) => onChange({ ...config, on_deadline_missed: e.target.value })}
+          className="w-full border border-[#E8EDF2] rounded-lg px-3 py-2 text-sm focus:outline-none disabled:opacity-50">
+          <option value="notify_manager">Notify manager</option>
+          <option value="escalate">Escalate</option>
+        </select>
+      </div>
+    </>
   );
 }
 

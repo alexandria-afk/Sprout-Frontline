@@ -39,6 +39,7 @@ import {
   WorkflowDefinition,
 } from "@/services/workflows";
 import { listLocations, Location } from "@/services/users";
+import { getPackageTemplates } from "@/services/onboarding";
 import { createClient } from "@/services/supabase/client";
 
 // ── Native (system) workflows — hard-coded, shown for visibility only ──────────
@@ -546,6 +547,23 @@ interface WorkflowTemplate {
   stages: TemplateStage[];
 }
 
+const TRIGGER_ICON: Record<string, string> = {
+  issue_created:    "⚠️",
+  audit_submitted:  "📋",
+  form_submitted:   "📝",
+  incident_created: "🚨",
+  manual:           "▶️",
+  scheduled:        "⏰",
+};
+const TRIGGER_COLOR: Record<string, string> = {
+  issue_created:    "bg-orange-50 border-orange-200",
+  audit_submitted:  "bg-green-50 border-green-200",
+  form_submitted:   "bg-yellow-50 border-yellow-200",
+  incident_created: "bg-red-50 border-red-200",
+  manual:           "bg-purple-50 border-purple-200",
+  scheduled:        "bg-blue-50 border-blue-200",
+};
+
 const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
     id: "store_opening",
@@ -665,6 +683,41 @@ function NewWorkflowModal({
   const [triggerType, setTriggerType] = useState("manual");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  // Industry-specific workflow templates (fetched from API; falls back to generic)
+  const [pkgTemplates, setPkgTemplates] = useState<WorkflowTemplate[]>(WORKFLOW_TEMPLATES);
+  useEffect(() => {
+    getPackageTemplates("workflow").then((res) => {
+      if (!res.items.length) return;
+      const mapped: WorkflowTemplate[] = res.items.map((item) => {
+        const c = item.content as Record<string, unknown>;
+        const trigger = (c.trigger as Record<string, unknown>) ?? {};
+        const rawStages = (c.stages as Record<string, unknown>[]) ?? [];
+        const stages: TemplateStage[] = rawStages.map((s) => {
+          const { type, name: sName, assigned_role, sla_hours, is_final, ...rest } = s as Record<string, unknown>;
+          return {
+            name: (sName as string) ?? "",
+            action_type: (type as string) ?? "review",
+            assigned_role: assigned_role as string | undefined,
+            sla_hours: sla_hours as number | undefined,
+            is_final: is_final as boolean | undefined,
+            config: Object.keys(rest).length > 0 ? rest : undefined,
+          };
+        });
+        const triggerType = (trigger.type as string) ?? "manual";
+        return {
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          trigger_type: triggerType,
+          icon: TRIGGER_ICON[triggerType] ?? "▶️",
+          color: TRIGGER_COLOR[triggerType] ?? "bg-gray-50 border-gray-200",
+          stages,
+        };
+      });
+      setPkgTemplates(mapped);
+    }).catch(() => {});
+  }, []);
 
   // AI tab state
   const [aiPrompt, setAiPrompt] = useState("");
@@ -831,7 +884,7 @@ function NewWorkflowModal({
           <div className="p-5">
             <p className="text-xs text-dark/50 mb-4">Choose a template to pre-fill stages. You can customise everything in the builder.</p>
             <div className="grid grid-cols-2 gap-3">
-              {WORKFLOW_TEMPLATES.map((tpl) => (
+              {pkgTemplates.map((tpl) => (
                 <button
                   key={tpl.id}
                   onClick={() => !saving && handleUseTemplate(tpl)}

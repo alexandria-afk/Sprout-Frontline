@@ -604,6 +604,7 @@ class FormService:
                         org_id=org_id,
                         source_id=submission_id,
                         triggered_by=user_id,
+                        template_id=str(body.form_template_id),
                     )
                     # Additionally trigger audit_submitted for audit-type forms
                     if tpl_type == "audit":
@@ -612,6 +613,7 @@ class FormService:
                             org_id=org_id,
                             source_id=submission_id,
                             triggered_by=user_id,
+                            template_id=str(body.form_template_id),
                         )
             except Exception as _wf_exc:
                 import logging

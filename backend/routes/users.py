@@ -50,7 +50,24 @@ async def create_user(
     current_user: dict = Depends(require_admin),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await UserService.create_user(body, org_id)
+    profile = await UserService.create_user(body, org_id)
+
+    # Auto-trigger employee_created workflows
+    try:
+        from services.workflow_service import trigger_workflows_for_employee_created
+        await trigger_workflows_for_employee_created(
+            org_id=org_id,
+            new_user_id=str(profile.id),
+            triggered_by=current_user["sub"],
+            role=getattr(body, "role", None),
+            department=getattr(body, "department", None),
+            location_id=str(body.location_id) if getattr(body, "location_id", None) else None,
+        )
+    except Exception as _wf_exc:
+        import logging
+        logging.getLogger(__name__).warning("Workflow trigger failed for new user %s: %s", profile.id, _wf_exc)
+
+    return profile
 
 
 @router.get("/positions", response_model=list[PositionSuggestion])

@@ -129,20 +129,36 @@ class ShiftService:
             raise HTTPException(status_code=404, detail="Shift template not found")
         t = tmpl_resp.data
 
+        start_time = t.get("start_time")
+        end_time = t.get("end_time")
+        if not start_time or not end_time:
+            raise HTTPException(status_code=422, detail="Shift template is missing start_time or end_time.")
+
         rows = []
         current = body.date_from
         while current <= body.date_to:
             # day_of_week: 0=Mon … 6=Sun matching Python weekday()
-            if current.weekday() in t.get("days_of_week", []):
-                start_at = datetime.fromisoformat(f"{current}T{t['start_time']}").replace(
-                    tzinfo=timezone.utc
-                ).isoformat()
-                end_at = datetime.fromisoformat(f"{current}T{t['end_time']}").replace(
-                    tzinfo=timezone.utc
-                ).isoformat()
+            if current.weekday() in (t.get("days_of_week") or []):
+                try:
+                    start_dt = datetime.fromisoformat(f"{current}T{start_time}")
+                    end_dt   = datetime.fromisoformat(f"{current}T{end_time}")
+                    # Handle overnight shifts: if end is before or equal to start,
+                    # the shift crosses midnight — end is on the following day.
+                    if end_dt <= start_dt:
+                        end_dt += timedelta(days=1)
+                    start_at = start_dt.isoformat()
+                    end_at   = end_dt.isoformat()
+                except ValueError as e:
+                    raise HTTPException(status_code=422, detail=f"Invalid time format in template: {e}")
+                location_id = t.get("location_id") or body.location_id
+                if not location_id:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This template is org-wide. Please select a location before generating shifts.",
+                    )
                 rows.append({
                     "organisation_id": org_id,
-                    "location_id": t["location_id"],
+                    "location_id": location_id,
                     "template_id": t["id"],
                     "role": t.get("role"),
                     "start_at": start_at,
@@ -157,7 +173,10 @@ class ShiftService:
         if not rows:
             return {"shifts_created": 0}
 
-        resp = db.table("shifts").insert(rows).execute()
+        try:
+            resp = db.table("shifts").insert(rows).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to create shifts: {e}")
         return {"shifts_created": len(resp.data or [])}
 
     # ── Shifts ─────────────────────────────────────────────────────────────────
@@ -702,7 +721,10 @@ class ShiftService:
     async def clock_in(body: ClockInRequest, user_id: str, org_id: str) -> dict:
         db = get_supabase()
 
-        # Check no active clock-in
+        # Check no active clock-in from the last 24 hours.
+        # Records older than 24 h with no clock-out are treated as abandoned
+        # so they don't permanently block the user (matches frontend today-only view).
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         active_resp = (
             db.table("attendance_records")
             .select("id")
@@ -710,6 +732,7 @@ class ShiftService:
             .eq("organisation_id", org_id)
             .is_("clock_out_at", "null")
             .not_.is_("clock_in_at", "null")
+            .gte("clock_in_at", cutoff)
             .execute()
         )
         if active_resp.data:
