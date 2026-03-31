@@ -874,11 +874,12 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
           {!prefill && (
             <div className="flex flex-col gap-2">
               <label className="text-sm font-medium text-dark">Type</label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {([
-                  { value: "checklist", icon: CheckCheck,   label: "Checklist", desc: "Step-by-step tasks staff complete in order" },
-                  { value: "form",      icon: FileText,      label: "Form",      desc: "Collect data, inputs, and responses" },
-                  { value: "audit",     icon: ShieldCheck,   label: "Audit",     desc: "Scored inspections with pass/fail criteria" },
+                  { value: "checklist", icon: CheckCheck,  label: "Checklist", desc: "Step-by-step tasks staff complete in order" },
+                  { value: "form",      icon: FileText,     label: "Form",      desc: "Collect data, inputs, and responses" },
+                  { value: "audit",     icon: ShieldCheck,  label: "Audit",     desc: "Scored inspections with pass/fail criteria" },
+                  { value: "pull_out",  icon: PackageX,     label: "Pull-Out",  desc: "Log wasted or pulled items with reasons" },
                 ] as const).map(({ value, icon: Icon, label, desc }) => (
                   <button key={value} type="button"
                     onClick={() => setValue("type", value, { shouldValidate: true })}
