@@ -791,6 +791,25 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
   const watchedType = watch("type");
   const [apiError, setApiError] = useState("");
 
+  // Auto-inject "Estimated Cost" field when pull_out is selected
+  useEffect(() => {
+    if (watchedType === "pull_out") {
+      const current = control._formValues as TemplateFormValues;
+      const allFields = (current.sections ?? []).flatMap((s) => s.fields ?? []);
+      const alreadyHas = allFields.some((f) => f.label?.toLowerCase() === "estimated cost");
+      if (!alreadyHas) {
+        const firstSection = current.sections?.[0];
+        if (firstSection) {
+          const updatedFields = [
+            ...(firstSection.fields ?? []),
+            { id: crypto.randomUUID(), label: "Estimated Cost", field_type: "number" as const, is_required: true, placeholder: "e.g. 150.00", options: [], conditional_logic: null },
+          ];
+          setValue("sections.0.fields", updatedFields, { shouldValidate: false });
+        }
+      }
+    }
+  }, [watchedType]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const onSubmit = async (values: TemplateFormValues) => {
     setApiError("");
     try {
@@ -910,6 +929,13 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
             </div>
           )}
 
+          {watchedType === "pull_out" && (
+            <div className="flex flex-col gap-1.5 p-3 bg-orange-50 border border-orange-200 rounded-xl">
+              <label className="text-sm font-medium text-orange-800">Estimated Cost (required field)</label>
+              <p className="text-xs text-orange-700">Every pull-out submission must include an <strong>Estimated Cost</strong> greater than zero. This field is automatically added to your template — the backend will reject any submission without it.</p>
+            </div>
+          )}
+
           <div className="flex flex-col gap-3">
             <p className="text-sm font-medium text-dark">Sections</p>
             {sections.map((sec, si) => {
@@ -971,21 +997,31 @@ function GenerateModal({ onClose, onGenerated }: {
     setLoading(true);
     try {
       const result = await generateTemplate({ description: description.trim(), type });
+      const mappedSections = result.sections.map((s) => ({
+        title: s.title,
+        fields: s.fields.map((f) => ({
+          label: f.label,
+          field_type: f.field_type as FormFieldType,
+          is_required: f.is_required,
+          placeholder: f.placeholder ?? "",
+          options: f.options ?? [],
+        })),
+      }));
+      // Ensure pull_out templates always include Estimated Cost
+      if (type === "pull_out" && mappedSections.length > 0) {
+        const allLabels = mappedSections.flatMap((s) => s.fields.map((f) => f.label?.toLowerCase()));
+        if (!allLabels.includes("estimated cost")) {
+          mappedSections[mappedSections.length - 1].fields.push({
+            label: "Estimated Cost", field_type: "number", is_required: true, placeholder: "e.g. 150.00", options: [],
+          });
+        }
+      }
       const prefill: TemplateFormValues = {
         title: result.title,
         description: result.description ?? "",
         type,
         passing_score: type === "audit" ? 80 : undefined,
-        sections: result.sections.map((s) => ({
-          title: s.title,
-          fields: s.fields.map((f) => ({
-            label: f.label,
-            field_type: f.field_type as FormFieldType,
-            is_required: f.is_required,
-            placeholder: f.placeholder ?? "",
-            options: f.options ?? [],
-          })),
-        })),
+        sections: mappedSections,
       };
       onGenerated(prefill);
     } catch (e) {
@@ -1043,6 +1079,12 @@ function GenerateModal({ onClose, onGenerated }: {
             ))}
           </div>
         </div>
+        {type === "pull_out" && (
+          <div className="flex flex-col gap-1 p-3 bg-orange-50 border border-orange-200 rounded-xl">
+            <p className="text-sm font-medium text-orange-800">Estimated Cost (required field)</p>
+            <p className="text-xs text-orange-700">Every pull-out submission must include an <strong>Estimated Cost</strong> greater than zero. Sidekick will include this field automatically.</p>
+          </div>
+        )}
         {error && <p className="text-xs text-red-500">{error}</p>}
         <div className="flex gap-2 justify-end pt-1">
           <button type="button" onClick={onClose} disabled={loading}
