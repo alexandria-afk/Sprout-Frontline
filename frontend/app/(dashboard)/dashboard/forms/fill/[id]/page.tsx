@@ -58,14 +58,19 @@ function getFieldOptions(field: FormField, answers: Record<string, string>): str
 }
 
 function TypeBadge({ type }: { type: FormType }) {
+  const label =
+    type === "checklist" ? "Checklist"
+    : type === "audit" ? "Audit"
+    : type === "pull_out" ? "Pull-Out"
+    : "Form";
+  const color =
+    type === "checklist" ? "bg-sprout-green"
+    : type === "audit" ? "bg-amber-500"
+    : type === "pull_out" ? "bg-orange-500"
+    : "bg-sprout-purple";
   return (
-    <span
-      className={clsx(
-        "px-2 py-0.5 rounded-full text-xs font-semibold text-white",
-        type === "checklist" ? "bg-sprout-green" : "bg-sprout-purple"
-      )}
-    >
-      {type === "checklist" ? "Checklist" : "Form"}
+    <span className={clsx("px-2 py-0.5 rounded-full text-xs font-semibold text-white", color)}>
+      {label}
     </span>
   );
 }

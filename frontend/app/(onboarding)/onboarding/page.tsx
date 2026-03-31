@@ -59,6 +59,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   form: "📋",
   checklist: "✅",
   audit: "🔍",
+  pull_out: "📦",
   issue_category: "⚠️",
   workflow: "⚡",
   training_module: "🎓",
@@ -730,7 +731,7 @@ function TemplatePreviewContent({ item }: { item: TemplateItem }) {
   if (!cp) return <p className="text-sm text-slate-400">No preview available.</p>;
 
   // Forms / checklists / audits
-  if (["form", "checklist", "audit"].includes(item.category)) {
+  if (["form", "checklist", "audit", "pull_out"].includes(item.category)) {
     const sections = (cp.sections as Array<{ title: string; fields: Array<{ label: string; type: string }> }>) ?? [];
     return (
       <div className="space-y-3">

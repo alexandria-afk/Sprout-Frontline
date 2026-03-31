@@ -83,7 +83,7 @@ export async function deleteTemplate(id: string): Promise<ApiResponse<null>> {
 
 export async function generateTemplate(payload: {
   description: string;
-  type: "form" | "checklist" | "audit";
+  type: "form" | "checklist" | "audit" | "pull_out";
 }): Promise<CreateTemplatePayload> {
   return apiFetch<CreateTemplatePayload>("/api/v1/forms/generate", {
     method: "POST",

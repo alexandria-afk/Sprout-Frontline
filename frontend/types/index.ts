@@ -54,7 +54,7 @@ export interface Location {
   updated_at: string;
 }
 
-export type FormType = "checklist" | "form" | "audit";
+export type FormType = "checklist" | "form" | "audit" | "pull_out";
 export type FormFieldType =
   | "text"
   | "number"

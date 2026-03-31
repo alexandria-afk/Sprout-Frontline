@@ -44,7 +44,7 @@ import {
   Sparkles, Loader2, X, Pencil, CheckCircle2, ChevronRight,
   Eye, UserPlus, Search, Inbox, CheckCheck, XCircle, ArrowLeft,
   MessageSquare, ChevronDown, Calendar, ShieldCheck, FileText, CheckSquare,
-  ShieldAlert, RefreshCw, Filter, LayoutTemplate, Clock,
+  ShieldAlert, RefreshCw, Filter, LayoutTemplate, Clock, PackageX,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useFormStore } from "@/stores/useFormStore";
@@ -99,12 +99,19 @@ function SkeletonCard() {
 
 // ── Type badge ────────────────────────────────────────────────────────────────
 function TypeBadge({ type }: { type: FormType }) {
+  const label =
+    type === "checklist" ? "Checklist"
+    : type === "audit" ? "Audit"
+    : type === "pull_out" ? "Pull-Out"
+    : "Form";
+  const color =
+    type === "checklist" ? "bg-sprout-green"
+    : type === "audit" ? "bg-amber-500"
+    : type === "pull_out" ? "bg-orange-500"
+    : "bg-sprout-purple";
   return (
-    <span className={clsx("px-2 py-0.5 rounded-full text-xs font-semibold text-white",
-      type === "checklist" ? "bg-sprout-green"
-      : type === "audit" ? "bg-amber-500"
-      : "bg-sprout-purple")}>
-      {type === "checklist" ? "Checklist" : type === "audit" ? "Audit" : "Form"}
+    <span className={clsx("px-2 py-0.5 rounded-full text-xs font-semibold text-white", color)}>
+      {label}
     </span>
   );
 }
@@ -145,7 +152,7 @@ const sectionSchema = z.object({
 const templateSchema = z.object({
   title: z.string().min(2, "Title required"),
   description: z.string().optional(),
-  type: z.enum(["checklist", "form", "audit"]),
+  type: z.enum(["checklist", "form", "audit", "pull_out"]),
   sections: z.array(sectionSchema).min(1, "Add at least one section"),
   passing_score: z.number().min(0).max(100).optional(),
 });
@@ -478,7 +485,7 @@ function ViewEditModal({
         reset({
           title: t.title,
           description: t.description ?? "",
-          type: t.type as "checklist" | "form" | "audit",
+          type: t.type as "checklist" | "form" | "audit" | "pull_out",
           passing_score: passingScore,
           sections: (t.sections ?? []).map((s) => ({
             title: s.title,
@@ -953,7 +960,7 @@ function GenerateModal({ onClose, onGenerated }: {
   onGenerated: (values: TemplateFormValues) => void;
 }) {
   const [description, setDescription] = useState("");
-  const [type, setType] = useState<"checklist" | "form" | "audit">("checklist");
+  const [type, setType] = useState<"checklist" | "form" | "audit" | "pull_out">("checklist");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -1012,11 +1019,12 @@ function GenerateModal({ onClose, onGenerated }: {
         </div>
         <div className="flex flex-col gap-2">
           <label className="text-sm font-medium text-dark">Type</label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {([
               { value: "checklist", icon: CheckCheck,  label: "Checklist", desc: "Step-by-step tasks staff complete in order" },
               { value: "form",      icon: FileText,     label: "Form",      desc: "Collect data, inputs, and responses" },
               { value: "audit",     icon: ShieldCheck,  label: "Audit",     desc: "Scored inspections with pass/fail criteria" },
+              { value: "pull_out",  icon: PackageX,     label: "Pull-Out",  desc: "Log wasted or pulled items with reasons" },
             ] as const).map(({ value, icon: Icon, label, desc }) => (
               <button key={value} type="button" disabled={loading}
                 onClick={() => setType(value)}
@@ -1955,6 +1963,7 @@ function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | nu
     { value: "checklist", label: "Checklist" },
     { value: "form", label: "Form" },
     { value: "audit", label: "Audit" },
+    { value: "pull_out", label: "Pull-Out" },
   ];
 
   return (
@@ -2543,13 +2552,13 @@ export default function FormsPage() {
 
           {/* Type filter chips */}
           <div className="flex gap-2 flex-wrap">
-            {(["", "checklist", "form", "audit"] as const).map((val) => (
+            {(["", "checklist", "form", "audit", "pull_out"] as const).map((val) => (
               <button key={val} onClick={() => setTypeFilter(val)}
                 className={clsx("px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
                   typeFilter === val
                     ? "bg-sprout-cyan text-white border-sprout-cyan"
                     : "border-surface-border text-dark-secondary hover:border-sprout-cyan hover:text-sprout-cyan")}>
-                {val === "" ? "All" : val === "checklist" ? "Checklist" : val === "audit" ? "Audit" : "Form"}
+                {val === "" ? "All" : val === "checklist" ? "Checklist" : val === "audit" ? "Audit" : val === "pull_out" ? "Pull-Out" : "Form"}
               </button>
             ))}
           </div>
@@ -2641,7 +2650,7 @@ export default function FormsPage() {
 type FormStarterItem = {
   icon: string;
   name: string;
-  type: "form" | "checklist" | "audit";
+  type: "form" | "checklist" | "audit" | "pull_out";
   description: string;
   color: string;
   prefillSections?: TemplateFormValues["sections"];
@@ -2660,11 +2669,13 @@ const FORM_TYPE_ICON: Record<string, string> = {
   form: "📝",
   checklist: "✅",
   audit: "🔍",
+  pull_out: "📦",
 };
 const FORM_TYPE_COLOR: Record<string, string> = {
   form: "bg-purple-50 border-purple-200",
   checklist: "bg-blue-50 border-blue-200",
   audit: "bg-green-50 border-green-200",
+  pull_out: "bg-orange-50 border-orange-200",
 };
 
 function NewTemplateModal({
@@ -2686,12 +2697,13 @@ function NewTemplateModal({
     Promise.all([
       getPackageTemplates("form"),
       getPackageTemplates("checklist"),
-    ]).then(([formsRes, checklistsRes]) => {
-      const combined = [...formsRes.items, ...checklistsRes.items];
+      getPackageTemplates("pull_out"),
+    ]).then(([formsRes, checklistsRes, pullOutsRes]) => {
+      const combined = [...formsRes.items, ...checklistsRes.items, ...pullOutsRes.items];
       if (!combined.length) return;
       const mapped: FormStarterItem[] = combined.map((item) => {
         const c = item.content as Record<string, unknown>;
-        const formType = ((c.type as string) || item.category) as "form" | "checklist" | "audit";
+        const formType = ((c.type as string) || item.category) as "form" | "checklist" | "audit" | "pull_out";
         const rawSections = (c.sections as Record<string, unknown>[]) ?? [];
         const prefillSections: TemplateFormValues["sections"] = rawSections.map((sec) => ({
           title: (sec.title as string) ?? "Section",
