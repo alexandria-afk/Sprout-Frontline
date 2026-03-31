@@ -854,26 +854,54 @@ function Step2({
     async (templateId: string, currentlySelected: boolean) => {
       if (!pkg) return;
       const newValue = !currentlySelected;
-      // Optimistic update
+
+      // Find the toggled item from the current pkg snapshot
+      let toggledItem: TemplateItem | undefined;
+      for (const cat of pkg.categories) {
+        const found = cat.items.find((i) => i.id === templateId);
+        if (found) { toggledItem = found; break; }
+      }
+
+      // Resolve dependency IDs now, while we have the current pkg snapshot
+      const depIds: string[] = [];
+      const depNames: string[] = [];
+      if (newValue && toggledItem?.category === "workflow") {
+        const refs = (toggledItem.content_preview as Record<string, unknown>)?.required_refs as Array<{ type: string; name: string }> ?? [];
+        for (const ref of refs) {
+          for (const cat of pkg.categories) {
+            const match = cat.items.find(
+              (i) => i.name.toLowerCase() === ref.name.toLowerCase() && !i.is_selected
+            );
+            if (match) { depIds.push(match.id); depNames.push(ref.name); }
+          }
+        }
+      }
+
+      // Optimistic update for the toggled item plus any auto-selected deps
       setPkg((prev) => {
         if (!prev) return prev;
-        const cats = prev.categories.map((cat) => ({
-          ...cat,
-          items: cat.items.map((item) =>
-            item.id === templateId ? { ...item, is_selected: newValue } : item
-          ),
-          selected_count: cat.items.reduce(
-            (acc, item) =>
-              item.id === templateId
-                ? acc + (newValue ? 1 : -1)
-                : acc + (item.is_selected ? 1 : 0),
-            0
-          ),
-        }));
+        const cats = prev.categories.map((cat) => {
+          const newItems = cat.items.map((item) => {
+            if (item.id === templateId) return { ...item, is_selected: newValue };
+            if (depIds.includes(item.id)) return { ...item, is_selected: true };
+            return item;
+          });
+          const selected_count = newItems.reduce((a, i) => a + (i.is_selected ? 1 : 0), 0);
+          return { ...cat, items: newItems, selected_count };
+        });
         const total = cats.reduce((a, c) => a + c.selected_count, 0);
         return { ...prev, categories: cats, total_selected: total };
       });
+
+      // Persist the primary toggle
       await svc.updateSelections(session.session_id, [{ template_id: templateId, is_selected: newValue }]);
+
+      // Persist and announce dep auto-selections
+      if (depIds.length > 0) {
+        await svc.updateSelections(session.session_id, depIds.map((id) => ({ template_id: id, is_selected: true })));
+        setAutoSelectedNames(depNames);
+        setTimeout(() => setAutoSelectedNames([]), 4000);
+      }
     },
     [pkg, session.session_id]
   );
@@ -1608,11 +1636,37 @@ function Step5Team({
       ]);
       setEmployees(emps.employees ?? []);
       setRoleMappings(maps);
+      const empLocationNames = new Set(
+        (emps.employees ?? [])
+          .map(e => e.location_name?.trim())
+          .filter(Boolean) as string[]
+      );
+      const confirmedNames = new Set(locations.map(l => l.name.trim()));
+      const unmatched = [...empLocationNames].filter(n => !confirmedNames.has(n));
+      setUnmatchedLocations(unmatched);
     } catch (err: any) {
       setError(`Failed to import CSV: ${(err as Error)?.message || "Unknown error"}`);
     } finally {
       setLoading(false);
       if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const handleAddUnmatchedLocations = async () => {
+    setAddingLocations(true);
+    try {
+      await Promise.all(
+        unmatchedLocations.map(name =>
+          svc.addLocation(session.session_id, { name, address: null })
+        )
+      );
+      const updated = await svc.listLocations(session.session_id);
+      setLocations(updated);
+      setUnmatchedLocations([]);
+    } catch {
+      setError("Failed to add locations. Please add them manually in the Locations step.");
+    } finally {
+      setAddingLocations(false);
     }
   };
 
@@ -1915,6 +1969,37 @@ function Step5Team({
             ))}
           </div>
         </Card>
+      )}
+
+      {unmatchedLocations.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 space-y-2 mb-4">
+          <p className="text-sm font-medium text-amber-800">
+            {unmatchedLocations.length} location{unmatchedLocations.length !== 1 ? "s" : ""} in your CSV aren&apos;t in your confirmed locations yet:
+          </p>
+          <ul className="space-y-1">
+            {unmatchedLocations.map(name => (
+              <li key={name} className="text-xs text-amber-700 flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                {name}
+              </li>
+            ))}
+          </ul>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleAddUnmatchedLocations}
+              disabled={addingLocations}
+              className="text-xs bg-amber-600 text-white px-3 py-1.5 rounded-lg disabled:opacity-50 hover:bg-amber-700 transition-colors"
+            >
+              {addingLocations ? "Adding…" : `Add ${unmatchedLocations.length === 1 ? "this location" : "these locations"} →`}
+            </button>
+            <button
+              onClick={() => setUnmatchedLocations([])}
+              className="text-xs text-amber-600 hover:text-amber-800 transition-colors"
+            >
+              ✕ Dismiss
+            </button>
+          </div>
+        </div>
       )}
 
       <div className="flex gap-3 mt-4">
