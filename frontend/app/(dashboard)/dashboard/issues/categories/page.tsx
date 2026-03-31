@@ -5,7 +5,7 @@ import Link from "next/link";
 import clsx from "clsx";
 import {
   Settings, Plus, X, Pencil, Trash2, ChevronDown, ChevronRight,
-  Loader2, Tag, Zap, ToggleLeft, ToggleRight, ChevronLeft, Sparkles, ArrowLeft,
+  Loader2, Tag, Zap, ToggleLeft, ToggleRight, ChevronLeft, Sparkles, ArrowLeft, Wrench,
 } from "lucide-react";
 import {
   listIssueCategories,
@@ -81,6 +81,7 @@ interface CategoryFormState {
   description: string;
   color: string;
   sla_hours: string;
+  is_maintenance: boolean;
 }
 
 function CategoryModal({
@@ -98,6 +99,7 @@ function CategoryModal({
     description:      initial?.description      ?? "",
     color:            initial?.color            ?? PRESET_COLORS[0],
     sla_hours:        String(initial?.sla_hours ?? 24),
+    is_maintenance:   initial?.is_maintenance   ?? false,
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError]           = useState("");
@@ -126,6 +128,7 @@ function CategoryModal({
         description:      form.description.trim() || undefined,
         color:            form.color,
         sla_hours:        Number(form.sla_hours),
+        is_maintenance:   form.is_maintenance,
       };
       const cat = initial
         ? await updateIssueCategory(initial.id, payload)
@@ -195,6 +198,29 @@ function CategoryModal({
               onChange={(e) => set("sla_hours")(e.target.value)}
             />
             {fieldErrors.sla_hours && <p className="text-xs text-red-500">{fieldErrors.sla_hours}</p>}
+          </div>
+
+          {/* Maintenance category toggle */}
+          <div className="flex items-center justify-between py-1">
+            <div>
+              <p className="text-sm font-medium text-dark">Maintenance category</p>
+              <p className="text-xs text-dark/50 mt-0.5">Issues in this category appear in maintenance cost reports</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setForm((p) => ({ ...p, is_maintenance: !p.is_maintenance }))}
+              className={clsx(
+                "relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none shrink-0",
+                form.is_maintenance ? "bg-sprout-purple" : "bg-gray-200"
+              )}
+            >
+              <span
+                className={clsx(
+                  "inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform shadow-sm",
+                  form.is_maintenance ? "translate-x-4" : "translate-x-0.5"
+                )}
+              />
+            </button>
           </div>
 
           {error && <p className="text-xs text-red-500">{error}</p>}
@@ -473,6 +499,11 @@ function CategoryCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-sm font-semibold text-dark">{category.name}</h3>
+            {category.is_maintenance && (
+              <span className="ml-1.5 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-50 text-amber-600">
+                <Wrench className="w-2.5 h-2.5" /> Maintenance
+              </span>
+            )}
             <span className="text-xs text-dark-secondary bg-gray-100 rounded-full px-2 py-0.5">
               SLA {category.sla_hours}h
             </span>

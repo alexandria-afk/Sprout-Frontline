@@ -445,6 +445,131 @@ def get_pullout_anomalies(
     return {"anomalies": anomalies, "locations_checked": len(loc_weekly)}
 
 
+# ── Maintenance Issues Report ───────────────────────────────────────────────
+
+@router.get("/maintenance-issues")
+def get_maintenance_issues(
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    location_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Maintenance costs report: issues where category.is_maintenance=true."""
+    org_id = _get_org(current_user)
+    db = get_admin_client()
+
+    # Get all maintenance category IDs for this org
+    cat_resp = (
+        db.table("issue_categories")
+        .select("id, name")
+        .eq("organisation_id", org_id)
+        .eq("is_maintenance", True)
+        .eq("is_deleted", False)
+        .execute()
+    )
+    maint_cat_ids = [r["id"] for r in (cat_resp.data or [])]
+    cat_name_map = {r["id"]: r["name"] for r in (cat_resp.data or [])}
+
+    if not maint_cat_ids:
+        return {
+            "summary": {"total_cost": 0, "open_count": 0, "resolved_count": 0, "avg_cost": 0, "total_count": 0},
+            "by_location": [], "by_asset": [], "by_month": [], "issues": []
+        }
+
+    # Fetch issues in those categories
+    query = (
+        db.table("issues")
+        .select("id, title, priority, status, cost, created_at, resolved_at, location_id, asset_id, category_id, locations(name), assets(name)")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+        .in_("category_id", maint_cat_ids)
+    )
+    if location_id:
+        query = query.eq("location_id", location_id)
+    if date_from:
+        query = query.gte("created_at", date_from)
+    if date_to:
+        query = query.lte("created_at", date_to + "T23:59:59")
+
+    resp = query.order("created_at", desc=True).execute()
+    issues = resp.data or []
+
+    # Summary
+    total_cost = sum(float(i.get("cost") or 0) for i in issues if i.get("cost") is not None)
+    open_statuses = {"open", "in_progress", "pending_vendor"}
+    resolved_statuses = {"resolved", "closed", "verified_closed"}
+    open_count = sum(1 for i in issues if i.get("status") in open_statuses)
+    resolved_count = sum(1 for i in issues if i.get("status") in resolved_statuses)
+    cost_issues = [i for i in issues if i.get("cost") is not None]
+    avg_cost = round(total_cost / len(cost_issues), 2) if cost_issues else 0
+
+    # By location
+    loc_map: dict = {}
+    for i in issues:
+        loc_id = i.get("location_id") or "none"
+        loc_name = (i.get("locations") or {}).get("name", "Unknown")
+        if loc_id not in loc_map:
+            loc_map[loc_id] = {"location_name": loc_name, "total_cost": 0.0, "count": 0}
+        loc_map[loc_id]["count"] += 1
+        loc_map[loc_id]["total_cost"] += float(i.get("cost") or 0)
+    by_location = sorted(loc_map.values(), key=lambda x: -x["total_cost"])
+
+    # By asset
+    asset_map: dict = {}
+    for i in issues:
+        asset_id = i.get("asset_id")
+        if not asset_id:
+            continue
+        asset_name = (i.get("assets") or {}).get("name", "Unknown Asset")
+        if asset_id not in asset_map:
+            asset_map[asset_id] = {"asset_id": asset_id, "asset_name": asset_name, "total_cost": 0.0, "issue_count": 0}
+        asset_map[asset_id]["issue_count"] += 1
+        asset_map[asset_id]["total_cost"] += float(i.get("cost") or 0)
+    by_asset = sorted(asset_map.values(), key=lambda x: -x["total_cost"])
+
+    # By month
+    month_map: dict = {}
+    for i in issues:
+        month = (i.get("created_at") or "")[:7]  # YYYY-MM
+        if not month:
+            continue
+        if month not in month_map:
+            month_map[month] = {"month": month, "total_cost": 0.0, "count": 0}
+        month_map[month]["count"] += 1
+        month_map[month]["total_cost"] += float(i.get("cost") or 0)
+    by_month = sorted(month_map.values(), key=lambda x: x["month"])
+
+    # Issues list (flatten for table)
+    issues_out = []
+    for i in issues:
+        issues_out.append({
+            "id": i["id"],
+            "title": i.get("title", ""),
+            "priority": i.get("priority", ""),
+            "status": i.get("status", ""),
+            "cost": i.get("cost"),
+            "created_at": i.get("created_at", ""),
+            "resolved_at": i.get("resolved_at"),
+            "location_name": (i.get("locations") or {}).get("name", ""),
+            "asset_name": (i.get("assets") or {}).get("name", ""),
+            "category_name": cat_name_map.get(i.get("category_id", ""), ""),
+        })
+
+    return {
+        "summary": {
+            "total_cost": round(total_cost, 2),
+            "open_count": open_count,
+            "resolved_count": resolved_count,
+            "avg_cost": avg_cost,
+            "total_count": len(issues),
+        },
+        "by_location": by_location,
+        "by_asset": by_asset,
+        "by_month": by_month,
+        "issues": issues_out,
+    }
+
+
 # ── Aging Analytics ────────────────────────────────────────────────────────
 
 @router.get("/aging/tasks")

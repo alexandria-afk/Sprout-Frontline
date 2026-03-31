@@ -1657,13 +1657,18 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         # Step 2: Issue Categories
         for item in by_cat.get("issue_category", []):
             c = item["content"]
+            cat_name = c.get("category_name", item["name"]) or item["name"] or "Uncategorised"
+            _MAINTENANCE_NAMES = ["equipment failure", "facility damage", "it / system issue", "it/system issue", "it system issue", "maintenance", "equipment repair"]
+            is_maint = any(m in cat_name.lower() for m in _MAINTENANCE_NAMES)
+
             sb.table("issue_categories").insert({
                 "organisation_id": org_id,
-                "name": c.get("category_name", item["name"]) or item["name"] or "Uncategorised",
+                "name": cat_name,
                 "description": c.get("description", ""),
                 "default_priority": c.get("default_priority", "medium"),
                 "sla_hours": c.get("sla_hours"),
                 "icon": c.get("icon", ""),
+                "is_maintenance": is_maint,
             }).execute()
         completed_steps.append("Setting up issue categories")
         _update_progress("Configuring workflows", 35)

@@ -19,44 +19,57 @@ import {
 } from "recharts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
-type TicketStatus = "open" | "in_progress" | "pending_parts" | "resolved" | "closed";
-type TicketPriority = "low" | "medium" | "high" | "critical";
 
-interface MaintenanceTicket {
-  id: string;
-  title: string;
-  status: TicketStatus;
-  priority: TicketPriority;
-  cost: number | null;
-  created_at: string;
-  resolved_at: string | null;
-  location_id: string | null;
-  asset_id: string | null;
-  assets: { name: string; asset_type: string } | null;
-  locations: { name: string } | null;
-  vendors: { name: string } | null;
-  "profiles!assigned_to": { full_name: string } | null;
-  "profiles!created_by": { full_name: string } | null;
+interface MaintenanceReportSummary {
+  total_cost: number;
+  open_count: number;
+  resolved_count: number;
+  avg_cost: number;
+  total_count: number;
 }
 
-interface MaintenanceListResponse {
-  data: MaintenanceTicket[];
-  total: number;
+interface ByLocationRow {
+  location_name: string;
+  total_cost: number;
+  count: number;
 }
 
 interface ByAssetRow {
   asset_id: string;
   asset_name: string;
-  asset_type: string;
-  ticket_count: number;
-  total_repair_cost: number;
+  total_cost: number;
+  issue_count: number;
 }
 
-interface ByAssetResponse {
-  data: ByAssetRow[];
+interface ByMonthRow {
+  month: string;
+  total_cost: number;
+  count: number;
+}
+
+interface IssueRow {
+  id: string;
+  title: string;
+  priority: string;
+  status: string;
+  cost: number | null;
+  created_at: string;
+  resolved_at: string | null;
+  location_name: string;
+  asset_name: string;
+  category_name: string;
+}
+
+interface MaintenanceReport {
+  summary: MaintenanceReportSummary;
+  by_location: ByLocationRow[];
+  by_asset: ByAssetRow[];
+  by_month: ByMonthRow[];
+  issues: IssueRow[];
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
+
 function toYMD(d: Date) {
   return d.toISOString().slice(0, 10);
 }
@@ -81,68 +94,53 @@ function fmtMonth(ym: string) {
 const TT_STYLE = { borderRadius: 8, border: "1px solid #E2E8F0", fontSize: 12 };
 const BAR_COLORS = ["#F59E0B", "#7C3AED", "#10B981", "#00B4D8", "#F43F5E", "#6366F1", "#FB923C"];
 
-const PRIORITY_BADGE: Record<TicketPriority, string> = {
-  critical: "bg-red-50 text-red-600",
-  high:     "bg-orange-50 text-orange-600",
-  medium:   "bg-amber-50 text-amber-600",
-  low:      "bg-gray-100 text-gray-500",
-};
-
-const STATUS_BADGE: Record<TicketStatus, string> = {
-  open:          "bg-blue-50 text-blue-600",
-  in_progress:   "bg-purple-50 text-purple-600",
-  pending_parts: "bg-yellow-50 text-yellow-600",
-  resolved:      "bg-green-50 text-green-600",
-  closed:        "bg-green-50 text-green-600",
-};
-
-function isOpenStatus(s: TicketStatus) {
-  return s === "open" || s === "in_progress" || s === "pending_parts";
+function priorityBadge(p: string) {
+  if (p === "critical") return "bg-red-50 text-red-600";
+  if (p === "high") return "bg-orange-50 text-orange-600";
+  if (p === "medium") return "bg-amber-50 text-amber-600";
+  return "bg-gray-100 text-gray-500";
 }
 
-function isResolvedStatus(s: TicketStatus) {
-  return s === "resolved" || s === "closed";
+function statusBadge(s: string) {
+  if (s === "open") return "bg-blue-50 text-blue-600";
+  if (s === "in_progress" || s === "pending_vendor") return "bg-purple-50 text-purple-600";
+  if (s === "resolved" || s === "closed" || s === "verified_closed") return "bg-green-50 text-green-600";
+  return "bg-gray-100 text-gray-500";
 }
 
-function humanStatus(s: TicketStatus) {
-  const map: Record<TicketStatus, string> = {
-    open:          "Open",
-    in_progress:   "In Progress",
-    pending_parts: "Pending Parts",
-    resolved:      "Resolved",
-    closed:        "Closed",
+function humanStatus(s: string) {
+  const map: Record<string, string> = {
+    open: "Open",
+    in_progress: "In Progress",
+    pending_vendor: "Pending Vendor",
+    resolved: "Resolved",
+    closed: "Closed",
+    verified_closed: "Verified Closed",
   };
-  return map[s] ?? s;
-}
-
-function humanPriority(p: TicketPriority) {
-  return p.charAt(0).toUpperCase() + p.slice(1);
+  return map[s] ?? s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 // ─── Custom tooltip for Asset chart ────────────────────────────────────────────
+
 interface AssetTooltipProps {
   active?: boolean;
   payload?: Array<{ value: number }>;
   label?: string;
-  assetData: Array<{ name: string; cost: number; tickets: number }>;
+  assetData: Array<{ name: string; cost: number; issue_count: number }>;
 }
 
 function AssetTooltip({ active, payload, label, assetData }: AssetTooltipProps) {
   if (!active || !payload?.length) return null;
   const row = assetData.find((r) => r.name === label);
   return (
-    <div
-      style={TT_STYLE}
-      className="bg-white px-3 py-2 shadow-sm"
-    >
+    <div style={TT_STYLE} className="bg-white px-3 py-2 shadow-sm">
       <p className="font-semibold text-dark text-xs mb-1">{label}</p>
       <p className="text-xs text-dark/60">
-        Cost:{" "}
-        <span className="font-medium text-dark">₱{formatCost(payload[0]?.value ?? 0)}</span>
+        Cost: <span className="font-medium text-dark">₱{formatCost(payload[0]?.value ?? 0)}</span>
       </p>
       {row && (
         <p className="text-xs text-dark/60">
-          Tickets: <span className="font-medium text-dark">{row.tickets}</span>
+          Issues: <span className="font-medium text-dark">{row.issue_count}</span>
         </p>
       )}
     </div>
@@ -150,108 +148,75 @@ function AssetTooltip({ active, payload, label, assetData }: AssetTooltipProps) 
 }
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
+
 export default function MaintenanceCostsReportPage() {
   const router = useRouter();
 
   const [dateFrom, setDateFrom] = useState(defaultRange().from);
-  const [dateTo,   setDateTo]   = useState(defaultRange().to);
+  const [dateTo, setDateTo] = useState(defaultRange().to);
 
-  const [tickets, setTickets] = useState<MaintenanceTicket[]>([]);
-  const [byAsset, setByAsset] = useState<ByAssetRow[]>([]);
-
+  const [report, setReport] = useState<MaintenanceReport | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState(false);
-
-  // ── Fetch all pages ──────────────────────────────────────────────────────────
-  async function fetchAllTickets(): Promise<MaintenanceTicket[]> {
-    const PAGE_SIZE = 200;
-    let page = 1;
-    const all: MaintenanceTicket[] = [];
-    while (true) {
-      const res = await apiFetch<MaintenanceListResponse>(
-        `/api/v1/maintenance/?page=${page}&page_size=${PAGE_SIZE}`
-      );
-      const rows = Array.isArray(res.data) ? res.data : [];
-      all.push(...rows);
-      if (all.length >= res.total || rows.length < PAGE_SIZE) break;
-      page++;
-    }
-    return all;
-  }
+  const [error, setError] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(false);
     try {
-      const [allTickets, assetRes] = await Promise.all([
-        fetchAllTickets(),
-        apiFetch<ByAssetResponse>("/api/v1/issues/dashboard/by-asset"),
-      ]);
-      setTickets(allTickets);
-      setByAsset(Array.isArray(assetRes.data) ? assetRes.data : []);
+      const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
+      const data = await apiFetch<MaintenanceReport>(`/api/v1/reports/maintenance-issues?${q.toString()}`);
+      setReport(data);
     } catch {
       setError(true);
     } finally {
       setLoading(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [dateFrom, dateTo]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Client-side date filter ──────────────────────────────────────────────────
-  const filtered = tickets.filter((t) => {
-    const d = t.created_at.slice(0, 10);
-    return d >= dateFrom && d <= dateTo;
-  });
+  // ── Derived chart data ────────────────────────────────────────────────────────
 
-  // ── Summary stats ────────────────────────────────────────────────────────────
-  const totalCost     = filtered.reduce((s, t) => s + (t.cost ?? 0), 0);
-  const openCount     = filtered.filter((t) => isOpenStatus(t.status)).length;
-  const resolvedCount = filtered.filter((t) => isResolvedStatus(t.status)).length;
-  const avgCost       = filtered.length > 0 ? totalCost / filtered.length : 0;
+  const locationData = report
+    ? [...report.by_location]
+        .sort((a, b) => b.total_cost - a.total_cost)
+        .slice(0, 8)
+        .map((r) => ({ name: r.location_name, cost: r.total_cost, count: r.count }))
+    : [];
 
-  // ── Chart 1 — Cost by Location ───────────────────────────────────────────────
-  const locationMap: Record<string, number> = {};
-  for (const t of filtered) {
-    const name = t.locations?.name ?? "Unknown";
-    locationMap[name] = (locationMap[name] ?? 0) + (t.cost ?? 0);
-  }
-  const locationData = Object.entries(locationMap)
-    .map(([name, cost]) => ({ name, cost }))
-    .sort((a, b) => b.cost - a.cost)
-    .slice(0, 8);
+  const assetData = report
+    ? [...report.by_asset]
+        .sort((a, b) => b.total_cost - a.total_cost)
+        .slice(0, 10)
+        .map((r) => ({ name: r.asset_name, cost: r.total_cost, issue_count: r.issue_count }))
+    : [];
 
-  // ── Chart 2 — Cost by Asset (from endpoint) ──────────────────────────────────
-  const assetData = [...byAsset]
-    .sort((a, b) => b.total_repair_cost - a.total_repair_cost)
-    .slice(0, 10)
-    .map((r) => ({ name: r.asset_name, cost: r.total_repair_cost, tickets: r.ticket_count }));
+  const monthData = report
+    ? [...report.by_month]
+        .sort((a, b) => a.month.localeCompare(b.month))
+        .map((r) => ({ month: r.month, label: fmtMonth(r.month), cost: r.total_cost }))
+    : [];
 
-  // ── Chart 3 — Monthly Cost Trend ─────────────────────────────────────────────
-  const monthMap: Record<string, number> = {};
-  for (const t of filtered) {
-    const ym = t.created_at.slice(0, 7);
-    monthMap[ym] = (monthMap[ym] ?? 0) + (t.cost ?? 0);
-  }
-  const monthData = Object.entries(monthMap)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([ym, cost]) => ({ month: ym, label: fmtMonth(ym), cost }));
+  const tableRows = report
+    ? [...report.issues].sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0))
+    : [];
 
-  // ── Table — sorted by cost desc ──────────────────────────────────────────────
-  const tableRows = [...filtered].sort((a, b) => (b.cost ?? 0) - (a.cost ?? 0));
+  const summary = report?.summary ?? { total_cost: 0, open_count: 0, resolved_count: 0, avg_cost: 0, total_count: 0 };
 
-  // ── CSV export ───────────────────────────────────────────────────────────────
+  // ── CSV export ────────────────────────────────────────────────────────────────
+
   function exportCsv() {
-    if (!filtered.length) return;
-    const header = ["Title", "Asset", "Location", "Priority", "Status", "Cost", "Date"];
+    if (!tableRows.length) return;
+    const header = ["Title", "Asset", "Location", "Category", "Priority", "Status", "Cost", "Date"];
     const rows = tableRows.map((t) => [
       `"${t.title.replace(/"/g, '""')}"`,
-      `"${(t.assets?.name ?? "").replace(/"/g, '""')}"`,
-      `"${(t.locations?.name ?? "").replace(/"/g, '""')}"`,
+      `"${t.asset_name.replace(/"/g, '""')}"`,
+      `"${t.location_name.replace(/"/g, '""')}"`,
+      `"${t.category_name.replace(/"/g, '""')}"`,
       t.priority,
       t.status,
-      (t.cost ?? 0).toFixed(2),
+      t.cost != null ? t.cost.toFixed(2) : "",
       t.created_at.slice(0, 10),
     ]);
     const csv = [header, ...rows].map((r) => r.join(",")).join("\n");
@@ -262,6 +227,7 @@ export default function MaintenanceCostsReportPage() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
+
   return (
     <div className="space-y-6">
 
@@ -279,7 +245,7 @@ export default function MaintenanceCostsReportPage() {
           </div>
           <div className="min-w-0">
             <h1 className="text-lg font-bold text-dark">Maintenance Costs Report</h1>
-            <p className="text-xs text-dark/50">Repair costs by asset, location, and status</p>
+            <p className="text-xs text-dark/50">Repair and maintenance costs by asset, location, and trend</p>
           </div>
         </div>
         <button
@@ -293,7 +259,7 @@ export default function MaintenanceCostsReportPage() {
       {/* ── Filter bar ── */}
       <div className="bg-white rounded-xl border border-surface-border p-4 flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-dark/50">From</label>
+          <label className="text-xs font-medium text-dark/50">Date From</label>
           <input
             type="date"
             value={dateFrom}
@@ -302,7 +268,7 @@ export default function MaintenanceCostsReportPage() {
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-dark/50">To</label>
+          <label className="text-xs font-medium text-dark/50">Date To</label>
           <input
             type="date"
             value={dateTo}
@@ -337,19 +303,19 @@ export default function MaintenanceCostsReportPage() {
                 <DollarSign className="w-4 h-4 text-amber-500" />
                 <p className="text-xs text-dark/50 font-medium">Total Cost</p>
               </div>
-              <p className="text-xl font-bold text-dark">₱{formatCost(totalCost)}</p>
+              <p className="text-xl font-bold text-dark">₱{formatCost(summary.total_cost)}</p>
             </div>
             <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-2xl font-bold text-dark">{openCount}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Open Tickets</p>
+              <p className="text-2xl font-bold text-dark">{summary.open_count}</p>
+              <p className="text-sm text-dark/50 mt-0.5">Open Issues</p>
             </div>
             <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-xl font-bold text-dark truncate">₱{formatCost(avgCost)}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Avg Cost / Ticket</p>
+              <p className="text-xl font-bold text-dark truncate">₱{formatCost(summary.avg_cost)}</p>
+              <p className="text-sm text-dark/50 mt-0.5">Avg Cost per Issue</p>
             </div>
             <div className="bg-white rounded-xl border border-surface-border p-5">
-              <p className="text-2xl font-bold text-dark">{resolvedCount}</p>
-              <p className="text-sm text-dark/50 mt-0.5">Resolved Tickets</p>
+              <p className="text-2xl font-bold text-dark">{summary.resolved_count}</p>
+              <p className="text-sm text-dark/50 mt-0.5">Resolved</p>
             </div>
           </div>
 
@@ -448,10 +414,7 @@ export default function MaintenanceCostsReportPage() {
               <ResponsiveContainer width="100%" height={260}>
                 <LineChart data={monthData} margin={{ top: 5, right: 24, left: 0, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fontSize: 11, fill: "#94A3B8" }}
-                  />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94A3B8" }} />
                   <YAxis
                     tick={{ fontSize: 11, fill: "#94A3B8" }}
                     tickFormatter={(v: number) => `₱${v.toLocaleString("en-PH")}`}
@@ -474,16 +437,16 @@ export default function MaintenanceCostsReportPage() {
             )}
           </div>
 
-          {/* ── Ticket Table ── */}
+          {/* ── Issue Table ── */}
           <div className="bg-white rounded-xl border border-surface-border overflow-hidden">
             <div className="px-6 py-4 border-b border-surface-border flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-dark">Ticket List</h3>
+              <h3 className="text-sm font-semibold text-dark">Issue List</h3>
               <span className="text-xs text-dark/40">
-                {filtered.length} ticket{filtered.length !== 1 ? "s" : ""}
+                {tableRows.length} issue{tableRows.length !== 1 ? "s" : ""}
               </span>
             </div>
             {tableRows.length === 0 ? (
-              <div className="py-10 text-center text-dark/40 text-sm">No tickets in this period</div>
+              <div className="py-10 text-center text-dark/40 text-sm">No issues in this period</div>
             ) : (
               <div className="max-h-[480px] overflow-y-auto">
                 <table className="w-full text-xs">
@@ -492,6 +455,7 @@ export default function MaintenanceCostsReportPage() {
                       <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Title</th>
                       <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Asset</th>
                       <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Location</th>
+                      <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Category</th>
                       <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Priority</th>
                       <th className="text-left px-4 py-2.5 font-semibold text-dark/50">Status</th>
                       <th className="text-right px-4 py-2.5 font-semibold text-dark/50">Cost</th>
@@ -505,33 +469,36 @@ export default function MaintenanceCostsReportPage() {
                           <p className="font-medium text-dark truncate">{t.title}</p>
                         </td>
                         <td className="px-4 py-2.5 text-dark/60 whitespace-nowrap">
-                          {t.assets?.name ?? "—"}
+                          {t.asset_name || "—"}
                         </td>
                         <td className="px-4 py-2.5 text-dark/60 whitespace-nowrap">
-                          {t.locations?.name ?? "—"}
+                          {t.location_name || "—"}
+                        </td>
+                        <td className="px-4 py-2.5 text-dark/60 whitespace-nowrap">
+                          {t.category_name || "—"}
                         </td>
                         <td className="px-4 py-2.5">
                           <span
                             className={clsx(
                               "px-2 py-0.5 rounded-full font-medium capitalize whitespace-nowrap",
-                              PRIORITY_BADGE[t.priority] ?? "bg-gray-100 text-gray-500"
+                              priorityBadge(t.priority)
                             )}
                           >
-                            {humanPriority(t.priority)}
+                            {t.priority.charAt(0).toUpperCase() + t.priority.slice(1)}
                           </span>
                         </td>
                         <td className="px-4 py-2.5">
                           <span
                             className={clsx(
                               "px-2 py-0.5 rounded-full font-medium whitespace-nowrap",
-                              STATUS_BADGE[t.status] ?? "bg-gray-100 text-gray-500"
+                              statusBadge(t.status)
                             )}
                           >
                             {humanStatus(t.status)}
                           </span>
                         </td>
                         <td className="px-4 py-2.5 text-right font-medium text-dark whitespace-nowrap">
-                          ₱{formatCost(t.cost ?? 0)}
+                          {t.cost != null ? `₱${formatCost(t.cost)}` : "—"}
                         </td>
                         <td className="px-4 py-2.5 text-right text-dark/50 whitespace-nowrap">
                           {t.created_at.slice(0, 10)}

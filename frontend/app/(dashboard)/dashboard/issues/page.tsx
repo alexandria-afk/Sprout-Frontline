@@ -1234,6 +1234,8 @@ function IssueDetailModal({
   const [commentError, setCommentError]     = useState("");
   const [statusChanging, setStatusChanging] = useState(false);
   const [statusError, setStatusError]       = useState("");
+  const [maintenanceCost, setMaintenanceCost] = useState("");
+  const [pendingResolveStatus, setPendingResolveStatus] = useState<string | null>(null);
 
   // Priority override
   const [prioritySaving, setPrioritySaving] = useState(false);
@@ -1279,19 +1281,31 @@ function IssueDetailModal({
     return () => clearTimeout(t);
   }, [assignSearch]);
 
-  const handleStatusChange = async (newStatus: string) => {
+  const handleStatusChange = async (newStatus: string, cost?: number) => {
     setStatusChanging(true);
     setStatusError("");
     try {
       const updated = await updateIssueStatus(issue.id, newStatus);
-      setIssue(updated);
-      onUpdated(updated);
+      // If a cost was provided (maintenance resolve), save it separately
+      if (cost !== undefined && cost >= 0) {
+        const withCost = await updateIssue(issue.id, { cost });
+        setIssue({ ...updated, cost: withCost.cost });
+        onUpdated({ ...updated, cost: withCost.cost });
+      } else {
+        setIssue(updated);
+        onUpdated(updated);
+      }
+      setPendingResolveStatus(null);
+      setMaintenanceCost("");
     } catch (e) {
       setStatusError(friendlyError(e));
     } finally {
       setStatusChanging(false);
     }
   };
+
+  const isResolveStatus = (s: string) => s === "resolved" || s === "verified_closed";
+  const isMaintenance = issue.issue_categories?.is_maintenance === true;
 
   const handlePriorityChange = async (newPriority: IssuePriority) => {
     setPrioritySaving(true);
@@ -1618,7 +1632,13 @@ function IssueDetailModal({
                       <button
                         key={s}
                         disabled={isDisabled}
-                        onClick={() => handleStatusChange(s)}
+                        onClick={() => {
+                          if (isMaintenance && isResolveStatus(s)) {
+                            setPendingResolveStatus(s);
+                          } else {
+                            handleStatusChange(s);
+                          }
+                        }}
                         className={clsx(
                           "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
                           "border-surface-border text-dark-secondary hover:border-sprout-purple hover:text-sprout-purple hover:bg-sprout-purple/5",
@@ -1630,6 +1650,41 @@ function IssueDetailModal({
                     );
                   })}
                 </div>
+                {pendingResolveStatus && isMaintenance && (
+                  <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200 flex flex-col gap-2">
+                    <p className="text-xs font-medium text-amber-800 flex items-center gap-1.5">
+                      <Wrench className="w-3.5 h-3.5" /> Repair / maintenance cost
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-dark/50">₱</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          placeholder="0.00"
+                          value={maintenanceCost}
+                          onChange={(e) => setMaintenanceCost(e.target.value)}
+                          className="w-full pl-6 pr-3 py-1.5 rounded-lg border border-amber-300 text-sm focus:outline-none focus:ring-2 focus:ring-amber-300/40 bg-white"
+                        />
+                      </div>
+                      <button
+                        onClick={() => handleStatusChange(pendingResolveStatus, maintenanceCost ? parseFloat(maintenanceCost) : 0)}
+                        disabled={statusChanging}
+                        className="px-3 py-1.5 rounded-lg bg-sprout-purple text-white text-xs font-medium hover:bg-sprout-purple/90 disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {statusChanging ? "Saving…" : `Mark ${pendingResolveStatus === "verified_closed" ? "Closed" : "Resolved"}`}
+                      </button>
+                      <button
+                        onClick={() => { setPendingResolveStatus(null); setMaintenanceCost(""); }}
+                        className="p-1.5 hover:bg-amber-100 rounded-lg text-amber-600"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-amber-600/70">Enter ₱0 if no cost incurred</p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1646,7 +1701,13 @@ function IssueDetailModal({
                     <button
                       key={s}
                       disabled={statusChanging}
-                      onClick={() => handleStatusChange(s)}
+                      onClick={() => {
+                        if (isMaintenance && isResolveStatus(s)) {
+                          setPendingResolveStatus(s);
+                        } else {
+                          handleStatusChange(s);
+                        }
+                      }}
                       className={clsx(
                         "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors",
                         "border-surface-border text-dark-secondary hover:border-sprout-purple hover:text-sprout-purple hover:bg-sprout-purple/5",
@@ -1658,6 +1719,41 @@ function IssueDetailModal({
                   );
                 })}
               </div>
+              {pendingResolveStatus && isMaintenance && (
+                <div className="mt-3 p-3 rounded-xl bg-amber-50 border border-amber-200 flex flex-col gap-2">
+                  <p className="text-xs font-medium text-amber-800 flex items-center gap-1.5">
+                    <Wrench className="w-3.5 h-3.5" /> Repair / maintenance cost
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-dark/50">₱</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={maintenanceCost}
+                        onChange={(e) => setMaintenanceCost(e.target.value)}
+                        className="w-full pl-6 pr-3 py-1.5 rounded-lg border border-amber-300 text-sm focus:outline-none focus:ring-2 focus:ring-amber-300/40 bg-white"
+                      />
+                    </div>
+                    <button
+                      onClick={() => handleStatusChange(pendingResolveStatus, maintenanceCost ? parseFloat(maintenanceCost) : 0)}
+                      disabled={statusChanging}
+                      className="px-3 py-1.5 rounded-lg bg-sprout-purple text-white text-xs font-medium hover:bg-sprout-purple/90 disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {statusChanging ? "Saving…" : `Mark ${pendingResolveStatus === "verified_closed" ? "Closed" : "Resolved"}`}
+                    </button>
+                    <button
+                      onClick={() => { setPendingResolveStatus(null); setMaintenanceCost(""); }}
+                      className="p-1.5 hover:bg-amber-100 rounded-lg text-amber-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-amber-600/70">Enter ₱0 if no cost incurred</p>
+                </div>
+              )}
             </div>
           )}
 
@@ -2818,6 +2914,10 @@ function ReportIssueModal({
 
 // Issues Tab
 function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: string; openId?: string | null }) {
+  const searchParams = useSearchParams();
+  const maintenancePrefill = searchParams.get("maintenance") === "1";
+  const [maintenanceOnly, setMaintenanceOnly] = useState(maintenancePrefill);
+
   const [issues, setIssues]           = useState<Issue[]>([]);
   const [categories, setCategories]   = useState<IssueCategory[]>([]);
   const [loading, setLoading]         = useState(true);
@@ -2842,6 +2942,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
           ...(role === "staff"   && { my_issues: true }),
           ...(role === "manager" && { my_team: true }),
           // admin / super_admin: no filter — see everything
+          ...(maintenanceOnly ? { is_maintenance: true } : {}),
         }),
         listIssueCategories(),
       ]);
@@ -2852,7 +2953,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
     } finally {
       setLoading(false);
     }
-  }, [role]);
+  }, [role, maintenanceOnly]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -2982,6 +3083,19 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
             )}
           </button>
         </div>
+
+        {/* Active filter chips */}
+        {maintenanceOnly && (
+          <div className="flex flex-wrap gap-2">
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-xs font-medium text-amber-700">
+              <Wrench className="w-3 h-3" />
+              Maintenance only
+              <button onClick={() => setMaintenanceOnly(false)} className="ml-0.5 hover:text-amber-900">
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Collapsible: priority */}
         {showFilters && (

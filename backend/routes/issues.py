@@ -367,6 +367,7 @@ async def list_issues(
     to_dt: Optional[datetime] = Query(None, alias="to"),
     my_issues: Optional[bool] = Query(None),
     my_team: Optional[bool] = Query(None),
+    is_maintenance: Optional[bool] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
@@ -379,7 +380,7 @@ async def list_issues(
     query = (
         db.table("issues")
         .select(
-            "*, profiles!reported_by(full_name), issue_categories(name, color), locations(name)",
+            "*, profiles!reported_by(full_name), issue_categories(name, color, sla_hours, is_maintenance), locations(name)",
             count="exact",
         )
         .eq("organisation_id", org_id)
@@ -418,6 +419,14 @@ async def list_issues(
         query = query.eq("assigned_to", assigned_to)
     if recurring is True:
         query = query.gte("recurrence_count", 2)
+    if is_maintenance is True:
+        maint_cats = db.table("issue_categories").select("id").eq("organisation_id", org_id).eq("is_maintenance", True).eq("is_deleted", False).execute()
+        maint_ids = [r["id"] for r in (maint_cats.data or [])]
+        if maint_ids:
+            query = query.in_("category_id", maint_ids)
+        else:
+            # No maintenance categories exist — return empty
+            return {"data": [], "total": 0}
     if from_dt:
         query = query.gte("created_at", from_dt.isoformat())
     if to_dt:
@@ -439,7 +448,7 @@ async def get_issue(
     resp = (
         db.table("issues")
         .select(
-            "*, profiles!reported_by(full_name), issue_categories(name, color, sla_hours), "
+            "*, profiles!reported_by(full_name), issue_categories(name, color, sla_hours, is_maintenance), "
             "locations(name), "
             "issue_attachments!left(id, file_url, file_type, uploaded_by, created_at, is_deleted, profiles!uploaded_by(full_name)), "
             "issue_comments!left(id, body, is_vendor_visible, user_id, created_at, is_deleted, profiles!user_id(full_name)), "

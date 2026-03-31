@@ -1,5 +1,17 @@
 import { apiFetch } from "@/services/api/client";
-import type { Asset, RepairGuide, MaintenanceTicket } from "@/types";
+import type { Asset, RepairGuide } from "@/types";
+
+export interface RepairHistoryIssue {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  cost: number | null;
+  created_at: string;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  "profiles!assigned_to"?: { full_name: string } | null;
+}
 
 // ── Assets ────────────────────────────────────────────────────────────────────
 
@@ -9,7 +21,7 @@ export function listAssets(params: { location_id?: string } = {}): Promise<{ dat
   return apiFetch(`/api/v1/assets${q.toString() ? `?${q.toString()}` : ""}`);
 }
 
-export function getAsset(id: string): Promise<Asset & { maintenance_tickets?: MaintenanceTicket[] }> {
+export function getAsset(id: string): Promise<Asset & { repair_history?: RepairHistoryIssue[]; repair_total_cost?: number }> {
   return apiFetch(`/api/v1/assets/${id}`);
 }
 
@@ -77,59 +89,4 @@ export function createRepairGuide(body: {
 
 export function deleteRepairGuide(id: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/v1/repair-guides/${id}`, { method: "DELETE" });
-}
-
-// ── Maintenance Tickets ───────────────────────────────────────────────────────
-
-export interface ListTicketsParams {
-  asset_id?: string;
-  status?: string;
-  priority?: string;
-  assigned_to?: string;
-  vendor_id?: string;
-  location_id?: string;
-  page?: number;
-  page_size?: number;
-}
-
-export function listTickets(params: ListTicketsParams = {}): Promise<{ data: MaintenanceTicket[]; total: number }> {
-  const q = new URLSearchParams();
-  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== "") q.set(k, String(v)); });
-  const qs = q.toString();
-  return apiFetch(`/api/v1/maintenance${qs ? `?${qs}` : ""}`);
-}
-
-export function getTicket(id: string): Promise<MaintenanceTicket> {
-  return apiFetch(`/api/v1/maintenance/${id}`);
-}
-
-export function createTicket(body: {
-  asset_id: string;
-  title: string;
-  ticket_type?: string;
-  description?: string;
-  priority?: string;
-  issue_id?: string;
-  sla_hours?: number;
-  due_at?: string;
-}): Promise<MaintenanceTicket> {
-  return apiFetch("/api/v1/maintenance", { method: "POST", body: JSON.stringify(body) });
-}
-
-export function updateTicketStatus(id: string, status: string, resolution_note?: string): Promise<MaintenanceTicket> {
-  return apiFetch(`/api/v1/maintenance/${id}/status`, {
-    method: "PUT",
-    body: JSON.stringify({ status, resolution_note }),
-  });
-}
-
-export function assignTicket(id: string, body: {
-  assigned_to?: string | null;
-  assigned_vendor_id?: string | null;
-}): Promise<MaintenanceTicket> {
-  return apiFetch(`/api/v1/maintenance/${id}/assign`, { method: "PUT", body: JSON.stringify(body) });
-}
-
-export function updateTicketCost(id: string, cost: number): Promise<MaintenanceTicket> {
-  return apiFetch(`/api/v1/maintenance/${id}/cost`, { method: "PUT", body: JSON.stringify({ cost }) });
 }

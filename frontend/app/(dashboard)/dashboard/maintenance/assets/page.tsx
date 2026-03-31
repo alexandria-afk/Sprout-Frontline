@@ -4,17 +4,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import clsx from "clsx";
 import { Package, Plus, Pencil, Trash2, ChevronDown, ChevronUp, ChevronLeft } from "lucide-react";
-import {
-  listAssets,
-  getAsset,
-  createAsset,
-  updateAsset,
-  deleteAsset,
-} from "@/services/maintenance";
+import { listAssets, getAsset, createAsset, updateAsset, deleteAsset, type RepairHistoryIssue } from "@/services/maintenance";
 import { listLocations, type Location } from "@/services/users";
 import { createClient } from "@/services/supabase/client";
 import { friendlyError } from "@/lib/errors";
-import type { Asset, MaintenanceTicket, RepairGuide } from "@/types";
+import type { Asset, RepairGuide } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -280,7 +274,7 @@ function EditAssetModal({
 // ── AssetDetailSheet ──────────────────────────────────────────────────────────
 
 function AssetDetailSheet({ assetId }: { assetId: string }) {
-  const [data, setData] = useState<(Asset & { maintenance_tickets?: MaintenanceTicket[] }) | null>(null);
+  const [data, setData] = useState<(Asset & { repair_history?: RepairHistoryIssue[]; repair_total_cost?: number }) | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -300,9 +294,9 @@ function AssetDetailSheet({ assetId }: { assetId: string }) {
     );
   if (!data) return null;
 
-  const tickets = data.maintenance_tickets ?? [];
-  const ticketCount = tickets.length;
-  const totalCost = tickets.reduce((sum, t) => sum + (t.cost ?? 0), 0);
+  const repairs = data.repair_history ?? [];
+  const repairCount = repairs.length;
+  const totalCost = data.repair_total_cost ?? repairs.reduce((sum, r) => sum + (r.cost ?? 0), 0);
 
   return (
     <tr>
@@ -316,8 +310,8 @@ function AssetDetailSheet({ assetId }: { assetId: string }) {
             <p className="text-dark"><span className="text-dark-secondary">Next Service:</span> {fmt(data.next_maintenance_due_at)}</p>
           </div>
           <div>
-            <p className="text-xs font-medium text-dark-secondary mb-1">Maintenance Summary</p>
-            <p className="text-dark">{ticketCount} linked ticket{ticketCount !== 1 ? "s" : ""}</p>
+            <p className="text-xs font-medium text-dark-secondary mb-1">Repair History</p>
+            <p className="text-dark">{repairCount} repair issue{repairCount !== 1 ? "s" : ""}</p>
             <p className="text-dark">Total cost: {currency(totalCost)}</p>
           </div>
           <div>

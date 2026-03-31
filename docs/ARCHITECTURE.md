@@ -1,6 +1,6 @@
 # Architecture Reference
 **Frontline Operations Platform**
-_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature_
+_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature, maintenance refactor (maintenance_tickets removed)_
 
 ---
 
@@ -173,7 +173,7 @@ RETAIL APP RENEGADE/
 
 | Table | Key Columns | Notes |
 |---|---|---|
-| `issue_categories` | `id`, `organisation_id`, `name`, `description`, `color`, `icon`, `sla_hours INT`, `default_priority`, `is_deleted` | |
+| `issue_categories` | `id`, `organisation_id`, `name`, `description`, `color`, `icon`, `sla_hours INT`, `default_priority`, `is_maintenance BOOLEAN`, `is_deleted` | `is_maintenance=true` means issues in this category appear in the maintenance costs report and trigger cost entry on resolve; set automatically during provisioning for Equipment Failure, Facility Damage, IT/System Issue; togglable per category in `/dashboard/issues/categories` |
 | `issue_custom_fields` | `id`, `category_id`, `label`, `field_type ENUM(text\|number\|dropdown\|checkbox\|date)`, `options JSONB`, `is_required`, `display_order` | |
 | `escalation_rules` | `id`, `category_id`, `trigger_type ENUM(on_create\|sla_breach\|priority_critical\|status_change\|unresolved_hours)`, `hours_threshold INT`, `notify_role`, `notify_user_id`, `notify_vendor_id` | |
 | `issues` | `id`, `organisation_id`, `location_id`, `category_id`, `reported_by`, `assigned_to`, `assigned_vendor_id`, `asset_id`, `title`, `description`, `priority ENUM(low\|medium\|high\|critical)`, `status ENUM(open\|in_progress\|pending_vendor\|resolved\|closed)`, `location_description`, `recurrence_count INT`, `due_at`, `resolved_at`, `resolution_note`, `cost NUMERIC`, `ai_description`, `ai_suggested_category`, `ai_suggested_priority`, `ai_confidence_score`, `ai_flagged_safety BOOLEAN` | |
@@ -193,9 +193,7 @@ RETAIL APP RENEGADE/
 
 #### Maintenance
 
-| Table | Key Columns | Notes |
-|---|---|---|
-| `maintenance_tickets` | `id`, `organisation_id`, `asset_id`, `location_id`, `reported_by`, `assigned_to`, `assigned_vendor_id`, `title`, `description`, `priority`, `status ENUM(open\|in_progress\|pending_parts\|resolved\|closed)`, `cost NUMERIC`, `resolved_at` | Referenced by issues |
+The `maintenance_tickets` table has been removed. Maintenance is now modelled as issues where `issue_categories.is_maintenance = true`. An issue is considered a maintenance issue when its category has `is_maintenance=true` AND it has an `asset_id` linked. `issues.cost` stores the repair cost, captured via a cost input shown when resolving a maintenance-category issue.
 
 #### Incidents
 
@@ -439,6 +437,7 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 | `GET` | `/pull-outs/trends` | Pull-out count and cost by day/week/month; filters: date_from, date_to, location_id, granularity |
 | `GET` | `/pull-outs/top-items` | Most frequently pulled-out items with total cost; filters: date_from, date_to, location_id, limit |
 | `GET` | `/pull-outs/anomalies` | Cost-based weekly anomaly detection per location — flags locations where current week cost > 1.5× 4-week rolling average; filter: location_id |
+| `GET` | `/maintenance-issues` | Maintenance costs report: issues where `category.is_maintenance=true`; returns summary (total_cost, open_count, resolved_count, avg_cost, total_count), by_location, by_asset, by_month, and flat issues list; filters: date_from, date_to, location_id |
 | `GET` | `/aging/tasks` | Task aging report: total open, avg age (hours), SLA breach count + %, aging buckets (0–4h / 4–24h / 24–72h / 72–168h / 168h+), breakdown by priority / location / status; filters: date_from, date_to, location_id |
 | `GET` | `/aging/issues` | Issue aging report: total open, avg age, SLA breach count + %, aging buckets, breakdown by category / location / priority; SLA per issue uses `issue_categories.sla_hours` (default 24h); filters: date_from, date_to, location_id |
 | `GET` | `/aging/resolution-time` | Avg and median resolution time in hours for closed tasks and issues; by_period (monthly) and by_location breakdown; tasks use `completed_at`, issues use `resolved_at`; filters: date_from, date_to, location_id, entity (tasks\|issues) |
@@ -495,7 +494,7 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 |---|---|---|
 | `GET` | `/summary` | Issue counts by status, priority, category |
 | `GET` | `/trends` | Issue volume over time; filters: location_id, category_id, dates |
-| `GET` | `/by-asset` | Issue counts grouped by asset |
+| `GET` | `/by-asset` | Issues grouped by asset; only includes issues where `category.is_maintenance=true` and `asset_id IS NOT NULL`; returns asset_name, ticket_count, total_repair_cost |
 | `GET` | `/by-location` | Issue counts grouped by location |
 | `GET` | `/recurring` | Recurring issues (recurrence_count > 1) |
 
@@ -530,7 +529,7 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 |---|---|---|
 | `GET` | `/` | List assets; filter: location_id |
 | `POST` | `/` | Create asset |
-| `GET` | `/{id}` | Asset detail with maintenance history |
+| `GET` | `/{id}` | Asset detail with repair history — `repair_history` array of linked maintenance-category issues, `repair_total_cost` sum |
 | `PUT` | `/{id}` | Update asset |
 | `DELETE` | `/{id}` | Delete asset (soft) |
 | `GET` | `/{id}/guides` | Repair guides linked to asset |
@@ -544,16 +543,11 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 | `GET` | `/{id}` | Guide detail |
 | `DELETE` | `/{id}` | Delete guide |
 
-### Maintenance — `/api/v1/maintenance`
+### Maintenance
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/` | Create maintenance ticket |
-| `GET` | `/` | List tickets; filters: asset_id, status, priority, assigned_to, vendor_id, location_id, page |
-| `GET` | `/{id}` | Ticket detail |
-| `PUT` | `/{id}/status` | Update ticket status |
-| `PUT` | `/{id}/assign` | Assign ticket to user or vendor |
-| `PUT` | `/{id}/cost` | Record maintenance cost |
+`/api/v1/maintenance` has been removed. Maintenance is tracked via the Issues module. Use `GET /api/v1/issues?is_maintenance=true` to list maintenance issues (filters to issues where `issue_categories.is_maintenance=true`). Cost is stored on `issues.cost` and captured during the resolve flow.
+
+The `GET /api/v1/reports/maintenance-issues` endpoint aggregates maintenance issue costs by location, asset, and month — see Reports section below.
 
 ### Safety — `/api/v1/safety`
 
@@ -745,8 +739,8 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/workflows/fill/[instanceId]/[stageInstanceId]` | `dashboard/workflows/fill/.../page.tsx` | Form fill for workflow stage |
 | `/dashboard/announcements` | `dashboard/announcements/page.tsx` | Announcements list and creation |
 | `/dashboard/safety` | `dashboard/safety/page.tsx` | Safety leaderboard and points |
-| `/dashboard/maintenance` | `dashboard/maintenance/page.tsx` | Maintenance ticket list |
-| `/dashboard/maintenance/assets` | `dashboard/maintenance/assets/page.tsx` | Asset inventory |
+| `/dashboard/maintenance` | `dashboard/maintenance/page.tsx` | Redirects to `/dashboard/issues?maintenance=1` (pre-filters to maintenance-category issues) |
+| `/dashboard/maintenance/assets` | `dashboard/maintenance/assets/page.tsx` | Asset inventory; asset detail shows `repair_history` (linked maintenance-category issues with cost) |
 | `/dashboard/maintenance/guides` | `dashboard/maintenance/guides/page.tsx` | Repair guides list |
 | `/dashboard/shifts` | `dashboard/shifts/page.tsx` | Shift schedule, open shifts, swap requests |
 | `/dashboard/insights` | `dashboard/insights/page.tsx` | Insights overview |
@@ -757,7 +751,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/insights/reports/operations/checklists` | `...operations/checklists/page.tsx` | Checklist completion report |
 | `/dashboard/insights/reports/operations/pull-outs` | `...operations/pull-outs/page.tsx` | Pull-Out & Wastage report — summary cards, trends line chart, top items bar chart, anomaly alerts; auto-loads last 30 days |
 | `/dashboard/insights/reports/safety/leaderboard` | `...safety/leaderboard/page.tsx` | Safety points leaderboard report |
-| `/dashboard/insights/reports/issues/maintenance` | `...issues/maintenance/page.tsx` | Maintenance issue report |
+| `/dashboard/insights/reports/issues/maintenance` | `...issues/maintenance/page.tsx` | Maintenance costs report — queries `GET /reports/maintenance-issues`; shows cost by location, cost by asset, monthly trend, issue table |
 | `/dashboard/insights/reports/issues/incidents` | `...issues/incidents/page.tsx` | Incident report |
 | `/dashboard/insights/reports/issues/summary` | `...issues/summary/page.tsx` | Issue summary report |
 | `/dashboard/insights/reports/issues/recurring` | `...issues/recurring/page.tsx` | Recurring issues report |

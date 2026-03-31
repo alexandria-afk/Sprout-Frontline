@@ -134,20 +134,27 @@ async def get_asset(
 
     asset = resp.data[0]
 
-    # Fetch maintenance history for this asset
-    tickets_resp = (
-        db.table("maintenance_tickets")
-        .select("id, title, status, priority, cost, created_at, resolved_at, assigned_to, profiles!assigned_to(full_name)")
-        .eq("asset_id", str(asset_id))
-        .eq("is_deleted", False)
-        .order("created_at", desc=True)
-        .execute()
-    )
-    tickets = tickets_resp.data or []
-    total_cost = sum(float(t.get("cost") or 0) for t in tickets)
+    # Fetch repair history: issues linked to this asset in maintenance categories
+    maint_cats = db.table("issue_categories").select("id").eq("organisation_id", org_id).eq("is_maintenance", True).eq("is_deleted", False).execute()
+    maint_cat_ids = [r["id"] for r in (maint_cats.data or [])]
 
-    asset["maintenance_history"] = tickets
-    asset["maintenance_total_cost"] = total_cost
+    if maint_cat_ids:
+        repair_resp = (
+            db.table("issues")
+            .select("id, title, status, priority, cost, created_at, resolved_at, resolution_note, profiles!assigned_to(full_name)")
+            .eq("asset_id", str(asset_id))
+            .eq("is_deleted", False)
+            .in_("category_id", maint_cat_ids)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        repair_issues = repair_resp.data or []
+    else:
+        repair_issues = []
+
+    total_cost = sum(float(i.get("cost") or 0) for i in repair_issues if i.get("cost") is not None)
+    asset["repair_history"] = repair_issues
+    asset["repair_total_cost"] = total_cost
 
     return asset
 

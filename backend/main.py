@@ -13,7 +13,7 @@ from middleware.logging import LoggingMiddleware
 from routes import auth, users, organisations, forms, announcements, dashboard
 from routes import audits, corrective_actions, workflows, reports, tasks, caps
 from routes import notifications, issue_categories, vendors, issues, issue_dashboard
-from routes import assets, repair_guides, maintenance, safety
+from routes import assets, repair_guides, safety
 from routes import incidents
 from routes import ai_generate
 from routes import gamification
@@ -107,7 +107,6 @@ app.include_router(issues.router,            prefix="/api/v1/issues",           
 app.include_router(vendors.router,           prefix="/api/v1/vendors",             tags=["vendors"])
 app.include_router(assets.router,            prefix="/api/v1/assets",              tags=["assets"])
 app.include_router(repair_guides.router,     prefix="/api/v1/repair-guides",       tags=["repair-guides"])
-app.include_router(maintenance.router,       prefix="/api/v1/maintenance",         tags=["maintenance"])
 app.include_router(safety.router,            prefix="/api/v1/safety",              tags=["safety"])
 app.include_router(incidents.router,         prefix="/api/v1/incidents",           tags=["incidents"])
 app.include_router(ai_generate.router,       prefix="/api/v1/ai",                  tags=["ai"])

@@ -309,6 +309,7 @@ export interface IssueCategory {
   created_at: string;
   updated_at: string;
   is_deleted: boolean;
+  is_maintenance?: boolean;
   custom_fields?: IssueCustomField[];
   escalation_rules?: EscalationRule[];
 }
@@ -468,34 +469,6 @@ export interface RepairGuide {
   issue_categories?: { name: string } | null;
 }
 
-export type TicketStatus = "open" | "in_progress" | "pending_vendor" | "resolved" | "closed";
-export type TicketType = "repair" | "preventive" | "inspection";
-
-export interface MaintenanceTicket {
-  id: string;
-  asset_id: string;
-  issue_id: string | null;
-  organisation_id: string;
-  location_id: string;
-  reported_by: string;
-  assigned_to: string | null;
-  assigned_vendor_id: string | null;
-  ticket_type: TicketType;
-  title: string;
-  description: string | null;
-  priority: IssuePriority;
-  status: TicketStatus;
-  sla_hours: number;
-  due_at: string | null;
-  resolved_at: string | null;
-  resolution_note: string | null;
-  cost: number | null;
-  created_at: string;
-  updated_at: string;
-  assets?: { name: string; category: string } | null;
-  assignee?: { full_name: string } | null;
-  vendor?: { name: string } | null;
-}
 
 export interface SafetyBadge {
   id: string;

@@ -126,41 +126,42 @@ async def dashboard_by_asset(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     db = get_supabase()
 
-    # Fetch maintenance tickets with asset info and costs
-    tickets_resp = (
-        db.table("maintenance_tickets")
-        .select("id, asset_id, cost, assets(id, name, asset_type)")
+    # Get maintenance category IDs
+    cat_resp = db.table("issue_categories").select("id").eq("organisation_id", org_id).eq("is_maintenance", True).eq("is_deleted", False).execute()
+    maint_cat_ids = [r["id"] for r in (cat_resp.data or [])]
+
+    if not maint_cat_ids:
+        return {"data": [], "total": 0}
+
+    issues_resp = (
+        db.table("issues")
+        .select("id, asset_id, cost, assets(id, name, category)")
         .eq("organisation_id", org_id)
         .eq("is_deleted", False)
+        .in_("category_id", maint_cat_ids)
+        .not_.is_("asset_id", "null")
         .execute()
     )
-    tickets = tickets_resp.data or []
+    issues = issues_resp.data or []
 
-    # Group by asset
     asset_map: dict = {}
-    for ticket in tickets:
-        asset_id = ticket.get("asset_id")
+    for issue in issues:
+        asset_id = issue.get("asset_id")
         if not asset_id:
             continue
-        asset_info = ticket.get("assets") or {}
+        asset_info = issue.get("assets") or {}
         if asset_id not in asset_map:
             asset_map[asset_id] = {
                 "asset_id": asset_id,
                 "asset_name": asset_info.get("name", "Unknown"),
-                "asset_type": asset_info.get("asset_type", ""),
+                "asset_type": asset_info.get("category", ""),
                 "ticket_count": 0,
                 "total_repair_cost": 0.0,
             }
         asset_map[asset_id]["ticket_count"] += 1
-        asset_map[asset_id]["total_repair_cost"] += float(ticket.get("cost") or 0)
+        asset_map[asset_id]["total_repair_cost"] += float(issue.get("cost") or 0)
 
-    # Also count issues linked to assets via maintenance tickets
-    result = sorted(
-        list(asset_map.values()),
-        key=lambda x: x["total_repair_cost"],
-        reverse=True,
-    )
-
+    result = sorted(list(asset_map.values()), key=lambda x: x["total_repair_cost"], reverse=True)
     return {"data": result, "total": len(result)}
 
 

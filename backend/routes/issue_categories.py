@@ -24,6 +24,7 @@ class CreateCategoryRequest(BaseModel):
     sla_hours: Optional[int] = None
     color: Optional[str] = None
     icon: Optional[str] = None
+    is_maintenance: Optional[bool] = None
 
 
 class UpdateCategoryRequest(BaseModel):
@@ -33,6 +34,7 @@ class UpdateCategoryRequest(BaseModel):
     sla_hours: Optional[int] = None
     color: Optional[str] = None
     icon: Optional[str] = None
+    is_maintenance: Optional[bool] = None
 
 
 class CreateCustomFieldRequest(BaseModel):
@@ -125,6 +127,8 @@ async def create_category(
         data["color"] = body.color
     if body.icon is not None:
         data["icon"] = body.icon
+    if body.is_maintenance is not None:
+        data["is_maintenance"] = body.is_maintenance
 
     resp = db.table("issue_categories").insert(data).execute()
     if not resp.data:
@@ -141,7 +145,13 @@ async def update_category(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     db = get_supabase()
 
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    updates = {}
+    for k, v in body.model_dump().items():
+        if k == "is_maintenance":
+            if v is not None:
+                updates[k] = v
+        elif v is not None:
+            updates[k] = v
     if not updates:
         raise HTTPException(status_code=400, detail="Nothing to update")
     updates["updated_at"] = datetime.utcnow().isoformat()

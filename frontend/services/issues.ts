@@ -94,6 +94,7 @@ export interface ListIssuesParams {
   page_size?: number;
   my_issues?: boolean;
   my_team?: boolean;
+  is_maintenance?: boolean;
 }
 
 export function listIssues(params: ListIssuesParams = {}): Promise<{ data: Issue[]; total: number }> {
