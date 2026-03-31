@@ -31,6 +31,9 @@ from models.onboarding import (
 )
 from config import settings
 
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
 router = APIRouter()
 
 _DAY_STR_MAP = {
@@ -1043,8 +1046,6 @@ async def suggest_locations(session_id: str, current_user: dict = Depends(requir
     website_url = session.get("website_url")
 
     # Try to get real location data from the website
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
     website_text = ""
     if website_url:
         try:

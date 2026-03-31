@@ -940,6 +940,11 @@ async def submit_form_for_stage(
     org_id = _get_org(current_user)
     db = get_admin_client()
 
+    # Verify the workflow instance belongs to this org
+    inst_check = db.table("workflow_instances").select("id").eq("id", str(instance_id)).eq("organisation_id", org_id).maybe_single().execute()
+    if not inst_check.data:
+        raise HTTPException(status_code=403, detail="Not found")
+
     si_res = db.table("workflow_stage_instances") \
         .select("*, workflow_stages(form_template_id, action_type)") \
         .eq("id", str(stage_instance_id)) \

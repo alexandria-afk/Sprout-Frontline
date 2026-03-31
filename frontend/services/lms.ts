@@ -225,12 +225,13 @@ export async function getMyEnrollments() {
   return apiFetch<CourseEnrollment[]>(`/api/v1/lms/enrollments/my`);
 }
 
-export async function listEnrollments(params?: { course_id?: string; user_id?: string; status?: string; page?: number }) {
+export async function listEnrollments(params?: { course_id?: string; user_id?: string; status?: string; page?: number; page_size?: number }) {
   const q = new URLSearchParams();
   if (params?.course_id) q.set("course_id", params.course_id);
   if (params?.user_id) q.set("user_id", params.user_id);
   if (params?.status) q.set("status", params.status);
   if (params?.page) q.set("page", String(params.page));
+  if (params?.page_size) q.set("page_size", String(params.page_size));
   return apiFetch<{ items: CourseEnrollment[]; total_count: number }>(
     `/api/v1/lms/enrollments${q.toString() ? `?${q}` : ""}`
   );

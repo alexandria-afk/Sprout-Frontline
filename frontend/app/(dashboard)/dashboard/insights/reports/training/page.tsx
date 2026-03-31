@@ -9,28 +9,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { clsx } from "clsx";
-import { getLmsAnalytics, listEnrollments } from "@/services/lms";
-
-type CourseEnrollment = {
-  id: string;
-  course_id: string;
-  user_id: string;
-  status: string;
-  score: number | null;
-  attempt_count: number;
-  started_at: string | null;
-  completed_at: string | null;
-  courses?: { title: string; [key: string]: unknown };
-};
-
-type LmsAnalytics = {
-  total_enrollments: number;
-  passed: number;
-  in_progress: number;
-  not_started: number;
-  failed: number;
-  completion_rate: number;
-};
+import { getLmsAnalytics, listEnrollments, CourseEnrollment, LmsAnalytics } from "@/services/lms";
 
 const STATUS_COLOR: Record<string, string> = {
   not_started: "bg-gray-100 text-gray-600",
