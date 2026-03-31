@@ -937,8 +937,6 @@ function CreateTemplateModal({ onClose, onSuccess, prefill }: {
                 type="number" min={0} step={0.01}
                 className={`${inputCls} max-w-[160px]`}
                 placeholder="e.g. 150.00"
-                disabled
-                defaultValue=""
               />
             </div>
           )}
