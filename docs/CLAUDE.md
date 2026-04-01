@@ -71,3 +71,5 @@ Admin/Super Admin can do everything manager can, plus:
 EVERY screen, tab, nav item, and button must check the user's 
 role before rendering. If a component is not listed for a role 
 above, it must be hidden — not disabled, hidden.
+
+- `docs/NOTIFICATION_SPEC.md` — notification system, inbox, push, AI insights

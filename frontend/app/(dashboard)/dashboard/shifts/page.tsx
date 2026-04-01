@@ -12,7 +12,7 @@ import {
   RefreshCw, Check, Ban, Globe, Filter,
 } from "lucide-react";
 import { createClient } from "@/services/supabase/client";
-import { listUsers, listLocations } from "@/services/users";
+import { listUsers, listLocations, getMyOrganisation } from "@/services/users";
 import type { Location } from "@/services/users";
 import { AssignPeoplePanel } from "@/components/shared/AssignPeoplePanel";
 import { PositionCombobox } from "@/components/shared/PositionCombobox";
@@ -26,6 +26,7 @@ import {
   getTimesheetSummary, getMyTimesheet,
   getAttendanceRules, updateAttendanceRules,
   listShiftTemplates, createShiftTemplate, deleteShiftTemplate, bulkGenerateShifts,
+  assignBulk,
   generateAISchedule, startBreak, endBreak, getBreakStatus,
 } from "@/services/shifts";
 import type {
@@ -1640,6 +1641,9 @@ function ManagerLeave() {
 
 // ── Manager: Templates ────────────────────────────────────────────────────────
 
+type GeneratedShift = { id: string; start_at: string; end_at: string; role: string | null; location_id: string };
+type AssignmentEntry = { userId: string; isOpenShift: boolean };
+
 function ManagerTemplates({
   locationId, isAdmin, locations,
 }: {
@@ -1656,10 +1660,19 @@ function ManagerTemplates({
   const [genLocationId, setGenLocationId] = useState("");
   const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
+  // Assignment phase state
+  const [assigningPhase, setAssigningPhase] = useState(false);
+  const [generatedShifts, setGeneratedShifts] = useState<GeneratedShift[]>([]);
+  const [assignmentMap, setAssignmentMap] = useState<Record<string, AssignmentEntry>>({});
+  const [staffForLocation, setStaffForLocation] = useState<Profile[]>([]);
+  const [loadingStaff, setLoadingStaff] = useState(false);
+  const [bulkAssignUserId, setBulkAssignUserId] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+
   const fetchTemplates = useCallback(async () => {
     setLoading(true);
     try {
-      // Admin: no location filter (sees all); Manager: backend returns org-wide + their location
       setTemplates(await listShiftTemplates(isAdmin ? undefined : { location_id: locationId || undefined }));
     }
     catch { setTemplates([]); } finally { setLoading(false); }
@@ -1667,7 +1680,16 @@ function ManagerTemplates({
 
   useEffect(() => { fetchTemplates(); }, [fetchTemplates]);
 
-  const [generating, setGenerating] = useState(false);
+  function resetGenerateState() {
+    setGeneratingFor(null);
+    setGenLocationId("");
+    setAssigningPhase(false);
+    setGeneratedShifts([]);
+    setAssignmentMap({});
+    setStaffForLocation([]);
+    setBulkAssignUserId("");
+  }
+
   async function handleGenerate(templateId: string, templateLocationId: string | null) {
     setGenerating(true);
     try {
@@ -1677,14 +1699,72 @@ function ManagerTemplates({
       };
       if (!templateLocationId && genLocationId) body.location_id = genLocationId;
       const r = await bulkGenerateShifts(templateId, body);
-      setBanner({ type: "success", msg: `${r.shifts_created} draft shift${r.shifts_created !== 1 ? "s" : ""} created.` });
-      setGeneratingFor(null);
-      setGenLocationId("");
+
+      if (r.shifts_created === 0) {
+        setBanner({ type: "success", msg: "No matching days in the selected date range." });
+        resetGenerateState();
+        return;
+      }
+
+      // Transition to assignment phase
+      setGeneratedShifts(r.shifts);
+      const initMap: Record<string, AssignmentEntry> = {};
+      r.shifts.forEach(s => { initMap[s.id] = { userId: "", isOpenShift: false }; });
+      setAssignmentMap(initMap);
+      setAssigningPhase(true);
+
+      // Load staff for the resolved location
+      const locId = templateLocationId || genLocationId;
+      if (locId) {
+        setLoadingStaff(true);
+        try {
+          const staffResp = await listUsers({ location_id: locId, page_size: 200 });
+          setStaffForLocation(staffResp.items.filter(u => u.role === "staff" || u.role === "manager"));
+        } catch { setStaffForLocation([]); } finally { setLoadingStaff(false); }
+      }
     } catch (e) {
       setBanner({ type: "error", msg: (e as Error).message || "Failed to generate shifts. Please try again." });
     } finally {
       setGenerating(false);
     }
+  }
+
+  async function handlePublish() {
+    setPublishing(true);
+    try {
+      const assignments = generatedShifts.map(s => ({
+        shift_id: s.id,
+        user_id: assignmentMap[s.id]?.isOpenShift ? null : (assignmentMap[s.id]?.userId || null),
+        is_open_shift: assignmentMap[s.id]?.isOpenShift || false,
+      }));
+      await assignBulk(assignments);
+      const shiftIds = generatedShifts.map(s => s.id);
+      const result = await publishShifts(shiftIds);
+      setBanner({ type: "success", msg: `${result.published} shift${result.published !== 1 ? "s" : ""} published successfully!` });
+      resetGenerateState();
+    } catch (e) {
+      setBanner({ type: "error", msg: (e as Error).message || "Failed to publish shifts. Please check assignments and try again." });
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  function applyBulkAssign(userId: string) {
+    setAssignmentMap(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(id => { next[id] = { userId, isOpenShift: false }; });
+      return next;
+    });
+    setBulkAssignUserId(userId);
+  }
+
+  function applyMarkAllOpen() {
+    setAssignmentMap(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(id => { next[id] = { userId: "", isOpenShift: true }; });
+      return next;
+    });
+    setBulkAssignUserId("");
   }
 
   async function handleDelete(id: string) {
@@ -1696,6 +1776,174 @@ function ManagerTemplates({
       setBanner({ type: "error", msg: (e as Error).message });
     }
   }
+
+  // ── Assignment Phase UI ──────────────────────────────────────────────────────
+
+  if (assigningPhase) {
+    const unassignedCount = generatedShifts.filter(s =>
+      !assignmentMap[s.id]?.isOpenShift && !assignmentMap[s.id]?.userId
+    ).length;
+
+    return (
+      <div className="space-y-4">
+        {banner && <Banner type={banner.type} message={banner.msg} onDismiss={() => setBanner(null)} />}
+
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="font-semibold text-dark text-base">
+              Assign Staff — {generatedShifts.length} shift{generatedShifts.length !== 1 ? "s" : ""} generated
+            </h3>
+            <p className="text-xs text-dark-secondary mt-0.5">
+              Assign staff or mark as open shifts, then click Publish.
+            </p>
+          </div>
+          <button
+            onClick={resetGenerateState}
+            className="p-1.5 text-dark-secondary hover:text-dark hover:bg-gray-100 rounded-lg transition-colors"
+            title="Cancel"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Bulk actions bar */}
+        <div className="flex flex-wrap items-center gap-2 p-3 bg-gray-50 rounded-lg border border-surface-border">
+          <span className="text-xs text-dark-secondary font-medium">Bulk assign:</span>
+          {loadingStaff ? (
+            <Loader2 className="w-4 h-4 animate-spin text-dark-secondary" />
+          ) : (
+            <select
+              value={bulkAssignUserId}
+              onChange={e => applyBulkAssign(e.target.value)}
+              className={clsx(inputCls, "text-xs py-1 min-w-[160px]")}
+            >
+              <option value="">Select staff…</option>
+              {staffForLocation.map(u => (
+                <option key={u.id} value={u.id}>{u.full_name}</option>
+              ))}
+            </select>
+          )}
+          <span className="text-xs text-dark-secondary">or</span>
+          <button
+            onClick={applyMarkAllOpen}
+            className={clsx(btnSecondary, "text-xs py-1")}
+          >
+            <Globe className="w-3.5 h-3.5" /> Mark all as Open Shifts
+          </button>
+          {unassignedCount > 0 && (
+            <span className="ml-auto text-xs text-amber-600 font-medium flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {unassignedCount} unassigned
+            </span>
+          )}
+        </div>
+
+        {/* Shifts table */}
+        <div className="overflow-x-auto rounded-lg border border-surface-border">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-dark-secondary">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">Date</th>
+                <th className="px-3 py-2 text-left font-medium">Day</th>
+                <th className="px-3 py-2 text-left font-medium">Start</th>
+                <th className="px-3 py-2 text-left font-medium">End</th>
+                <th className="px-3 py-2 text-left font-medium">Role</th>
+                <th className="px-3 py-2 text-left font-medium">Assign To</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-surface-border bg-white">
+              {generatedShifts.map(s => {
+                const startDt = new Date(s.start_at);
+                const endDt = new Date(s.end_at);
+                const entry = assignmentMap[s.id] ?? { userId: "", isOpenShift: false };
+                return (
+                  <tr key={s.id} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {startDt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-dark-secondary">
+                      {DAY_NAMES_FULL[startDt.getDay() === 0 ? 6 : startDt.getDay() - 1]}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {startDt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {endDt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-dark-secondary">
+                      {s.role ?? <span className="italic text-gray-400">Any</span>}
+                    </td>
+                    <td className="px-3 py-2">
+                      {entry.isOpenShift ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
+                            <Globe className="w-3 h-3" /> Open Shift
+                          </span>
+                          <button
+                            onClick={() => setAssignmentMap(prev => ({ ...prev, [s.id]: { userId: "", isOpenShift: false } }))}
+                            className="text-dark-secondary hover:text-dark"
+                            title="Unmark"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={entry.userId}
+                            onChange={e => setAssignmentMap(prev => ({ ...prev, [s.id]: { userId: e.target.value, isOpenShift: false } }))}
+                            className={clsx(inputCls, "text-xs py-0.5 min-w-[140px]")}
+                          >
+                            <option value="">Assign staff…</option>
+                            {staffForLocation.map(u => (
+                              <option key={u.id} value={u.id}>{u.full_name}</option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => setAssignmentMap(prev => ({ ...prev, [s.id]: { userId: "", isOpenShift: true } }))}
+                            className={clsx(btnSecondary, "text-[10px] px-1.5 py-0.5 whitespace-nowrap")}
+                            title="Mark as open shift"
+                          >
+                            <Globe className="w-3 h-3" />
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center justify-between pt-1">
+          <button
+            className={clsx(btnSecondary, "text-xs")}
+            onClick={() => setAssigningPhase(false)}
+            disabled={publishing}
+          >
+            <ChevronLeft className="w-3.5 h-3.5" /> Back to settings
+          </button>
+          <button
+            className={clsx(btnPrimary, "text-xs")}
+            onClick={handlePublish}
+            disabled={publishing || unassignedCount > 0}
+            title={unassignedCount > 0 ? "All shifts must be assigned or marked as open before publishing" : undefined}
+          >
+            {publishing ? (
+              <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Publishing…</>
+            ) : (
+              <><Check className="w-3.5 h-3.5" /> Publish {generatedShifts.length} Shift{generatedShifts.length !== 1 ? "s" : ""}</>
+            )}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Default: Template Grid ───────────────────────────────────────────────────
 
   return (
     <div className="space-y-4">
@@ -1717,7 +1965,6 @@ function ManagerTemplates({
                 <div className="min-w-0">
                   <p className="font-semibold text-dark truncate">{t.name}</p>
                   {t.role && <p className="text-xs text-dark-secondary mt-0.5">{t.role}</p>}
-                  {/* Location badge */}
                   <span className={clsx(
                     "inline-block mt-1 text-[10px] px-2 py-0.5 rounded-full font-medium",
                     !t.location_id
@@ -1764,13 +2011,13 @@ function ManagerTemplates({
                     <input type="date" className={clsx(inputCls, "text-xs")} value={genDateTo} onChange={e => setGenDateTo(e.target.value)} />
                   </div>
                   <div className="flex gap-2">
-                    <button className={clsx(btnSecondary, "text-xs")} onClick={() => setGeneratingFor(null)} disabled={generating}>Cancel</button>
+                    <button className={clsx(btnSecondary, "text-xs")} onClick={() => { setGeneratingFor(null); setGenLocationId(""); }} disabled={generating}>Cancel</button>
                     <button
                       className={clsx(btnPrimary, "text-xs")}
                       onClick={() => handleGenerate(t.id, t.location_id)}
                       disabled={generating || (!t.location_id && !genLocationId)}
                     >
-                      {generating ? "Generating…" : "Generate"}
+                      {generating ? <><Loader2 className="w-3 h-3 animate-spin" /> Generating…</> : "Generate"}
                     </button>
                   </div>
                 </div>
@@ -2513,6 +2760,7 @@ export default function ShiftsPage() {
   const [locationId, setLocationId] = useState<string>("");
   const [users, setUsers] = useState<Profile[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
+  const [staffAvailabilityEnabled, setStaffAvailabilityEnabled] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(true);
 
   // Stats
@@ -2543,9 +2791,15 @@ export default function ShiftsPage() {
       setUserId(uid);
       setLocationId(locId);
 
-      // Fetch users for manager shift creation
+      // Load org feature flags (determines which optional tabs to show)
+      getMyOrganisation()
+        .then(org => setStaffAvailabilityEnabled(org.feature_flags?.staff_availability_enabled === true))
+        .catch(() => {});
+
+      // Fetch users for manager shift creation — no location filter so managers
+      // can assign shifts to any staff in the org, not just their home location
       if (["super_admin", "admin", "manager"].includes(r)) {
-        listUsers({ location_id: locId || undefined, page_size: 200 })
+        listUsers({ page_size: 200 })
           .then(res => setUsers(res.items))
           .catch(() => {});
         // Admin needs all locations for bulk publish + template scope
@@ -2607,7 +2861,9 @@ export default function ShiftsPage() {
     { id: "clockin",      label: "Clock In/Out", icon: Clock         },
     { id: "timesheet",    label: "My Timesheet", icon: BarChart3     },
     { id: "leave",        label: "Leave",        icon: Coffee        },
-    { id: "availability", label: "Availability", icon: CalendarClock },
+    ...(staffAvailabilityEnabled
+      ? [{ id: "availability" as StaffTab, label: "Availability", icon: CalendarClock }]
+      : []),
   ];
 
   if (sessionLoading) {
@@ -2742,7 +2998,7 @@ export default function ShiftsPage() {
               {staffTab === "clockin"      && <StaffClockIn locationId={locationId} />}
               {staffTab === "timesheet"    && <StaffTimesheet />}
               {staffTab === "leave"        && <StaffLeave />}
-              {staffTab === "availability" && <StaffAvailabilityTab />}
+              {staffTab === "availability" && staffAvailabilityEnabled && <StaffAvailabilityTab />}
             </>
           )}
         </div>

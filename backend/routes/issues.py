@@ -2,7 +2,6 @@
 Issues API — /api/v1/issues
 Issue CRUD + status updates + comments + attachments + export.
 """
-import os
 import io
 import random
 import string
@@ -10,7 +9,6 @@ from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 from pydantic import BaseModel
 
@@ -130,77 +128,26 @@ async def evaluate_escalation_rules(
                 continue
 
             if rule.get("notify_via_fcm"):
-                tokens_resp = (
-                    supabase.table("profiles")
-                    .select("fcm_token")
-                    .in_("id", recipient_ids)
-                    .eq("is_deleted", False)
-                    .execute()
-                )
-                tokens = [
-                    p["fcm_token"]
-                    for p in (tokens_resp.data or [])
-                    if p.get("fcm_token")
-                ]
-                if tokens:
-                    await _send_fcm_notification(
-                        tokens=tokens,
-                        title=f"Issue escalated: {issue['title']}",
-                        body=f"Trigger: {trigger_type}",
-                        data={"issue_id": issue_id},
-                    )
-
-            # Log notifications
-            for uid in recipient_ids:
+                # Send via centralized notification service
                 try:
-                    supabase.table("notification_log").insert({
-                        "organisation_id": org_id,
-                        "user_id": uid,
-                        "issue_id": issue_id,
-                        "trigger_type": trigger_type,
-                        "rule_id": rule["id"],
-                    }).execute()
+                    import asyncio as _asyncio
+                    from services import notification_service as _ns
+                    for uid in recipient_ids:
+                        _asyncio.create_task(_ns.notify(
+                            org_id=org_id,
+                            recipient_user_id=uid,
+                            type="issue_assigned",
+                            title=f"Issue escalated: {issue['title']}",
+                            body=f"Trigger: {trigger_type}",
+                            entity_type="issue",
+                            entity_id=issue_id,
+                            send_push=True,
+                        ))
                 except Exception:
                     pass
 
     except Exception:
         pass  # Escalation errors should not block the main request
-
-
-async def _send_fcm_notification(
-    tokens: List[str],
-    title: str,
-    body: str,
-    data: Optional[dict] = None,
-):
-    """Call the Supabase Edge Function to send FCM push notifications."""
-    supabase_url = os.environ.get("SUPABASE_URL", "")
-    if not supabase_url:
-        return
-
-    edge_url = supabase_url.replace("/rest/v1", "").rstrip("/")
-    edge_url = f"{edge_url}/functions/v1/send-fcm-notification"
-
-    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-
-    payload = {
-        "tokens": tokens,
-        "notification": {"title": title, "body": body},
-        "data": data or {},
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                edge_url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {service_role_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-    except Exception:
-        pass  # FCM errors should not block the main request
 
 
 def _random_suffix(length: int = 8) -> str:
@@ -326,6 +273,27 @@ async def create_issue(
     except Exception as _wf_exc:
         import logging
         logging.getLogger(__name__).warning(f"Workflow trigger failed for issue {issue_id}: {_wf_exc}")
+
+    # Notify the assigned user if set on creation
+    if body.assigned_to and data.get("assigned_to"):
+        try:
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            issue_id_str = issue_id
+            priority_str = body.priority or "medium"
+            loc_resp = db.table("locations").select("name").eq("id", location_id).maybe_single().execute()
+            loc_name = (loc_resp.data or {}).get("name", "")
+            _asyncio.create_task(_ns.notify(
+                org_id=org_id,
+                recipient_user_id=str(body.assigned_to),
+                type="issue_assigned",
+                title=f"Issue assigned: {body.title}",
+                body=f"{priority_str} \u00b7 {loc_name}".strip(" \u00b7"),
+                entity_type="issue",
+                entity_id=issue_id_str,
+            ))
+        except Exception:
+            pass
 
     # ── Auto-spawn incident report if safety risk was flagged ──────────────────
     if body.is_safety_risk:
@@ -583,25 +551,26 @@ async def update_issue_status(
         str(issue_id), "status_change", org_id, db, trigger_status=body.status
     )
 
-    # Send FCM to assignee if exists
-    assigned_to = issue.get("assigned_to")
-    if assigned_to:
-        try:
-            profile_resp = (
-                db.table("profiles")
-                .select("fcm_token")
-                .eq("id", assigned_to)
-                .execute()
-            )
-            if profile_resp.data and profile_resp.data[0].get("fcm_token"):
-                await _send_fcm_notification(
-                    tokens=[profile_resp.data[0]["fcm_token"]],
-                    title="Issue status updated",
-                    body=f"Status changed from {previous_status} to {body.status}",
-                    data={"issue_id": str(issue_id)},
-                )
-        except Exception:
-            pass
+    # Notify the reporter that the issue status changed
+    try:
+        issue_full = db.table("issues").select("title, reported_by").eq("id", str(issue_id)).maybe_single().execute()
+        issue_data = issue_full.data or {}
+        reported_by = issue_data.get("reported_by")
+        issue_title = issue_data.get("title", "Issue")
+        status_label = body.status.replace("_", " ").title()
+        if reported_by:
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            _asyncio.create_task(_ns.notify(
+                org_id=org_id,
+                recipient_user_id=reported_by,
+                type="issue_status_changed",
+                title=f"{issue_title} \u2192 {status_label}",
+                entity_type="issue",
+                entity_id=str(issue_id),
+            ))
+    except Exception:
+        pass
 
     return resp.data[0]
 
@@ -637,7 +606,35 @@ async def add_comment(
     }).execute()
     if not resp.data:
         raise HTTPException(status_code=500, detail="Failed to add comment")
-    return resp.data[0]
+    comment = resp.data[0]
+
+    # Notify issue participants (assigned_to and reported_by, excluding commenter)
+    try:
+        issue_full = db.table("issues").select("title, assigned_to, reported_by").eq("id", str(issue_id)).maybe_single().execute()
+        issue_data = issue_full.data or {}
+        issue_title = issue_data.get("title", "Issue")
+        recipients = set()
+        if issue_data.get("assigned_to") and issue_data["assigned_to"] != user_id:
+            recipients.add(issue_data["assigned_to"])
+        if issue_data.get("reported_by") and issue_data["reported_by"] != user_id:
+            recipients.add(issue_data["reported_by"])
+        comment_preview = (body.body or "")[:100]
+        import asyncio as _asyncio
+        from services import notification_service as _ns
+        for recipient_id in recipients:
+            _asyncio.create_task(_ns.notify(
+                org_id=org_id,
+                recipient_user_id=recipient_id,
+                type="issue_comment",
+                title=f"New comment on: {issue_title}",
+                body=comment_preview,
+                entity_type="issue",
+                entity_id=str(issue_id),
+            ))
+    except Exception:
+        pass
+
+    return comment
 
 
 @router.delete("/{issue_id}/comments/{comment_id}")

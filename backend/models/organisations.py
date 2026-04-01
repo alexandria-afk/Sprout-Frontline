@@ -1,5 +1,6 @@
 from uuid import UUID
 from datetime import datetime
+from typing import Any, Optional
 from pydantic import BaseModel
 
 
@@ -11,11 +12,16 @@ class OrganisationResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    feature_flags: Optional[dict[str, Any]] = None
 
 
 class UpdateOrganisationRequest(BaseModel):
     name: str | None = None
     logo_url: str | None = None
+
+
+class UpdateFeatureFlagsRequest(BaseModel):
+    feature_flags: dict[str, Any]
 
 
 class LocationResponse(BaseModel):

@@ -14,7 +14,66 @@ async def create_announcement(
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     created_by = current_user["sub"]
-    return await AnnouncementService.create(body, org_id, created_by)
+    announcement = await AnnouncementService.create(body, org_id, created_by)
+
+    # Notify target users
+    try:
+        from services import notification_service as _ns
+        import asyncio as _asyncio
+        announcement_id = str(announcement.id)
+        ann_title = announcement.title
+        ann_body = (announcement.body or "")[:100] or None
+        target_roles = announcement.target_roles or []
+        target_locations = [str(lid) for lid in (announcement.target_location_ids or [])]
+
+        if target_roles:
+            for role in target_roles:
+                if target_locations:
+                    for loc_id in target_locations:
+                        _asyncio.create_task(_ns.notify_role(
+                            org_id=org_id,
+                            role=role,
+                            location_id=loc_id,
+                            type="announcement",
+                            title=ann_title,
+                            body=ann_body,
+                            entity_type="announcement",
+                            entity_id=announcement_id,
+                        ))
+                else:
+                    _asyncio.create_task(_ns.notify_role(
+                        org_id=org_id,
+                        role=role,
+                        type="announcement",
+                        title=ann_title,
+                        body=ann_body,
+                        entity_type="announcement",
+                        entity_id=announcement_id,
+                    ))
+        else:
+            # No role filter — notify everyone
+            _asyncio.create_task(_ns.notify_role(
+                org_id=org_id,
+                role="staff",
+                type="announcement",
+                title=ann_title,
+                body=ann_body,
+                entity_type="announcement",
+                entity_id=announcement_id,
+            ))
+            _asyncio.create_task(_ns.notify_role(
+                org_id=org_id,
+                role="manager",
+                type="announcement",
+                title=ann_title,
+                body=ann_body,
+                entity_type="announcement",
+                entity_id=announcement_id,
+            ))
+    except Exception:
+        pass
+
+    return announcement
 
 
 @router.get("/")

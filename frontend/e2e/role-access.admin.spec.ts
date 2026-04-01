@@ -25,7 +25,7 @@ test.describe("Role Access — Admin Privileges", () => {
     page,
   }) => {
     await page.goto("/dashboard/forms");
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await expect(
       page.getByRole("button", { name: /new template/i })
     ).toBeVisible({ timeout: 15_000 });

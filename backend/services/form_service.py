@@ -319,7 +319,36 @@ class FormService:
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        return response.data[0]
+        assignment = response.data[0]
+
+        # Notify the assigned user
+        if body.assigned_to_user_id:
+            try:
+                tmpl_resp = supabase.table("form_templates").select("title").eq("id", str(body.form_template_id)).maybe_single().execute()
+                tmpl_title = (tmpl_resp.data or {}).get("title", "Form")
+                loc_name = ""
+                if body.assigned_to_location_id:
+                    loc_resp = supabase.table("locations").select("name").eq("id", str(body.assigned_to_location_id)).maybe_single().execute()
+                    loc_name = (loc_resp.data or {}).get("name", "")
+                due_str = body.due_at.strftime("%b %-d") if body.due_at else ""
+                notif_body_parts = [p for p in [loc_name, f"Due {due_str}" if due_str else ""] if p]
+                notif_body = " \u00b7 ".join(notif_body_parts) or None
+                import asyncio as _asyncio
+                from services import notification_service as _ns
+                _asyncio.create_task(_ns.notify(
+                    org_id=str(org_id),
+                    recipient_user_id=str(body.assigned_to_user_id),
+                    type="form_assigned",
+                    title=f"New assignment: {tmpl_title}",
+                    body=notif_body,
+                    entity_type="form_assignment",
+                    entity_id=assignment["id"],
+                    send_push=True,
+                ))
+            except Exception:
+                pass
+
+        return assignment
 
     @staticmethod
     async def my_assignments(user_id: str, org_id: str) -> list:
@@ -716,12 +745,12 @@ class FormService:
                     .execute()
                 )
                 if tpl_resp.data:
-                    org_id = tpl_resp.data[0].get("organisation_id", "")
+                    _tpl_org_id = tpl_resp.data[0].get("organisation_id", "")
                     tpl_type = tpl_resp.data[0].get("type", "")
                     # Trigger for all submitted forms
                     await trigger_workflows_for_event(
                         event_type="form_submitted",
-                        org_id=org_id,
+                        org_id=_tpl_org_id,
                         source_id=submission_id,
                         triggered_by=user_id,
                         template_id=str(body.form_template_id),
@@ -730,7 +759,7 @@ class FormService:
                     if tpl_type == "audit":
                         await trigger_workflows_for_event(
                             event_type="audit_submitted",
-                            org_id=org_id,
+                            org_id=_tpl_org_id,
                             source_id=submission_id,
                             triggered_by=user_id,
                             template_id=str(body.form_template_id),
@@ -741,7 +770,42 @@ class FormService:
                     "Workflow trigger failed for submission %s: %s", submission_id, _wf_exc
                 )
 
-        return await FormService.get_submission(submission_id, user_id, org_id=org_id)
+        # Notify the assigning manager when a form is submitted for review
+        if body.status == "submitted":
+            try:
+                # Find the assignment to get assigned_by
+                assign_resp = supabase.table("form_assignments").select(
+                    "assigned_by, assigned_to_location_id, form_templates(title)"
+                ).eq("id", str(body.assignment_id)).maybe_single().execute()
+                assign_data = assign_resp.data or {}
+                assigned_by = assign_data.get("assigned_by")
+                tmpl_title = (assign_data.get("form_templates") or {}).get("title", "Form")
+                if assigned_by:
+                    submitter_resp = supabase.table("profiles").select("full_name").eq("id", str(user_id)).maybe_single().execute()
+                    submitter_name = (submitter_resp.data or {}).get("full_name", "Someone")
+                    loc_name = ""
+                    loc_id = assign_data.get("assigned_to_location_id")
+                    if loc_id:
+                        loc_resp2 = supabase.table("locations").select("name").eq("id", loc_id).maybe_single().execute()
+                        loc_name = (loc_resp2.data or {}).get("name", "")
+                    import asyncio as _asyncio
+                    from services import notification_service as _ns
+                    _notify_org_id = org_id or assign_data.get("organisation_id", "")
+                    _asyncio.create_task(_ns.notify(
+                        org_id=str(_notify_org_id),
+                        recipient_user_id=str(assigned_by),
+                        type="form_submission_review",
+                        title=f"Submission ready: {tmpl_title}",
+                        body=f"By {submitter_name}" + (f" at {loc_name}" if loc_name else ""),
+                        entity_type="form_submission",
+                        entity_id=submission_id,
+                    ))
+            except Exception:
+                pass
+
+        # Fetch the freshly-created submission by ID alone — no org filter needed here
+        # because the row was just inserted by this user in this request.
+        return await FormService.get_submission(submission_id, user_id)
 
     @staticmethod
     async def get_submission(submission_id: str, user_id: str, org_id: Optional[str] = None) -> dict:

@@ -651,3 +651,50 @@ export interface TimesheetSummaryRow {
   regular_hours: number; overtime_hours: number;
   late_count: number; absent_count: number; shift_count: number;
 }
+
+// ── Notifications ──────────────────────────────────────────────────────────────
+
+export type NotificationType =
+  | "task_assigned"
+  | "form_assigned"
+  | "workflow_stage_assigned"
+  | "issue_assigned"
+  | "issue_comment"
+  | "issue_status_changed"
+  | "shift_claim_pending"
+  | "shift_swap_pending"
+  | "leave_request_pending"
+  | "form_submission_review"
+  | "cap_generated"
+  | "announcement"
+  | "course_enrolled"
+  | "scheduled_reminder";
+
+export type NotificationEntityType =
+  | "task"
+  | "form_assignment"
+  | "workflow_instance"
+  | "issue"
+  | "shift_claim"
+  | "shift_swap"
+  | "leave_request"
+  | "form_submission"
+  | "cap"
+  | "announcement"
+  | "course_enrollment";
+
+export interface AppNotification {
+  id: string;
+  organisation_id: string;
+  recipient_user_id: string;
+  type: NotificationType;
+  title: string;
+  body: string | null;
+  entity_type: NotificationEntityType | null;
+  entity_id: string | null;
+  is_read: boolean;
+  read_at: string | null;
+  is_dismissed: boolean;
+  push_sent: boolean;
+  created_at: string;
+}

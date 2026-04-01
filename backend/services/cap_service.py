@@ -298,6 +298,33 @@ class CAPService:
         else:
             cap["items"] = []
 
+        # Notify managers at the location that a CAP needs review
+        try:
+            tmpl_resp = db.table("form_templates").select("title").eq("id", form_template_id).maybe_single().execute()
+            tmpl_title = (tmpl_resp.data or {}).get("title", "Audit")
+            # Get the submission score if available
+            sub_resp = db.table("form_submissions").select("score_percentage").eq("id", submission_id).maybe_single().execute()
+            score = (sub_resp.data or {}).get("score_percentage")
+            loc_resp = db.table("locations").select("name").eq("id", location_id).maybe_single().execute()
+            loc_name = (loc_resp.data or {}).get("name", "")
+            score_str = f"Score: {round(score)}%" if score is not None else ""
+            notif_body_parts = [p for p in [score_str, f"at {loc_name}" if loc_name else ""] if p]
+            notif_body = " ".join(notif_body_parts) or None
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            _asyncio.create_task(_ns.notify_role(
+                org_id=org_id,
+                role="manager",
+                location_id=location_id,
+                type="cap_generated",
+                title=f"Failed audit: {tmpl_title} \u2014 CAP needs review",
+                body=notif_body,
+                entity_type="cap",
+                entity_id=cap_id,
+            ))
+        except Exception:
+            pass
+
         return cap
 
     # ── List / Get ────────────────────────────────────────────────────────────

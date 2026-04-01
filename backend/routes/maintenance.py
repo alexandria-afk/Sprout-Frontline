@@ -2,12 +2,10 @@
 Maintenance API — /api/v1/maintenance
 Maintenance ticket CRUD.
 """
-import os
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -41,42 +39,6 @@ class AssignTicketRequest(BaseModel):
 
 class UpdateTicketCostRequest(BaseModel):
     cost: float
-
-
-async def _send_fcm_notification(
-    tokens: list,
-    title: str,
-    body: str,
-    data: Optional[dict] = None,
-):
-    """Call the Supabase Edge Function to send FCM push notifications."""
-    supabase_url = os.environ.get("SUPABASE_URL", "")
-    if not supabase_url:
-        return
-
-    edge_url = supabase_url.replace("/rest/v1", "").rstrip("/")
-    edge_url = f"{edge_url}/functions/v1/send-fcm-notification"
-
-    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-
-    payload = {
-        "tokens": tokens,
-        "notification": {"title": title, "body": body},
-        "data": data or {},
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                edge_url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {service_role_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-    except Exception:
-        pass
 
 
 # ── Tickets ────────────────────────────────────────────────────────────────────
@@ -250,26 +212,6 @@ async def update_ticket_status(
     )
     if not resp.data:
         raise HTTPException(status_code=404, detail="Ticket not found")
-
-    # Send FCM to assignee if exists
-    assigned_to = ticket.get("assigned_to")
-    if assigned_to:
-        try:
-            profile_resp = (
-                db.table("profiles")
-                .select("fcm_token")
-                .eq("id", assigned_to)
-                .execute()
-            )
-            if profile_resp.data and profile_resp.data[0].get("fcm_token"):
-                await _send_fcm_notification(
-                    tokens=[profile_resp.data[0]["fcm_token"]],
-                    title="Maintenance ticket updated",
-                    body=f"Status changed from {previous_status} to {body.status}",
-                    data={"ticket_id": str(ticket_id)},
-                )
-        except Exception:
-            pass
 
     return resp.data[0]
 

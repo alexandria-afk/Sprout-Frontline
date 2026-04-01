@@ -11,6 +11,7 @@ from models.shifts import (
     CreateShiftTemplateRequest,
     UpdateShiftTemplateRequest,
     BulkGenerateShiftsRequest,
+    BulkAssignRequest,
     CreateShiftRequest,
     UpdateShiftRequest,
     PublishShiftsRequest,
@@ -130,6 +131,16 @@ async def create_shift(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     return await ShiftService.create_shift(body, org_id, user_id)
+
+
+@router.put("/assign-bulk")
+async def assign_bulk(
+    body: BulkAssignRequest,
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Bulk-assign staff to draft shifts (or mark as open shifts)."""
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    return await ShiftService.assign_bulk(body.assignments, org_id)
 
 
 @router.post("/publish")

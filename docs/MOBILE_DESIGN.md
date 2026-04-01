@@ -179,7 +179,7 @@ Opens from the "More" tab. Contains:
 |---|---|---|
 | `/dashboard` | Home | Metric cards, inbox, shift section, profile avatar |
 | `/tasks` | My Tasks | Filter pills (Pending/In Progress/Completed), task cards with priority bars |
-| `/issues` | My Issues | Filter pills (Open/In Progress/Pending Vendor/Resolved/Closed), issue cards, green FAB for report |
+| `/issues` | My Issues | Filter pills (Open/In Progress/Pending Vendor/Resolved/Verified Closed), issue cards, green FAB for report |
 | `/shifts` | My Shifts | Two tabs (My Shifts / Open Shifts), clock in/out buttons on today's shifts |
 | `/forms` | Forms & Checklists | Filter pills (To Do/Completed/All), overdue flagging |
 | `/training` | My Training | Filter pills (In Progress/Assigned/All), enrollment status pills |

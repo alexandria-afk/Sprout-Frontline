@@ -25,24 +25,24 @@ test.describe("Forms & Submissions (Admin)", () => {
   test("Templates tab is accessible and shows list or empty state", async ({
     page,
   }) => {
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await expect(page).toHaveURL(/forms/);
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
     });
     // Templates tab content renders
-    await expect(page.getByRole("button", { name: "Templates" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Templates", exact: true })).toBeVisible();
   });
 
   test("New Template button is visible on Templates tab", async ({ page }) => {
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await expect(
       page.getByRole("button", { name: /new template/i })
     ).toBeVisible({ timeout: 15_000 });
   });
 
   test("Submissions tab is accessible", async ({ page }) => {
-    await page.getByRole("button", { name: "Submissions" }).click();
+    await page.getByRole("button", { name: "Submissions", exact: true }).click();
     await expect(page).toHaveURL(/forms/);
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
@@ -50,7 +50,7 @@ test.describe("Forms & Submissions (Admin)", () => {
   });
 
   test("Audit CAP tab is accessible", async ({ page }) => {
-    await page.getByRole("button", { name: /audit.*cap|cap/i }).click();
+    await page.getByRole("button", { name: "Audit CAP", exact: true }).click();
     await expect(page).toHaveURL(/forms/);
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
@@ -74,7 +74,7 @@ test.describe("Forms & Submissions (Admin)", () => {
   test("search or filter control is visible on Templates tab", async ({
     page,
   }) => {
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
     });
@@ -86,7 +86,7 @@ test.describe("Forms & Submissions (Admin)", () => {
   });
 
   test("New Template button opens a modal with creation options", async ({ page }) => {
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await page.getByRole("button", { name: /new template/i }).click();
     // Modal shows creation options (no role="dialog" — check for distinctive content)
     await expect(

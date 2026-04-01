@@ -171,13 +171,13 @@ class ShiftService:
             current += timedelta(days=1)
 
         if not rows:
-            return {"shifts_created": 0}
+            return {"shifts_created": 0, "shifts": []}
 
         try:
             resp = db.table("shifts").insert(rows).execute()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to create shifts: {e}")
-        return {"shifts_created": len(resp.data or [])}
+        return {"shifts_created": len(resp.data or []), "shifts": resp.data or []}
 
     # ── Shifts ─────────────────────────────────────────────────────────────────
 
@@ -304,16 +304,71 @@ class ShiftService:
     @staticmethod
     async def publish_shifts(shift_ids: list[str], org_id: str) -> dict:
         db = get_supabase()
-        resp = (
+        # Fetch shifts to validate and split into open vs assigned
+        shifts_resp = (
             db.table("shifts")
-            .update({"status": "published", "updated_at": _now()})
+            .select("id,assigned_to_user_id,is_open_shift")
             .in_("id", shift_ids)
             .eq("organisation_id", org_id)
-            .eq("status", "draft")
             .eq("is_deleted", False)
             .execute()
         )
-        return {"published": len(resp.data or [])}
+        shifts = shifts_resp.data or []
+        # Reject shifts that have neither an assignee nor the open-shift flag
+        unassigned = [
+            s["id"] for s in shifts
+            if not s.get("assigned_to_user_id") and not s.get("is_open_shift")
+        ]
+        if unassigned:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{len(unassigned)} shift(s) have no assigned staff and are not "
+                    "marked as open shifts. Please assign staff or mark as open shifts "
+                    "before publishing."
+                ),
+            )
+        open_ids = [s["id"] for s in shifts if s.get("is_open_shift")]
+        assigned_ids = [s["id"] for s in shifts if not s.get("is_open_shift")]
+        published = 0
+        if assigned_ids:
+            r = (
+                db.table("shifts")
+                .update({"status": "published", "updated_at": _now()})
+                .in_("id", assigned_ids)
+                .eq("organisation_id", org_id)
+                .eq("is_deleted", False)
+                .execute()
+            )
+            published += len(r.data or [])
+        if open_ids:
+            r = (
+                db.table("shifts")
+                .update({"status": "open", "updated_at": _now()})
+                .in_("id", open_ids)
+                .eq("organisation_id", org_id)
+                .eq("is_deleted", False)
+                .execute()
+            )
+            published += len(r.data or [])
+        return {"published": published}
+
+    @staticmethod
+    async def assign_bulk(assignments: list, org_id: str) -> dict:
+        """Bulk-assign staff to draft shifts (or mark as open shifts)."""
+        db = get_supabase()
+        updated = 0
+        for a in assignments:
+            updates: dict = {"updated_at": _now()}
+            if a.is_open_shift:
+                updates["is_open_shift"] = True
+                updates["assigned_to_user_id"] = None
+            else:
+                updates["is_open_shift"] = False
+                updates["assigned_to_user_id"] = a.user_id or None
+            db.table("shifts").update(updates).eq("id", a.shift_id).eq("organisation_id", org_id).execute()
+            updated += 1
+        return {"updated": updated}
 
     @staticmethod
     async def publish_bulk(
@@ -394,7 +449,45 @@ class ShiftService:
 
         if not resp.data:
             raise HTTPException(status_code=500, detail="Failed to claim shift")
-        return resp.data[0]
+        claim = resp.data[0]
+
+        # Notify managers at the shift's location
+        try:
+            # Fetch the shift's location_id and start_at, plus claimant's name
+            shift_info = (
+                db.table("shifts")
+                .select("location_id, start_at")
+                .eq("id", shift_id)
+                .maybe_single()
+                .execute()
+            )
+            claimant_info = (
+                db.table("profiles")
+                .select("full_name")
+                .eq("id", user_id)
+                .maybe_single()
+                .execute()
+            )
+            loc_id = (shift_info.data or {}).get("location_id")
+            start_at = (shift_info.data or {}).get("start_at", "")
+            claimant_name = (claimant_info.data or {}).get("full_name", "A team member")
+            shift_date = start_at[:10] if start_at else ""
+            shift_time = start_at[11:16] if len(start_at) > 16 else ""
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            _asyncio.create_task(_ns.notify_role(
+                org_id=org_id,
+                role="manager",
+                location_id=loc_id,
+                type="shift_claim_pending",
+                title=f"Shift claim: {claimant_name} wants {shift_date} {shift_time}".strip(),
+                entity_type="shift_claim",
+                entity_id=claim["id"],
+            ))
+        except Exception:
+            pass
+
+        return claim
 
     @staticmethod
     async def list_claims(org_id: str, shift_id: Optional[str] = None, status: Optional[str] = None) -> list[dict]:
@@ -509,7 +602,33 @@ class ShiftService:
         resp = db.table("shift_swap_requests").insert(data).execute()
         if not resp.data:
             raise HTTPException(status_code=500, detail="Failed to create swap request")
-        return resp.data[0]
+        swap = resp.data[0]
+
+        # Notify the target colleague if specified
+        try:
+            if body.target_user_id:
+                requester_info = (
+                    db.table("profiles")
+                    .select("full_name")
+                    .eq("id", user_id)
+                    .maybe_single()
+                    .execute()
+                )
+                requester_name = (requester_info.data or {}).get("full_name", "A teammate")
+                import asyncio as _asyncio
+                from services import notification_service as _ns
+                _asyncio.create_task(_ns.notify(
+                    org_id=org_id,
+                    recipient_user_id=body.target_user_id,
+                    type="shift_swap_pending",
+                    title=f"Shift swap request from {requester_name}",
+                    entity_type="shift_swap",
+                    entity_id=swap["id"],
+                ))
+        except Exception:
+            pass
+
+        return swap
 
     @staticmethod
     async def respond_to_swap(swap_id: str, action: str, user_id: str, org_id: str, reason: Optional[str] = None) -> dict:
@@ -539,6 +658,27 @@ class ShiftService:
                     "colleague_response_at": now,
                     "updated_at": now,
                 }).eq("id", swap_id).execute()
+
+                # When colleague approves, notify managers for final approval
+                try:
+                    req_info = db.table("profiles").select("full_name").eq("id", swap["requested_by"]).maybe_single().execute()
+                    col_info = db.table("profiles").select("full_name, location_id").eq("id", user_id).maybe_single().execute()
+                    req_name = (req_info.data or {}).get("full_name", "Staff")
+                    col_name = (col_info.data or {}).get("full_name", "colleague")
+                    loc_id = (col_info.data or {}).get("location_id")
+                    import asyncio as _asyncio
+                    from services import notification_service as _ns
+                    _asyncio.create_task(_ns.notify_role(
+                        org_id=org_id,
+                        role="manager",
+                        location_id=loc_id,
+                        type="shift_swap_pending",
+                        title=f"Shift swap needs approval: {req_name} \u2194 {col_name}",
+                        entity_type="shift_swap",
+                        entity_id=swap_id,
+                    ))
+                except Exception:
+                    pass
             else:
                 db.table("shift_swap_requests").update({
                     "status": "rejected",
@@ -621,7 +761,35 @@ class ShiftService:
         resp = db.table("leave_requests").insert(data).execute()
         if not resp.data:
             raise HTTPException(status_code=500, detail="Failed to create leave request")
-        return resp.data[0]
+        leave = resp.data[0]
+
+        # Notify the user's manager
+        try:
+            user_info = (
+                db.table("profiles")
+                .select("full_name")
+                .eq("id", user_id)
+                .maybe_single()
+                .execute()
+            )
+            user_name = (user_info.data or {}).get("full_name", "A team member")
+            start_str = body.start_date.isoformat()
+            end_str = body.end_date.isoformat()
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            _asyncio.create_task(_ns.notify_user_manager(
+                org_id=org_id,
+                user_id=user_id,
+                type="leave_request_pending",
+                title=f"Leave request: {user_name} \u2014 {body.leave_type}",
+                body=f"{start_str} to {end_str}",
+                entity_type="leave_request",
+                entity_id=leave["id"],
+            ))
+        except Exception:
+            pass
+
+        return leave
 
     @staticmethod
     async def list_leave_requests(
@@ -1143,18 +1311,30 @@ class ShiftService:
         )
         staff_list = staff_resp.data or []
 
-        # Gather their availability
-        staff_ids = [s["id"] for s in staff_list]
-        avail_resp = (
-            db.table("staff_availability")
-            .select("user_id,day_of_week,available_from,available_to,is_available")
-            .in_("user_id", staff_ids)
-            .eq("is_available", True)
+        # Check if staff availability tracking is enabled for this org
+        org_resp = (
+            db.table("organisations")
+            .select("feature_flags")
+            .eq("id", org_id)
+            .maybe_single()
             .execute()
-        ) if staff_ids else type("R", (), {"data": []})()
+        )
+        org_flags = ((org_resp.data if org_resp else None) or {}).get("feature_flags") or {}
+        availability_enabled = org_flags.get("staff_availability_enabled", False)
+
+        # Gather their availability (only when tracking is enabled)
+        staff_ids = [s["id"] for s in staff_list]
         availability_by_user: dict[str, list] = {}
-        for a in (avail_resp.data or []):
-            availability_by_user.setdefault(a["user_id"], []).append(a)
+        if availability_enabled and staff_ids:
+            avail_resp = (
+                db.table("staff_availability")
+                .select("user_id,day_of_week,available_from,available_to,is_available")
+                .in_("user_id", staff_ids)
+                .eq("is_available", True)
+                .execute()
+            )
+            for a in (avail_resp.data or []):
+                availability_by_user.setdefault(a["user_id"], []).append(a)
 
         # Existing shifts for the week
         existing_resp = (
@@ -1192,13 +1372,21 @@ class ShiftService:
 
         existing_context = json.dumps(existing_shifts, indent=2, default=str)
 
+        avail_note = (
+            "Respect each staff member's stated availability windows. "
+            "Aim for 8-hour shifts unless availability is restricted."
+            if availability_enabled
+            else
+            "Assume all staff are available at any time. Aim for 8-hour shifts."
+        )
         system_prompt = (
-            "You are an expert retail staff scheduler. Given staff, their availability, "
-            "and existing shifts, generate a fair weekly schedule. "
+            "You are an expert retail staff scheduler. Given staff"
+            + (" and their availability," if availability_enabled else ",")
+            + " and existing shifts, generate a fair weekly schedule. "
             "Return ONLY a valid JSON array of shift objects — no markdown, no extra text. "
             "Each object must have: user_id (string), role (string), start_at (ISO 8601 UTC), end_at (ISO 8601 UTC). "
             "Do not create duplicate shifts for times where staff already have shifts. "
-            "Aim for 8-hour shifts unless availability is restricted. "
+            f"{avail_note} "
             "Distribute shifts fairly across the week."
         )
 
@@ -1289,9 +1477,10 @@ class ShiftService:
             .maybe_single()
             .execute()
         )
-        if not rec.data:
+        rec_data = rec.data if rec else None
+        if not rec_data:
             raise HTTPException(status_code=404, detail="Attendance record not found")
-        if rec.data.get("clock_out_at"):
+        if rec_data.get("clock_out_at"):
             raise HTTPException(status_code=400, detail="Shift already clocked out")
 
         # Check no open break exists
@@ -1303,7 +1492,8 @@ class ShiftService:
             .maybe_single()
             .execute()
         )
-        if open_break.data:
+        open_break_data = open_break.data if open_break else None
+        if open_break_data:
             raise HTTPException(status_code=400, detail="A break is already in progress")
 
         now = _now()
@@ -1334,10 +1524,9 @@ class ShiftService:
             .maybe_single()
             .execute()
         )
-        if not open_break.data:
+        br = (open_break.data if open_break else None)
+        if not br:
             raise HTTPException(status_code=404, detail="No active break found")
-
-        br = open_break.data
         now_dt = datetime.now(timezone.utc)
         start_dt = datetime.fromisoformat(br["break_start_at"].replace("Z", "+00:00"))
         duration = max(0, int((now_dt - start_dt).total_seconds() / 60))
@@ -1383,7 +1572,8 @@ class ShiftService:
             .maybe_single()
             .execute()
         )
-        if not rec.data:
+        rec_data = rec.data if rec else None
+        if not rec_data:
             raise HTTPException(status_code=404, detail="Attendance record not found")
 
         # Check for active break
@@ -1395,6 +1585,7 @@ class ShiftService:
             .maybe_single()
             .execute()
         )
+        open_break_data = open_break.data if open_break else None
 
         all_breaks = (
             db.table("break_records")
@@ -1405,8 +1596,8 @@ class ShiftService:
         )
 
         return {
-            "on_break": bool(open_break.data),
-            "active_break": open_break.data,
+            "on_break": bool(open_break_data),
+            "active_break": open_break_data,
             "breaks": all_breaks.data or [],
-            "total_break_minutes": rec.data.get("break_minutes") or 0,
+            "total_break_minutes": rec_data.get("break_minutes") or 0,
         }

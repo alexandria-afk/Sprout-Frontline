@@ -111,31 +111,48 @@ const REPORT_GROUPS: {
 ];
 
 // ─── AI Insights panel ────────────────────────────────────────────────────────
-interface AiInsight { id:string; title:string; body:string; recommendation?:string; severity:"info"|"warning"|"critical" }
+interface AiInsight { title:string; body:string; recommendation?:string; severity:"info"|"warning"|"critical" }
 const SEV: Record<string,{badge:string;bar:string;label:string}> = {
   critical:{ badge:"bg-red-50 text-red-600 border border-red-100",   bar:"bg-red-400",   label:"🔴 CRITICAL" },
   warning: { badge:"bg-amber-50 text-amber-600 border border-amber-100", bar:"bg-amber-400", label:"⚠️ WARNING" },
   info:    { badge:"bg-blue-50 text-blue-600 border border-blue-100",  bar:"bg-blue-400",  label:"ℹ️ INFO" },
 };
-function InsightsPanel() {
-  const [insights, setInsights] = useState<AiInsight[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [dismissed, setDismissed]   = useState<Set<string>>(new Set());
 
-  const load = useCallback(async () => {
+const SEV_FILTERS = ["all", "critical", "warning", "info"] as const;
+type SevFilter = typeof SEV_FILTERS[number];
+
+function InsightsPanel() {
+  const [brief, setBrief]           = useState<string>("");
+  const [insights, setInsights]     = useState<AiInsight[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [dismissed, setDismissed]   = useState<Set<number>>(new Set());
+  const [sevFilter, setSevFilter]   = useState<SevFilter>("all");
+  const [cachedAt, setCachedAt]     = useState("");
+
+  const load = useCallback(async (refresh = false) => {
+    if (refresh) setRefreshing(true); else setLoading(true);
     try {
-      const d = await apiFetch<AiInsight[]>("/api/v1/insights?page_size=5");
-      setInsights(Array.isArray(d) && d.length ? d : MOCK_INSIGHTS);
-    } catch { setInsights(MOCK_INSIGHTS); } finally { setLoading(false); }
+      const d = await apiFetch<{ brief:string; insights:AiInsight[]; cached_at:string }>(`/api/v1/ai/dashboard-insights${refresh ? "?refresh=true" : ""}`);
+      setBrief(d.brief || "");
+      setInsights(Array.isArray(d.insights) ? d.insights : []);
+      if (d.cached_at) {
+        try { setCachedAt(new Date(d.cached_at).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })); } catch {}
+      }
+    } catch {
+      // fallback: keep mock insights for demo
+      setInsights(MOCK_INSIGHTS);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, []);
+
   useEffect(() => { load(); }, [load]);
 
-  async function handleRefresh() {
-    setRefreshing(true);
-    try { await apiFetch("/api/v1/insights/refresh",{method:"POST"}); await load(); } catch {} finally { setRefreshing(false); }
-  }
-  const visible = insights.filter(i => !dismissed.has(i.id));
+  const visible = insights.filter((ins, i) =>
+    !dismissed.has(i) && (sevFilter === "all" || ins.severity === sevFilter)
+  );
 
   return (
     <div className="rounded-2xl border-2 border-transparent overflow-hidden" style={{ background: 'linear-gradient(white, white) padding-box, linear-gradient(135deg, #9333EA 0%, #6366F1 100%) border-box' }}>
@@ -149,32 +166,56 @@ function InsightsPanel() {
             <p className="text-xs text-dark-secondary mt-0.5">Pattern analysis across your operations data</p>
           </div>
         </div>
-        <button onClick={handleRefresh} disabled={refreshing}
+        <button onClick={() => load(true)} disabled={refreshing}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-surface-border text-xs font-medium text-dark-secondary hover:bg-gray-50 disabled:opacity-50 transition-colors">
           <RefreshCw className={clsx("w-3.5 h-3.5", refreshing && "animate-spin")} /> Refresh
         </button>
       </div>
+
+      {/* Brief text */}
+      {!loading && brief && (
+        <div className="px-5 py-3 border-b border-surface-border">
+          <p className="text-sm text-dark/70 leading-relaxed">{brief}</p>
+          {cachedAt && <p className="text-[10px] text-dark/25 mt-1">Generated at {cachedAt} · refreshes tomorrow</p>}
+        </div>
+      )}
+
+      {/* Severity filter */}
+      {!loading && insights.length > 0 && (
+        <div className="px-5 py-2 border-b border-surface-border flex items-center gap-1.5">
+          {SEV_FILTERS.map(f => (
+            <button key={f} onClick={() => setSevFilter(f)}
+              className={clsx("px-2.5 py-1 rounded-full text-[11px] font-medium transition-colors",
+                sevFilter === f ? "bg-sprout-purple text-white" : "bg-gray-100 text-dark-secondary hover:bg-gray-200"
+              )}>
+              {f === "all" ? "All" : f.charAt(0).toUpperCase() + f.slice(1)}
+            </button>
+          ))}
+        </div>
+      )}
+
       {loading ? (
         <div className="flex flex-col gap-2 p-4">{[1,2,3].map(i => <div key={i} className="h-14 bg-gray-100 rounded-xl animate-pulse" />)}</div>
       ) : visible.length === 0 ? (
         <div className="px-5 py-8 text-center text-dark/40">
           <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-30" />
-          <p className="text-sm">No insights for this period</p>
+          <p className="text-sm">{insights.length === 0 ? "No insights for this period" : "No insights match the selected filter"}</p>
         </div>
       ) : (
         <div className="divide-y divide-surface-border">
-          {visible.map(ins => {
+          {visible.map((ins, i) => {
             const s = SEV[ins.severity] ?? SEV.info;
+            const originalIdx = insights.indexOf(ins);
             return (
-              <div key={ins.id} className="px-5 py-4 flex gap-3 items-start">
+              <div key={i} className="px-5 py-4 flex gap-3 items-start">
                 <div className={clsx("w-1 self-stretch rounded-full shrink-0 mt-0.5", s.bar)} />
                 <div className="flex-1 min-w-0">
                   <span className={clsx("text-[10px] font-bold px-1.5 py-0.5 rounded-full", s.badge)}>{s.label}</span>
                   <p className="text-sm font-semibold text-dark mt-1.5 leading-snug">{ins.title}</p>
                   <p className="text-xs text-dark-secondary mt-1 leading-relaxed">{ins.body}</p>
-                  {ins.recommendation && <p className="text-xs text-sprout-purple mt-1.5 font-medium">→ {ins.recommendation}</p>}
+                  {ins.recommendation && <p className="text-xs text-sprout-purple mt-1.5 font-medium">{ins.recommendation}</p>}
                 </div>
-                <button onClick={() => setDismissed(p => new Set(Array.from(p).concat(ins.id)))} className="p-1 text-dark/25 hover:text-dark/50">
+                <button onClick={() => setDismissed(p => new Set(Array.from(p).concat(originalIdx)))} className="p-1 text-dark/25 hover:text-dark/50">
                   <X className="w-3.5 h-3.5" />
                 </button>
               </div>

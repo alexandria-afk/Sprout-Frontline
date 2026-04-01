@@ -16,6 +16,7 @@ from routes import notifications, issue_categories, vendors, issues, issue_dashb
 from routes import assets, repair_guides, safety
 from routes import incidents
 from routes import ai_generate
+from routes import ai_insights
 from routes import gamification
 from routes import lms
 from routes import audit_trail
@@ -58,8 +59,20 @@ def _reset_stuck_provisioning_sessions():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     _reset_stuck_provisioning_sessions()
-    yield
+    # Start scheduled reminder background task
+    from services.reminder_service import run_reminder_loop
+    reminder_task = asyncio.create_task(run_reminder_loop())
+    logger.info("Scheduled reminder loop started.")
+    try:
+        yield
+    finally:
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
 
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_limit_per_minute}/minute"])
@@ -110,6 +123,7 @@ app.include_router(repair_guides.router,     prefix="/api/v1/repair-guides",    
 app.include_router(safety.router,            prefix="/api/v1/safety",              tags=["safety"])
 app.include_router(incidents.router,         prefix="/api/v1/incidents",           tags=["incidents"])
 app.include_router(ai_generate.router,       prefix="/api/v1/ai",                  tags=["ai"])
+app.include_router(ai_insights.router,       prefix="/api/v1/ai",                  tags=["ai-insights"])
 app.include_router(gamification.router,      prefix="/api/v1/gamification",        tags=["gamification"])
 app.include_router(lms.router,               prefix="/api/v1/lms",                 tags=["lms"])
 app.include_router(audit_trail.router,       prefix="/api/v1/settings",            tags=["Audit Trail"])

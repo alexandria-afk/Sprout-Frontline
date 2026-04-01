@@ -2,6 +2,7 @@ from fastapi import HTTPException
 from models.organisations import (
     OrganisationResponse,
     UpdateOrganisationRequest,
+    UpdateFeatureFlagsRequest,
     LocationResponse,
     CreateLocationRequest,
     UpdateLocationRequest,
@@ -45,6 +46,24 @@ class OrgService:
             response = (
                 supabase.table("organisations")
                 .update(updates)
+                .eq("id", str(org_id))
+                .execute()
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Organisation not found")
+
+        return OrganisationResponse(**response.data[0])
+
+    @staticmethod
+    async def update_feature_flags(org_id: str, feature_flags: dict) -> OrganisationResponse:
+        supabase = get_supabase()
+        try:
+            response = (
+                supabase.table("organisations")
+                .update({"feature_flags": feature_flags})
                 .eq("id", str(org_id))
                 .execute()
             )

@@ -1,6 +1,6 @@
 # Architecture Reference
 **Frontline Operations Platform**
-_Last updated: 2026-03-31 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature, maintenance refactor (maintenance_tickets removed)_
+_Last updated: 2026-04-01 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature, maintenance refactor (maintenance_tickets removed), break_records table, attendance worked_minutes, feature flags, pending_vendor issue status, org feature-flags API, Feature Settings admin page, notifications table + service + reminder loop, mobile expanded to 14 modules, verified\_closed issue status_
 
 ---
 
@@ -85,7 +85,7 @@ RETAIL APP RENEGADE/
 │       └── ios/               iOS native project
 ├── supabase/                  Supabase local dev configuration and migrations
 │   ├── config.toml            Local Supabase project settings
-│   ├── migrations/            51 sequential SQL migration files
+│   ├── migrations/            61 sequential SQL migration files
 │   ├── seed.sql               Base seed data
 │   └── seed_test_org.sql      Test organisation seed data
 ├── scripts/                   Utility scripts (seed, data migration)
@@ -99,7 +99,7 @@ RETAIL APP RENEGADE/
 ## Database
 
 **Engine:** PostgreSQL 17 via Supabase (local port 54322; API port 54321).
-**Migration count:** 52 SQL files in `supabase/migrations/`, ordered by timestamp prefix.
+**Migration count:** 61 SQL files in `supabase/migrations/`, ordered by timestamp prefix.
 **Soft deletes:** `is_deleted BOOLEAN DEFAULT false` column on most entities instead of hard deletion.
 **Multi-tenancy:** Every tenant table has `organisation_id UUID REFERENCES organisations(id)`.
 **RLS:** Enabled on 40+ tables; service role key bypasses RLS for backend writes; authenticated users are scoped to their organisation via `auth.uid() → profiles.organisation_id`.
@@ -110,7 +110,7 @@ RETAIL APP RENEGADE/
 
 | Table | Key Columns | Notes |
 |---|---|---|
-| `organisations` | `id`, `name TEXT UNIQUE`, `logo_url`, `settings JSONB`, `is_active`, `is_deleted` | Root tenant table |
+| `organisations` | `id`, `name TEXT UNIQUE`, `logo_url`, `settings JSONB`, `feature_flags JSONB DEFAULT '{}'`, `is_active`, `is_deleted` | Root tenant table; `feature_flags` holds per-org boolean capability toggles (e.g. `staff_availability_enabled`) |
 | `locations` | `id`, `organisation_id`, `name`, `address`, `latitude NUMERIC`, `longitude NUMERIC`, `geo_fence_radius_meters INT`, `is_active`, `is_deleted` | Branches/outlets |
 | `profiles` | `id` (FK → auth.users), `organisation_id`, `location_id`, `full_name`, `phone_number`, `role ENUM(super_admin\|admin\|manager\|staff)`, `position TEXT`, `reports_to UUID`, `language`, `fcm_token`, `is_active`, `is_deleted` | Extends Supabase auth |
 
@@ -236,7 +236,8 @@ The `maintenance_tickets` table has been removed. Maintenance is now modelled as
 | `staff_availability` | `id`, `user_id`, `day_of_week INT(0–6)`, `available_from TIME`, `available_to TIME`, `is_available BOOLEAN`, `effective_from DATE`, `effective_to DATE` | UNIQUE(user_id, day_of_week) |
 | `leave_requests` | `id`, `user_id`, `organisation_id`, `leave_type ENUM(annual\|sick\|emergency\|unpaid\|other)`, `start_date DATE`, `end_date DATE`, `reason TEXT`, `status ENUM(pending\|approved\|rejected)`, `approved_by` | |
 | `attendance_rules` | `id`, `organisation_id UNIQUE`, `late_threshold_mins INT`, `early_departure_threshold_mins INT`, `overtime_threshold_hours NUMERIC`, `weekly_overtime_threshold_hours NUMERIC`, `break_duration_mins INT` | 1 row per org |
-| `attendance_records` | `id`, `user_id`, `shift_id`, `organisation_id`, `location_id`, `clock_in_at TIMESTAMPTZ`, `clock_out_at`, `clock_in_method ENUM(gps\|selfie\|facial_recognition\|qr_code\|manager_override)`, `clock_in_latitude NUMERIC`, `clock_in_longitude NUMERIC`, `clock_in_geo_valid BOOLEAN`, `total_minutes INT`, `overtime_minutes INT`, `break_minutes INT`, `status ENUM(present\|late\|early_departure\|absent\|unverified)`, `manager_override_note` | |
+| `attendance_records` | `id`, `user_id`, `shift_id`, `organisation_id`, `location_id`, `clock_in_at TIMESTAMPTZ`, `clock_out_at`, `clock_in_method ENUM(gps\|selfie\|facial_recognition\|qr_code\|manager_override)`, `clock_in_latitude NUMERIC`, `clock_in_longitude NUMERIC`, `clock_in_geo_valid BOOLEAN`, `total_minutes INT`, `overtime_minutes INT`, `break_minutes INT DEFAULT 0`, `worked_minutes INT GENERATED ALWAYS AS (GREATEST(0, total_minutes - break_minutes)) STORED`, `status ENUM(present\|late\|early_departure\|absent\|unverified)`, `manager_override_note` | `worked_minutes` is a computed column; never insert/update directly |
+| `break_records` | `id`, `attendance_id` (FK → attendance_records), `organisation_id`, `user_id`, `break_start_at TIMESTAMPTZ`, `break_end_at TIMESTAMPTZ`, `duration_minutes INT`, `break_type TEXT CHECK(meal\|rest\|other)`, `created_at` | Tracks individual break periods; `duration_minutes` filled on end-break; `break_minutes` on `attendance_records` is updated to the sum of all completed breaks |
 | `face_profiles` | `id`, `user_id UNIQUE`, `enrolled BOOLEAN`, `enrolled_at` | Schema exists; no backend logic populates it |
 | `ai_schedule_jobs` | `id`, `organisation_id`, `week_start DATE`, `shifts_created INT`, `warnings TEXT[]`, `status ENUM(pending\|running\|completed\|failed)` | |
 
@@ -320,11 +321,15 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/my` | Current user's organisation details including `feature_flags` (any authenticated user); **must be defined before `/{org_id}` to prevent path-param capture** |
 | `GET` | `/{org_id}` | Organisation details |
 | `PUT` | `/{org_id}` | Update organisation |
+| `PATCH` | `/{org_id}/feature-flags` | Update feature flags JSONB for org (admin only); body: `{ feature_flags: { key: bool, ... } }` |
 | `GET` | `/{org_id}/locations` | List locations |
 | `POST` | `/{org_id}/locations` | Create location |
 | `PUT` | `/{org_id}/locations/{loc_id}` | Update location |
+| `PATCH` | `/{org_id}/locations/{loc_id}` | Partial update location |
+| `DELETE` | `/{org_id}/locations/{loc_id}` | Delete location |
 
 ### Forms — `/api/v1/forms`
 
@@ -470,8 +475,19 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/` | List notifications for current user; filters: `unread_only`, `type`, pagination |
+| `GET` | `/unread-count` | Returns `{ count: N }` for the current user |
+| `POST` | `/{id}/read` | Mark a single notification as read |
+| `POST` | `/read-all` | Mark all of current user's notifications as read |
+| `POST` | `/{id}/dismiss` | Dismiss (soft-delete) a notification |
 | `PUT` | `/fcm-token` | Register or update user's FCM device token |
 | `GET` | `/log` | FCM notification send log (admin) |
+
+**Notification table:** `notifications` — columns: `id`, `organisation_id`, `recipient_user_id`, `type` (14-value CHECK enum — see ALLOWED_VALUES.md), `title`, `body`, `entity_type`, `entity_id`, `is_read`, `is_dismissed`, `created_at`.
+
+**Notification service:** `backend/services/notification_service.py` — `notify(user_id, ...)`, `notify_role(org_id, role, ...)`, `notify_user_manager(user_id, ...)`. Writes to `notifications` table and fires FCM push via `firebase-admin` SDK when a device token is registered.
+
+**Reminder service:** `backend/services/reminder_service.py` — background loop (`run_reminder_loop()`) started in `main.py` lifespan. Runs every 5 minutes; sends `scheduled_reminder` notifications for: forms due in 1 h, training deadlines in 1 day, shifts starting in 30 min.
 
 ### Issue Categories — `/api/v1/issues/categories`
 
@@ -655,6 +671,17 @@ The `GET /api/v1/reports/maintenance-issues` endpoint aggregates maintenance iss
 | `GET` | `/swaps` | Swap requests; filter: status |
 | `POST` | `/swaps` | Create shift swap request |
 | `POST` | `/swaps/{id}/respond` | Approve or reject swap request |
+| `POST` | `/attendance/clock-in` | Clock in (creates attendance_record) |
+| `POST` | `/attendance/clock-out` | Clock out (updates attendance_record, calculates total/overtime) |
+| `GET` | `/attendance` | List attendance records; filters: user_id, location_id, date range |
+| `POST` | `/attendance/override` | Manager clock-in/out override |
+| `GET` | `/attendance/timesheet` | Org timesheet report |
+| `GET` | `/attendance/my-timesheet` | Current user's timesheet |
+| `GET` | `/attendance/rules` | Get org attendance rules |
+| `PUT` | `/attendance/rules` | Update org attendance rules |
+| `POST` | `/attendance/break/start` | Start break (creates break_record row) |
+| `POST` | `/attendance/break/end` | End break (fills break_end_at, duration_minutes; updates attendance_records.break_minutes) |
+| `GET` | `/attendance/break/status` | Get current break status for an attendance record; returns `on_break`, `active_break`, all breaks, total_break_minutes |
 
 ### Onboarding — `/api/v1/onboarding`
 
@@ -765,6 +792,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 | `/dashboard/settings/audit-trail` | `dashboard/settings/audit-trail/page.tsx` | Audit trail log viewer |
 | `/dashboard/settings/badges` | `dashboard/settings/badges/page.tsx` | Badge config management |
 | `/dashboard/settings/shift-settings` | `dashboard/settings/shift-settings/page.tsx` | Standalone attendance rules form (late threshold, early departure, overtime, break duration); linked from Settings overview |
+| `/dashboard/settings/feature-settings` | `dashboard/settings/feature-settings/page.tsx` | Enable/disable optional platform features per org — toggle switches backed by `organisations.feature_flags`; currently exposes "Staff Availability Tracking" (`staff_availability_enabled`). Admin only. |
 
 ### Shared Components (`components/`)
 
@@ -817,7 +845,7 @@ Navigation is handled by `GoRouter` with a `ShellRoute` wrapping dashboard route
 | `core/theme/app_theme.dart` | Material 3 theme configuration |
 | `features/auth/providers/auth_provider.dart` | Riverpod provider for Supabase auth session |
 
-The mobile app has 4 screens implemented. The full feature set present in the web app (audits, tasks, issues, shifts, training, workflows, etc.) is not yet implemented in mobile.
+The mobile app has 14 feature modules implemented. The full feature set present in the web app (audits, tasks, issues, shifts, training, workflows, etc.) is not yet implemented in mobile.
 
 ---
 
@@ -845,8 +873,9 @@ The mobile app has 4 screens implemented. The full feature set present in the we
 - `fcm_server_key` and `firebase_project_id` are present in `config.py`
 - `fcm_token` column exists on `profiles` table
 - `PUT /api/v1/notifications/fcm-token` endpoint registers tokens
-- Two `# TODO` comments in `workflow_service.py` reference sending FCM notifications
-- No actual FCM send logic is implemented
+- `notification_service.py` sends FCM pushes via `firebase-admin` SDK when a token is registered
+- 14 notification types are wired: task/form/workflow/issue assignment, shift claims/swaps/leave, form review, CAP generated, announcement, course enrolled, scheduled reminder
+- Two legacy `# TODO` comments remain in `workflow_service.py` (pre-date the service; can be removed)
 
 ### Resend (Email)
 
@@ -951,7 +980,7 @@ All JSON responses from Claude are stripped of markdown code fences before `json
 
 | Call site | What it does |
 |---|---|
-| `POST /shifts/ai/generate-schedule` | Claude generates a shift schedule for a week given staff availability and templates; creates `ai_schedule_jobs` record |
+| `POST /shifts/ai/generate-schedule` | Claude generates a shift schedule for a week given staff and templates; creates `ai_schedule_jobs` record. Checks `organisations.feature_flags.staff_availability_enabled`: when `true`, fetches `staff_availability` rows and includes per-staff availability windows in the prompt; when `false`, prompt tells Claude to assume all staff are always available |
 
 ---
 
@@ -961,12 +990,12 @@ All JSON responses from Claude are stripped of markdown code fences before `json
 
 | Item | Location | Status |
 |---|---|---|
-| FCM push notifications | `workflow_service.py` (2× `# TODO`), `notifications` route | Config and token storage exist; no send logic implemented |
+| FCM push notifications | `notification_service.py` | Fully implemented — `notify()`, `notify_role()`, `notify_user_manager()`; fires on all 14 event types; reminder loop in `reminder_service.py` |
 | Resend email | `config.py` | Config keys present; SDK not imported; no usage anywhere |
 | Facial recognition clock-in | `face_profiles` table, `clock_in_method` enum includes `facial_recognition` | Table exists; no enrollment or verification logic in backend |
 | Asset failure prediction | `assets.predicted_days_to_failure`, `assets.failure_risk_score` columns | Columns in schema; no backend logic populates them |
 | Sprout HR integration (onboarding) | `onboarding/page.tsx` employee source option | UI option present but `disabled: true` with label "coming soon" |
-| Mobile feature parity | `mobile/frontline_app/lib/features/` | Only 4 screens implemented (login, dashboard, announcements, forms) vs ~50 web pages |
+| Mobile feature parity | `mobile/frontline_app/lib/features/` | 14 modules: auth, dashboard, announcements, forms, tasks, issues, shifts, training, audits, approvals, team, badges, notifications, ai_insights. Full parity with all web pages not yet achieved. |
 | Zustand stores | `package.json` includes `zustand ^5.0.12` | Dependency present; no active store files found |
 | `leaderboards` module | `leaderboard_configs` table, gamification routes | Table and routes exist; leaderboard population logic not confirmed |
 | Stripe | Not present | Referenced nowhere in codebase |
@@ -991,3 +1020,5 @@ Present throughout provisioning code. These swallow errors during background wor
 
 - Mobile `pubspec.yaml` comment: `riverpod_generator` and `hive_generator` intentionally excluded due to upstream `source_gen` version conflict; re-addition deferred until resolved upstream
 - Onboarding Sprout HR source: rendered but `disabled: true` in UI
+- `organisations.feature_flags` — JSONB column introduced for per-org capability toggles. Current flags:
+  - `staff_availability_enabled` (boolean, default `false`) — when `true`: Availability tab shows on web Shifts page and mobile Shifts screen; AI schedule generator respects `staff_availability` table. When `false` (default): Availability tab hidden; AI scheduler assumes all staff always available. Toggled via `/dashboard/settings/feature-settings` admin page.

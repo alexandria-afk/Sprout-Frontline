@@ -225,6 +225,82 @@ Used by both `/aging/tasks` and `/aging/issues` endpoints and displayed in the a
 
 ---
 
+---
+
+## Issue Statuses
+
+Column: `issues.status`
+
+| Value | Description |
+|---|---|
+| `open` | Newly filed, unassigned |
+| `in_progress` | Being worked on by an internal assignee |
+| `pending_vendor` | Waiting on an external vendor (assigned_vendor_id set) |
+| `resolved` | Work complete; cost recorded if maintenance category |
+| `verified_closed` | Verified closed by manager / auto-closed after resolve |
+
+**No other status values exist.** Do not use `pending`, `escalated`, `closed`, or any other value.
+
+Kanban columns on the Issues board use all five values. The "Update Status" dropdown in the issue detail modal must include `pending_vendor` alongside the other four. The UI label for `verified_closed` is **"Verified Closed"**.
+
+---
+
+## Break Types
+
+Column: `break_records.break_type`
+
+| Value | Description |
+|---|---|
+| `meal` | Meal break |
+| `rest` | Short rest break |
+| `other` | Other / unclassified |
+
+**No other break types exist.**
+
+---
+
+## Attendance Record Statuses
+
+Column: `attendance_records.status`
+
+| Value | Description |
+|---|---|
+| `present` | Clocked in on time |
+| `late` | Clock-in after `attendance_rules.late_threshold_mins` |
+| `early_departure` | Clocked out before shift end by more than `early_departure_threshold_mins` |
+| `absent` | Did not clock in |
+| `unverified` | Clock-in method is `manager_override` or GPS validation failed |
+
+---
+
+## Clock-In Methods
+
+Column: `attendance_records.clock_in_method`
+
+| Value | Description | Backend status |
+|---|---|---|
+| `gps` | GPS coordinates verified against geo-fence | Active |
+| `selfie` | Selfie photo taken at clock-in | Active (photo stored; no facial verification) |
+| `facial_recognition` | Face matched against enrolled profile | Stubbed — schema only; no verification logic |
+| `qr_code` | QR code scan at location | Active |
+| `manager_override` | Manager manually clocks staff in/out | Active |
+
+---
+
+## Organisation Feature Flags
+
+Column: `organisations.feature_flags` — `JSONB DEFAULT '{}'`
+
+All values are `boolean`. Missing keys are treated as `false`.
+
+| Key | Default | Description |
+|---|---|---|
+| `staff_availability_enabled` | `false` | When `true`: Availability tab shows on web/mobile Shifts screen; AI schedule generator respects `staff_availability` table. When `false`: Availability tab hidden; AI scheduler assumes all staff always available. |
+
+**Adding new flags:** Add the key to this table, set a sensible default in the migration (`UPDATE organisations SET feature_flags = feature_flags \|\| '{"new_flag": false}'`), and update the Feature Settings admin page (`/dashboard/settings/feature-settings`) to expose the toggle.
+
+---
+
 ## Updating This File
 
 When new enum values are added via database migration:

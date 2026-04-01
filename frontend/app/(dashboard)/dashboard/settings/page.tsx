@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin, Sparkles, CalendarClock } from "lucide-react";
+import { Settings, Users, Building2, ChevronRight, Wrench, BookOpen, Tag, Award, ShieldCheck, History, MapPin, Sparkles, CalendarClock, Sliders } from "lucide-react";
 
 const SETTINGS_ITEMS = [
   {
@@ -65,6 +65,13 @@ const SETTINGS_ITEMS = [
     icon: CalendarClock,
     label: "Shift Settings",
     description: "Configure attendance rules — late thresholds, overtime limits, and break durations for your organisation.",
+    roles: "Admin",
+  },
+  {
+    href: "/dashboard/settings/feature-settings",
+    icon: Sliders,
+    label: "Feature Settings",
+    description: "Enable or disable optional platform features like staff availability tracking and AI schedule generation.",
     roles: "Admin",
   },
   {

@@ -1,5 +1,29 @@
 import { apiFetch } from "./api/client";
 
+export interface AttendanceLocationRow {
+  location_id: string;
+  location_name: string;
+  scheduled: number;
+  clocked_in: number;
+  late: number;
+  on_break: number;
+  present_rate: number;
+  on_time_rate: number;
+  utilization_rate: number;
+  not_clocked_in: { user_name: string; shift_start: string }[];
+}
+
+export interface AttendanceSummary {
+  total_scheduled: number;
+  total_clocked_in: number;
+  total_late: number;
+  total_on_break: number;
+  present_rate: number;
+  on_time_rate: number;
+  utilization_rate: number;
+  by_location: AttendanceLocationRow[];
+}
+
 export interface DashboardSummary {
   total_assignments: number;
   total_submitted: number;
@@ -12,6 +36,7 @@ export interface DashboardSummary {
   total_audit_submissions: number;
   passed_audit_submissions: number;
   audit_compliance_rate: number | null;
+  attendance?: AttendanceSummary | null;
 }
 
 export async function getDashboardSummary(params?: {

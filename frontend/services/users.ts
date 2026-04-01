@@ -118,6 +118,33 @@ export async function deleteLocation(id: string): Promise<void> {
   await apiFetch(`/api/v1/organisations/${orgId}/locations/${id}`, { method: "DELETE" });
 }
 
+// ── Organisation & Feature Flags ──────────────────────────────────────────────
+
+export interface OrgFeatureFlags {
+  staff_availability_enabled?: boolean;
+  [key: string]: boolean | undefined;
+}
+
+export interface OrganisationDetails {
+  id: string;
+  name: string;
+  slug: string;
+  logo_url: string | null;
+  is_active: boolean;
+  feature_flags: OrgFeatureFlags;
+}
+
+export function getMyOrganisation(): Promise<OrganisationDetails> {
+  return apiFetch<OrganisationDetails>("/api/v1/organisations/my");
+}
+
+export function updateOrgFeatureFlags(orgId: string, featureFlags: OrgFeatureFlags): Promise<OrganisationDetails> {
+  return apiFetch<OrganisationDetails>(`/api/v1/organisations/${orgId}/feature-flags`, {
+    method: "PATCH",
+    body: JSON.stringify({ feature_flags: featureFlags }),
+  });
+}
+
 export async function listPositions(search = ""): Promise<{ position: string; count: number }[]> {
   const qs = search ? `?search=${encodeURIComponent(search)}` : "";
   return apiFetch<{ position: string; count: number }[]>(`/api/v1/users/positions${qs}`);

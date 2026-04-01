@@ -4106,7 +4106,11 @@ function IssuesHubPageInner() {
             { key: "issues",    label: "Issues",           icon: undefined     },
             { key: "incidents", label: "Incident Reports", icon: ShieldAlert   },
           ];
-          const visibleTabs = isManager ? allTabs : allTabs.filter((t) => t.key !== "incidents");
+          // Tasks view has only one tab — render no tab bar
+          const isTasksView = !tabParam || tabParam === "tasks";
+          if (isTasksView) return null;
+          // Issues & Incidents view: show both issues and incidents tabs
+          const visibleTabs = allTabs.filter((t) => t.key !== "tasks");
           return (
             <div className="flex border-b border-surface-border">
               {visibleTabs.map(({ key, label, icon: Icon }) => (
@@ -4134,7 +4138,7 @@ function IssuesHubPageInner() {
           </div>
         ) : (
           <>
-            {activeTab === "incidents" && isManager && <IncidentsTab isManager={isManager} role={role} openId={activeTab === "incidents" ? idParam : null} />}
+            {activeTab === "incidents" && <IncidentsTab isManager={isManager} role={role} openId={activeTab === "incidents" ? idParam : null} />}
             {activeTab === "issues" && <IssuesTab isManager={isManager} role={role} openId={activeTab === "issues" ? idParam : null} />}
             {activeTab === "tasks" && <TasksTab isManager={isManager} role={role} openId={activeTab === "tasks" ? idParam : null} />}
           </>

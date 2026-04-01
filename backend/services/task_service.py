@@ -151,6 +151,33 @@ class TaskService:
         if assignee_rows:
             db.table("task_assignees").insert(assignee_rows).execute()
 
+        # Notify each directly-assigned user
+        try:
+            user_assignee_ids = [uid for uid in body.assignee_user_ids]
+            if user_assignee_ids:
+                import asyncio as _asyncio
+                from services import notification_service as _ns
+                loc_name = ""
+                if body.location_id:
+                    loc_resp = db.table("locations").select("name").eq("id", body.location_id).maybe_single().execute()
+                    loc_name = (loc_resp.data or {}).get("name", "")
+                due_str = body.due_at.strftime("%b %-d") if body.due_at else ""
+                notif_body_parts = [p for p in [loc_name, f"Due {due_str}" if due_str else ""] if p]
+                notif_body = " \u00b7 ".join(notif_body_parts) or None
+                for uid in user_assignee_ids:
+                    _asyncio.create_task(_ns.notify(
+                        org_id=org_id,
+                        recipient_user_id=uid,
+                        type="task_assigned",
+                        title=f"New task: {task['title']}",
+                        body=notif_body,
+                        entity_type="task",
+                        entity_id=task_id,
+                        send_push=True,
+                    ))
+        except Exception:
+            pass
+
         # Initial status history entry
         db.table("task_status_history").insert({
             "task_id": task_id,
@@ -351,6 +378,26 @@ class TaskService:
             raise HTTPException(status_code=400, detail="Provide user_id or assign_role")
 
         resp = db.table("task_assignees").insert(row).execute()
+
+        # Notify the newly assigned user
+        if body.user_id:
+            try:
+                task_resp = db.table("tasks").select("title, location_id, due_at").eq("id", task_id).maybe_single().execute()
+                task_data = task_resp.data or {}
+                import asyncio as _asyncio
+                from services import notification_service as _ns
+                _asyncio.create_task(_ns.notify(
+                    org_id=org_id,
+                    recipient_user_id=body.user_id,
+                    type="task_assigned",
+                    title=f"New task: {task_data.get('title', 'Task')}",
+                    entity_type="task",
+                    entity_id=task_id,
+                    send_push=True,
+                ))
+            except Exception:
+                pass
+
         return resp.data[0] if resp.data else {}
 
     @staticmethod

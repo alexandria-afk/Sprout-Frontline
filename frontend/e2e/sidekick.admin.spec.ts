@@ -17,7 +17,7 @@ test.describe("Sidekick (AI) Features", () => {
   test("Forms page shows Generate with Sidekick option", async ({ page }) => {
     await page.goto("/dashboard/forms");
     // "New Template" button only appears on the Templates tab — navigate there first
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await page.getByRole("button", { name: /new template/i }).click();
     await expect(page.getByText(/sidekick/i).first()).toBeVisible({ timeout: 10_000 });
   });

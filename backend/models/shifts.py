@@ -60,6 +60,16 @@ class BulkGenerateShiftsRequest(BaseModel):
     location_id: Optional[str] = None  # required when template is org-wide (no location_id)
 
 
+class ShiftAssignment(BaseModel):
+    shift_id: str
+    user_id: Optional[str] = None
+    is_open_shift: bool = False
+
+
+class BulkAssignRequest(BaseModel):
+    assignments: list[ShiftAssignment]
+
+
 class PublishShiftsRequest(BaseModel):
     shift_ids: list[str]
 

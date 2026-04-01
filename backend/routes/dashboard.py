@@ -15,10 +15,15 @@ async def get_summary(
     to_dt: Optional[datetime] = Query(None, alias="to"),
     current_user: dict = Depends(require_manager_or_above),
 ):
-    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    meta = current_user.get("app_metadata") or {}
+    org_id = meta.get("organisation_id")
+    role = meta.get("role", "manager")
+    user_location_id = meta.get("location_id")
     return await DashboardService.get_summary(
         org_id=org_id,
         location_id=str(location_id) if location_id else None,
         from_dt=from_dt,
         to_dt=to_dt,
+        role=role,
+        user_location_id=user_location_id,
     )

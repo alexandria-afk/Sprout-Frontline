@@ -1092,6 +1092,52 @@ async def sidekick_chat(
     context_parts = []
     user_message_lower = (body.messages[-1].content or "").lower() if body.messages else ""
 
+    # Ops / performance summary context — inject daily snapshot for relevant queries
+    ops_keywords = [
+        "how are we doing", "any problems", "what should i focus",
+        "operations summary", "performance", "any issues", "what's going on",
+        "whats going on", "status", "overview", "summary", "how is", "how's",
+        "trends", "this week", "last week", "worst", "best", "declining",
+    ]
+    if any(kw in user_message_lower for kw in ops_keywords):
+        try:
+            from routes.ai_insights import _snapshot_cache, _cache_get, _build_snapshot, _today_str
+            snap_key = f"snapshot:{org_id}"
+            snapshot = _cache_get(_snapshot_cache, snap_key)
+            if snapshot is None:
+                import asyncio as _asyncio
+                snapshot = await _asyncio.to_thread(_build_snapshot, org_id)
+                from routes.ai_insights import _cache_set
+                _cache_set(_snapshot_cache, snap_key, snapshot)
+            # Summarise key metrics for chat (not full JSON — keep it digestible)
+            parts = []
+            att = snapshot.get("attendance", {})
+            if att.get("no_show_this_week", 0) > 0:
+                parts.append(f"No-shows this week: {att['no_show_this_week']} (last week: {att.get('no_show_last_week', 0)})")
+            issues_snap = snapshot.get("issues", {})
+            if issues_snap.get("sla_breach_this_week", 0) > 0:
+                parts.append(f"Issue SLA breaches this week: {issues_snap['sla_breach_this_week']}")
+            if issues_snap.get("recurring_issues"):
+                parts.append(f"Recurring issue patterns: {len(issues_snap['recurring_issues'])} detected")
+            tasks_snap = snapshot.get("tasks", {})
+            if tasks_snap.get("open_over_7d_count", 0) > 0:
+                parts.append(f"Tasks open > 7 days: {tasks_snap['open_over_7d_count']}")
+            audits_snap = snapshot.get("audits", {})
+            if audits_snap.get("unreviewed_caps_count", 0) > 0:
+                parts.append(f"Unreviewed CAPs: {audits_snap['unreviewed_caps_count']} (oldest: {audits_snap.get('unreviewed_caps_oldest_days', 0)} days old)")
+            if audits_snap.get("declining_locations"):
+                parts.append(f"Locations with declining audit scores: {', '.join(audits_snap['declining_locations'])}")
+            cert_snap = snapshot.get("certifications", {})
+            if cert_snap.get("expiring_30d_total", 0) > 0:
+                parts.append(f"Certifications expiring in 30 days: {cert_snap['expiring_30d_total']}")
+            maint = snapshot.get("maintenance", {})
+            if maint.get("open_count", 0) > 0:
+                parts.append(f"Open maintenance issues: {maint['open_count']}")
+            if parts:
+                context_parts.append("Operational snapshot:\n" + "\n".join(f"• {p}" for p in parts))
+        except Exception:
+            pass
+
     # Pull-out / wastage context
     pullout_keywords = ["pull out", "pull-out", "pullout", "wastage", "waste", "spoilage", "spoil", "expired", "thrown", "discard"]
     if any(kw in user_message_lower for kw in pullout_keywords):

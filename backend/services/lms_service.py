@@ -469,7 +469,30 @@ class LmsService:
             for uid in body.user_ids if uid not in already_enrolled
         ]
         if inserts:
-            supabase.table("course_enrollments").insert(inserts).execute()
+            ins_resp = supabase.table("course_enrollments").insert(inserts).execute()
+            inserted = ins_resp.data or []
+
+            # Notify each enrolled user
+            try:
+                course_resp = supabase.table("courses").select("title, estimated_duration").eq("id", body.course_id).maybe_single().execute()
+                course_data = course_resp.data or {}
+                course_title = course_data.get("title", "Training course")
+                duration = course_data.get("estimated_duration")
+                notif_body = f"{duration} mins" if duration else None
+                import asyncio as _asyncio
+                from services import notification_service as _ns
+                for row in inserted:
+                    _asyncio.create_task(_ns.notify(
+                        org_id=org_id,
+                        recipient_user_id=row["user_id"],
+                        type="course_enrolled",
+                        title=f"New training: {course_title}",
+                        body=notif_body,
+                        entity_type="course_enrollment",
+                        entity_id=row["id"],
+                    ))
+            except Exception:
+                pass
         return {"enrolled": len(inserts), "skipped": len(body.user_ids) - len(inserts)}
 
     @staticmethod

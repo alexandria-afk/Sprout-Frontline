@@ -406,7 +406,31 @@ def _activate_stage(db, instance_id: str, stage_id: str, stage: dict, instance: 
             if update:
                 db.table("workflow_stage_instances").update(update).eq("id", stage_instance_id).execute()
 
-    # TODO: send FCM notification to assigned_user_id for human stages
+    # Notify the assigned user for human-action stages
+    HUMAN_STAGE_TYPES = {"approve", "review", "sign", "fill_form"}
+    if action_type in HUMAN_STAGE_TYPES and assigned_user_id:
+        try:
+            import asyncio as _asyncio
+            from services import notification_service as _ns
+            action_label = {
+                "approve": "Needs your approval",
+                "review": "Needs your review",
+                "sign": "Needs your signature",
+                "fill_form": "Fill in form",
+            }.get(action_type, "Action needed")
+            workflow_name = instance.get("workflow_definitions", {}).get("name", "Workflow")
+            stage_name = stage.get("name", "Step")
+            _asyncio.create_task(_ns.notify(
+                org_id=org_id,
+                recipient_user_id=assigned_user_id,
+                type="workflow_stage_assigned",
+                title=f"Action needed: {stage_name} for {workflow_name}",
+                body=action_label,
+                entity_type="workflow_instance",
+                entity_id=instance_id,
+            ))
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────

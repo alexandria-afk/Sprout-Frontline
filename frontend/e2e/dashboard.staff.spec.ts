@@ -26,11 +26,10 @@ test.describe("Staff Dashboard", () => {
 
   test("staff stat cards visible", async ({ page }) => {
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText("Tasks Due Today")).toBeVisible();
     await expect(page.getByText("Overdue Items")).toBeVisible();
-    await expect(page.getByText("Pending Checklists", { exact: true })).toBeVisible();
     await expect(page.getByText("Open Issues")).toBeVisible();
-    await expect(page.getByText("Need Acknowledgement")).toBeVisible();
+    await expect(page.getByText("Courses to Complete")).toBeVisible();
+    await expect(page.getByText("Shifts This Week")).toBeVisible();
   });
 
   test("My Inbox renders for staff", async ({ page }) => {

@@ -25,7 +25,7 @@ test.describe("Forms — Create Template from Starter (Admin)", () => {
     await page.goto("/dashboard/forms");
     await page.waitForLoadState("networkidle");
     // Navigate to Templates tab
-    await page.getByRole("button", { name: "Templates" }).click();
+    await page.getByRole("button", { name: "Templates", exact: true }).click();
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
     });

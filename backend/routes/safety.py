@@ -9,12 +9,10 @@ NOTE: The old safety_badges and user_safety_badges tables were dropped.
       read from safety_points (unchanged), and the badge endpoints have been
       updated to use the new tables.
 """
-import os
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
@@ -40,42 +38,6 @@ class AwardBadgeRequest(BaseModel):
     note: Optional[str] = None
 
 
-async def _send_fcm_notification(
-    tokens: list,
-    title: str,
-    body: str,
-    data: Optional[dict] = None,
-):
-    """Call the Supabase Edge Function to send FCM push notifications."""
-    supabase_url = os.environ.get("SUPABASE_URL", "")
-    if not supabase_url:
-        return
-
-    edge_url = supabase_url.replace("/rest/v1", "").rstrip("/")
-    edge_url = f"{edge_url}/functions/v1/send-fcm-notification"
-
-    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-
-    payload = {
-        "tokens": tokens,
-        "notification": {"title": title, "body": body},
-        "data": data or {},
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(
-                edge_url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {service_role_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-    except Exception:
-        pass
-
-
 # ── Leaderboard ────────────────────────────────────────────────────────────────
 
 @router.get("/leaderboard")
@@ -91,9 +53,9 @@ async def leaderboard(
     page_size = pagination["page_size"]
 
     query = (
-        db.table("safety_points")
+        db.table("user_points")
         .select(
-            "id, user_id, total_points, profiles!user_id(full_name, location_id, locations(name))",
+            "id, user_id, total_points, profiles!user_id(full_name, role, location_id, locations(name))",
             count="exact",
         )
         .eq("organisation_id", org_id)
@@ -273,16 +235,6 @@ async def award_badge(
     except Exception:
         pass
 
-    # Send FCM to recipient
-    fcm_token = recipient.get("fcm_token")
-    if fcm_token:
-        await _send_fcm_notification(
-            tokens=[fcm_token],
-            title="Badge awarded!",
-            body=f"You've been awarded the '{badge['name']}' badge!",
-            data={"badge_id": str(badge_id)},
-        )
-
     return award_resp.data[0]
 
 
@@ -297,7 +249,7 @@ async def my_points(
     db = get_supabase()
 
     resp = (
-        db.table("safety_points")
+        db.table("user_points")
         .select("*")
         .eq("user_id", user_id)
         .eq("organisation_id", org_id)

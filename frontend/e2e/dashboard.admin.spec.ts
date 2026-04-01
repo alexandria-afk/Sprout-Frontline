@@ -30,14 +30,13 @@ test.describe("Admin Dashboard", () => {
     await expect(page.locator(".animate-spin")).toBeVisible({ timeout: 5_000 });
   });
 
-  test("stat cards are visible - 5 cards", async ({ page }) => {
+  test("stat cards are visible - 4 cards", async ({ page }) => {
     // Wait for skeleton to resolve
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({ timeout: 15_000 });
     await expect(page.getByText("Checklist Completion")).toBeVisible();
     await expect(page.getByText("Audit Compliance", { exact: true })).toBeVisible();
-    await expect(page.getByText("Team Open Issues")).toBeVisible();
-    await expect(page.getByText("Pending Acknowledgements")).toBeVisible();
-    await expect(page.getByText("Open CAPs")).toBeVisible();
+    await expect(page.getByText("Training Completion")).toBeVisible();
+    await expect(page.getByText("Shifts Today")).toBeVisible();
   });
 
   test("Tasks Overview widget renders", async ({ page }) => {
@@ -51,10 +50,10 @@ test.describe("Admin Dashboard", () => {
 
   test("stat cards link to correct pages", async ({ page }) => {
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({ timeout: 15_000 });
-    await page.getByText("Team Open Issues").click();
-    await expect(page).toHaveURL(/issues/);
+    await page.getByText("Checklist Completion").click();
+    await expect(page).toHaveURL(/forms/);
     await page.goBack();
-    await page.getByText("Pending Acknowledgements").click();
-    await expect(page).toHaveURL(/announcements/);
+    await page.getByText("Audit Compliance", { exact: true }).click();
+    await expect(page).toHaveURL(/audits/);
   });
 });
