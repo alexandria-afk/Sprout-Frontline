@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:frontline_app/core/api/dio_client.dart';
 
 /// Injects the Supabase access token into every request.
 /// On 401, attempts a token refresh then retries once.
@@ -34,8 +35,9 @@ class AuthInterceptor extends Interceptor {
           final opts = err.requestOptions;
           opts.headers['Authorization'] =
               'Bearer ${refreshed.session!.accessToken}';
-          final dio = Dio();
-          final response = await dio.fetch(opts);
+          // Use the shared DioClient instance (correct baseUrl + options).
+          // _isRefreshing is still true here, so no infinite retry.
+          final response = await DioClient.instance.fetch(opts);
           handler.resolve(response);
           return;
         }

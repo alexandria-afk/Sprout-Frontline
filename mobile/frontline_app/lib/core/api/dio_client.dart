@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:frontline_app/core/api/auth_interceptor.dart';
 import 'package:frontline_app/core/config/app_config.dart';
 
@@ -24,6 +25,14 @@ class DioClient {
       ),
     );
     dio.interceptors.add(AuthInterceptor());
+    // Log requests and responses in debug builds only.
+    if (kDebugMode) {
+      dio.interceptors.add(LogInterceptor(
+        requestBody: true,
+        responseBody: true,
+        logPrint: (o) => debugPrint(o.toString()),
+      ));
+    }
     return dio;
   }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 /// Sprout Solutions brand colours
 class SproutColors {
@@ -48,14 +49,16 @@ class AppTheme {
         ),
       ),
 
-      textTheme: const TextTheme(
-        headlineLarge: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.bold),
-        headlineMedium: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.bold),
-        titleLarge: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.w600),
-        titleMedium: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.w500),
-        bodyLarge: TextStyle(color: SproutColors.bodyText),
-        bodyMedium: TextStyle(color: SproutColors.bodyText),
-        bodySmall: TextStyle(color: SproutColors.bodyText),
+      textTheme: GoogleFonts.interTextTheme(
+        const TextTheme(
+          headlineLarge: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.bold),
+          headlineMedium: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.bold),
+          titleLarge: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.w600),
+          titleMedium: TextStyle(color: SproutColors.darkText, fontWeight: FontWeight.w500),
+          bodyLarge: TextStyle(color: SproutColors.bodyText),
+          bodyMedium: TextStyle(color: SproutColors.bodyText),
+          bodySmall: TextStyle(color: SproutColors.bodyText),
+        ),
       ),
 
       inputDecorationTheme: InputDecorationTheme(

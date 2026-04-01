@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/config/app_config.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
+import 'package:frontline_app/core/offline/sync_service.dart';
 import 'package:frontline_app/core/router/app_router.dart';
 import 'package:frontline_app/core/theme/app_theme.dart';
 
@@ -31,6 +32,8 @@ class FrontlineApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Eagerly initialize the sync service so it listens for connectivity changes.
+    ref.watch(syncServiceProvider);
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(

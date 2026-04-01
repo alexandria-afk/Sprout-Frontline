@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frontline_app/core/theme/app_theme.dart';
@@ -208,9 +209,86 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                     ),
                   ),
+
+                  // Dev quick-login buttons (debug builds only)
+                  if (kDebugMode) ...[
+                    const SizedBox(height: 24),
+                    Text('Dev quick login',
+                        style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: _devAccounts.map((acct) {
+                        return _DevLoginChip(
+                          label: acct.label,
+                          color: acct.color,
+                          isLoading: isLoading,
+                          onTap: () {
+                            _emailController.text = acct.email;
+                            _passwordController.text = 'Test1234!';
+                            _submit();
+                          },
+                        );
+                      }).toList(),
+                    ),
+                  ],
                 ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Dev accounts ──────────────────────────────────────────────────────────────
+
+class _DevAccount {
+  final String label;
+  final String email;
+  final Color color;
+  const _DevAccount(this.label, this.email, this.color);
+}
+
+const _devAccounts = [
+  _DevAccount('Super Admin', 'admin@renegade.com', Color(0xFF7C3AED)),
+  _DevAccount('Admin', 'branchadmin@renegade.com', Color(0xFF2563EB)),
+  _DevAccount('Manager', 'manager@renegade.com', Color(0xFFD97706)),
+  _DevAccount('Staff', 'staff@renegade.com', Color(0xFF16A34A)),
+];
+
+class _DevLoginChip extends StatelessWidget {
+  final String label;
+  final Color color;
+  final bool isLoading;
+  final VoidCallback onTap;
+  const _DevLoginChip({
+    required this.label,
+    required this.color,
+    required this.isLoading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: isLoading ? null : onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
           ),
         ),
       ),

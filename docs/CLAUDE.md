@@ -26,3 +26,48 @@ Sprout Field Ops — frontline operations platform for QSR, retail, hospitality,
 - Read `docs/ARCHITECTURE.md` for current state before making changes
 - Read `docs/ALLOWED_VALUES.md` before touching workflows, courses, AI prompts, or seed data
 - Check `supabase/migrations/` for the latest migration number before creating new ones
+
+## Roles & Permissions (enforce everywhere)
+
+Four roles: super_admin, admin, manager, staff
+
+Staff can ONLY:
+- View and complete their own assigned tasks, forms, checklists
+- Report issues
+- View their own shifts, clock in/out, claim open shifts
+- Take training courses
+- View announcements and acknowledge
+- View their own badges and points
+- Submit leave requests
+- Use AI chat
+
+Staff can NEVER see:
+- Other people's tasks or assignments
+- Team/attendance views
+- Approval screens (workflow, shift swap, leave approvals)
+- User management
+- Settings/admin pages
+- Analytics/reports/insights
+- Workflow builder
+- Issue categories editor
+- Template creation or management
+
+Manager can do everything staff can, plus:
+- View their team's tasks, issues, attendance
+- Approve/reject (workflow stages, shift swaps, leave, open shift claims)
+- Assign tasks and forms
+- Run audits
+- Create announcements
+- View reports for their location
+
+Admin/Super Admin can do everything manager can, plus:
+- All locations (not just their own)
+- User management
+- Settings and configuration
+- Workflow builder
+- Template management
+- Full analytics and insights
+
+EVERY screen, tab, nav item, and button must check the user's 
+role before rendering. If a component is not listed for a role 
+above, it must be hidden — not disabled, hidden.
