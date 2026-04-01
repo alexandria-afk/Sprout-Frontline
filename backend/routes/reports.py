@@ -1149,3 +1149,210 @@ def get_certification_expiry(
         "by_course": sorted(by_course.values(), key=lambda x: -(x["expired"] + x["expiring_soon"])),
         "enrollments": enrollments_out,
     }
+
+
+# ── Issues by Category ────────────────────────────────────────────────────────
+
+@router.get("/issues/by-category")
+def get_issues_by_category(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    location_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Issue volume grouped by category for the given date range."""
+    org_id = _get_org(current_user)
+    db = get_admin_client()
+
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+    if not from_date:
+        from_date = (datetime.fromisoformat(to_date) - timedelta(days=30)).date().isoformat()
+
+    q = (
+        db.table("issues")
+        .select("id, category_id, issue_categories(name)")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+        .gte("created_at", from_date)
+        .lte("created_at", to_date + "T23:59:59Z")
+    )
+    if location_id:
+        q = q.eq("location_id", location_id)
+
+    rows = q.execute().data or []
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        name = (r.get("issue_categories") or {}).get("name") or "Uncategorised"
+        counts[name] = counts.get(name, 0) + 1
+
+    return sorted(
+        [{"category": k, "count": v} for k, v in counts.items()],
+        key=lambda x: -x["count"],
+    )
+
+
+# ── Issue Resolution Time by Category ────────────────────────────────────────
+
+@router.get("/issues/resolution-time")
+def get_issue_resolution_time(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    location_id: Optional[str] = Query(None),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Average resolution time vs SLA per issue category."""
+    org_id = _get_org(current_user)
+    db = get_admin_client()
+
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+    if not from_date:
+        from_date = (datetime.fromisoformat(to_date) - timedelta(days=90)).date().isoformat()
+
+    q = (
+        db.table("issues")
+        .select("created_at, resolved_at, category_id, issue_categories(name, sla_hours)")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+        .in_("status", ["resolved", "verified_closed"])
+        .not_.is_("resolved_at", "null")
+        .gte("created_at", from_date)
+        .lte("created_at", to_date + "T23:59:59Z")
+    )
+    if location_id:
+        q = q.eq("location_id", location_id)
+
+    rows = q.execute().data or []
+
+    cat_data: dict[str, dict] = {}
+    for r in rows:
+        cat = (r.get("issue_categories") or {})
+        name = cat.get("name") or "Uncategorised"
+        sla = cat.get("sla_hours") or 24
+        try:
+            c = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+            res = datetime.fromisoformat(r["resolved_at"].replace("Z", "+00:00"))
+            hrs = (res - c).total_seconds() / 3600
+        except Exception:
+            continue
+        if name not in cat_data:
+            cat_data[name] = {"total_hrs": 0.0, "count": 0, "sla_hrs": sla}
+        cat_data[name]["total_hrs"] += hrs
+        cat_data[name]["count"] += 1
+
+    return sorted(
+        [
+            {
+                "category": name,
+                "actual_hrs": round(d["total_hrs"] / d["count"], 1),
+                "sla_hrs": d["sla_hrs"],
+                "sample_count": d["count"],
+            }
+            for name, d in cat_data.items()
+        ],
+        key=lambda x: -x["actual_hrs"],
+    )[:8]
+
+
+# ── Location Composite Scorecard ──────────────────────────────────────────────
+
+@router.get("/locations/scorecard")
+def get_location_scorecard(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    current_user: dict = Depends(require_manager_or_above),
+):
+    """Composite score per location: 50% audit avg score + 30% checklist completion + 20% issue resolution rate."""
+    org_id = _get_org(current_user)
+    db = get_admin_client()
+
+    if not to_date:
+        to_date = datetime.now(timezone.utc).date().isoformat()
+    if not from_date:
+        from_date = (datetime.fromisoformat(to_date) - timedelta(days=30)).date().isoformat()
+
+    loc_resp = db.table("locations").select("id, name").eq("organisation_id", org_id).eq("is_active", True).eq("is_deleted", False).execute()
+    locations = loc_resp.data or []
+    if not locations:
+        return []
+    loc_map = {l["id"]: l["name"] for l in locations}
+
+    # ── Audit avg score per location ─────────────────────────────────────────
+    audit_resp = (
+        db.table("form_submissions")
+        .select("location_id, overall_score, form_templates!inner(organisation_id, type)")
+        .eq("form_templates.organisation_id", org_id)
+        .eq("form_templates.type", "audit")
+        .gte("submitted_at", from_date)
+        .lte("submitted_at", to_date + "T23:59:59Z")
+        .execute()
+    )
+    audit_scores: dict[str, list] = {}
+    for r in (audit_resp.data or []):
+        lid = r.get("location_id") or ""
+        if r.get("overall_score") is not None:
+            audit_scores.setdefault(lid, []).append(float(r["overall_score"]))
+
+    # ── Checklist completion rate per location (last 7 days of range) ────────
+    cl_resp = (
+        db.table("form_submissions")
+        .select("location_id, form_templates!inner(organisation_id, type)")
+        .eq("form_templates.organisation_id", org_id)
+        .eq("form_templates.type", "checklist")
+        .in_("status", ["submitted", "approved", "rejected"])
+        .gte("submitted_at", from_date)
+        .lte("submitted_at", to_date + "T23:59:59Z")
+        .execute()
+    )
+    assign_resp = (
+        db.table("form_assignments")
+        .select("assigned_to_location_id")
+        .eq("organisation_id", org_id)
+        .eq("is_active", True)
+        .eq("is_deleted", False)
+        .execute()
+    )
+    cl_done: dict[str, int] = {}
+    for r in (cl_resp.data or []):
+        lid = r.get("location_id") or ""
+        cl_done[lid] = cl_done.get(lid, 0) + 1
+    cl_assigned: dict[str, int] = {}
+    for r in (assign_resp.data or []):
+        lid = r.get("assigned_to_location_id") or ""
+        cl_assigned[lid] = cl_assigned.get(lid, 0) + 1
+
+    # ── Issue resolution rate per location ────────────────────────────────────
+    iss_resp = (
+        db.table("issues")
+        .select("location_id, status")
+        .eq("organisation_id", org_id)
+        .eq("is_deleted", False)
+        .gte("created_at", from_date)
+        .lte("created_at", to_date + "T23:59:59Z")
+        .execute()
+    )
+    iss_total: dict[str, int] = {}
+    iss_resolved: dict[str, int] = {}
+    for r in (iss_resp.data or []):
+        lid = r.get("location_id") or ""
+        iss_total[lid] = iss_total.get(lid, 0) + 1
+        if r.get("status") in ("resolved", "verified_closed"):
+            iss_resolved[lid] = iss_resolved.get(lid, 0) + 1
+
+    # ── Composite ─────────────────────────────────────────────────────────────
+    results = []
+    for lid, name in loc_map.items():
+        audit_avg = (sum(audit_scores.get(lid, [])) / len(audit_scores[lid])) if audit_scores.get(lid) else None
+        cl_rate = (cl_done.get(lid, 0) / cl_assigned[lid] * 100) if cl_assigned.get(lid) else None
+        iss_rate = (iss_resolved.get(lid, 0) / iss_total[lid] * 100) if iss_total.get(lid) else None
+
+        components = [(v, w) for v, w in [(audit_avg, 0.5), (cl_rate, 0.3), (iss_rate, 0.2)] if v is not None]
+        if not components:
+            continue
+        weight_sum = sum(w for _, w in components)
+        composite = sum(v * w for v, w in components) / weight_sum
+        results.append({"location": name, "composite_score": round(composite)})
+
+    return sorted(results, key=lambda x: -x["composite_score"])

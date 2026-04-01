@@ -15,6 +15,7 @@ import 'package:frontline_app/features/ai_insights/providers/ai_insights_provide
 import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models.dart';
 import 'package:frontline_app/features/notifications/providers/notifications_provider.dart';
 import 'package:frontline_app/features/badges/providers/badges_provider.dart';
+import 'package:frontline_app/features/badges/data/models/badge_models.dart';
 
 // ── Design tokens from MOBILE_DESIGN.md ───────────────────────────────────────
 
@@ -494,8 +495,16 @@ class _AIInsightsSection extends ConsumerWidget {
     final dismissed = ref.watch(dismissedInsightsProvider);
 
     return asyncInsights.when(
-      loading: () => const SizedBox.shrink(),
-      error: (_, _) => const SizedBox.shrink(),
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16),
+        child: Text('Loading insights...',
+            style: TextStyle(fontSize: 12, color: _C.textTertiary)),
+      ),
+      error: (e, _) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Text('Insight error: $e',
+            style: const TextStyle(fontSize: 12, color: _C.critical)),
+      ),
       data: (response) {
         final visible = response.insights
             .where((i) => !dismissed.contains(i.dismissKey))
@@ -548,52 +557,39 @@ class _AIInsightCard extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: _C.surface1,
         borderRadius: BorderRadius.circular(12),
         border: Border(left: BorderSide(color: accentColor, width: 3)),
       ),
-      child: Column(
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(icon, style: const TextStyle(fontSize: 14)),
-              const SizedBox(width: 6),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: accentColor.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(insight.severity.toUpperCase(),
+          Text(icon, style: const TextStyle(fontSize: 14)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(insight.title,
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: _C.textPrimary),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+                const SizedBox(height: 2),
+                Text(insight.recommendation,
                     style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        color: accentColor)),
-              ),
-            ],
+                        fontSize: 12,
+                        color: accentColor),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ],
+            ),
           ),
-          const SizedBox(height: 8),
-          Text(insight.title,
-              style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: _C.textPrimary)),
-          const SizedBox(height: 4),
-          Text(insight.body,
-              style: const TextStyle(
-                  fontSize: 13, color: _C.textSecondary, height: 1.4)),
-          const SizedBox(height: 8),
-          Text(insight.recommendation,
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  color: accentColor,
-                  height: 1.4)),
         ],
       ),
     );
@@ -948,62 +944,103 @@ class _LeaderboardEntries extends ConsumerWidget {
       data: (entries) {
         if (entries.isEmpty) return const SizedBox.shrink();
         final top5 = entries.take(5).toList();
+        final userInTop5 =
+            top5.any((e) => e.userId == currentUserId);
+
+        // Find user's entry if not in top 5.
+        LeaderboardEntry? userEntry;
+        int? userRank;
+        if (!userInTop5) {
+          for (var i = 0; i < entries.length; i++) {
+            if (entries[i].userId == currentUserId) {
+              userEntry = entries[i];
+              userRank = entries[i].rank > 0 ? entries[i].rank : i + 1;
+              break;
+            }
+          }
+        }
 
         return _SectionCard(
           label: 'LEADERBOARD',
           actionLabel: 'View full \u2192',
           route: '/badges',
           child: Column(
-            children: top5.asMap().entries.map((e) {
-              final idx = e.key;
-              final entry = e.value;
-              final rank = entry.rank > 0 ? entry.rank : idx + 1;
-              final isMe = entry.userId == currentUserId;
-
-              return _InnerRow(
-                backgroundColor: isMe ? _C.sproutGreenLight : null,
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 24,
-                      child: Text(
-                        '$rank',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: isMe ? _C.sproutGreen : _C.textSecondary,
-                        ),
+            children: [
+              // Top 5 rows
+              ...top5.asMap().entries.map((e) {
+                final idx = e.key;
+                final entry = e.value;
+                final rank = entry.rank > 0 ? entry.rank : idx + 1;
+                final isMe = entry.userId == currentUserId;
+                return _leaderboardRow(entry, rank, isMe);
+              }),
+              // If user is outside top 5, show separator + their row
+              if (userEntry != null) ...[
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      const Expanded(child: Divider(color: _C.surface3)),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Text('You',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: _C.sproutGreen)),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        entry.userName,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight:
-                              isMe ? FontWeight.w600 : FontWeight.w400,
-                          color: _C.textPrimary,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    Text(
-                      '${entry.score.toInt()} pts',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: isMe ? _C.sproutGreen : _C.textSecondary,
-                      ),
-                    ),
-                  ],
+                      const Expanded(child: Divider(color: _C.surface3)),
+                    ],
+                  ),
                 ),
-              );
-            }).toList(),
+                _leaderboardRow(userEntry, userRank!, true),
+              ],
+            ],
           ),
         );
       },
+    );
+  }
+
+  Widget _leaderboardRow(LeaderboardEntry entry, int rank, bool isMe) {
+    return _InnerRow(
+      backgroundColor: isMe ? _C.sproutGreenLight : null,
+      child: Row(
+        children: [
+          SizedBox(
+            width: 24,
+            child: Text(
+              '$rank',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: isMe ? _C.sproutGreen : _C.textSecondary,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              entry.userName,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: isMe ? FontWeight.w600 : FontWeight.w400,
+                color: _C.textPrimary,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          Text(
+            '${entry.score.toInt()} pts',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: isMe ? _C.sproutGreen : _C.textSecondary,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

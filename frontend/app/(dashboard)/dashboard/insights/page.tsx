@@ -22,45 +22,12 @@ const GRID = "#F1F5F9";
 const TT   = { background:"#fff", border:"1px solid #E2E8F0", borderRadius:10, boxShadow:"0 4px 16px rgba(0,0,0,.08)", fontSize:12, color:"#1E293B" };
 const BAR_COLORS = ["#00B4D8","#7C3AED","#10B981","#F59E0B","#F43F5E","#6366F1","#FB923C"];
 
-// ─── Mock data ────────────────────────────────────────────────────────────────
-const MOCK_AUDIT_TREND = [
-  { week:"2026-01-06", pass_rate:72, avg_score:74 },{ week:"2026-01-13", pass_rate:78, avg_score:79 },
-  { week:"2026-01-20", pass_rate:75, avg_score:76 },{ week:"2026-01-27", pass_rate:82, avg_score:83 },
-  { week:"2026-02-03", pass_rate:80, avg_score:81 },{ week:"2026-02-10", pass_rate:85, avg_score:86 },
-  { week:"2026-02-17", pass_rate:88, avg_score:89 },{ week:"2026-02-24", pass_rate:84, avg_score:85 },
-  { week:"2026-03-03", pass_rate:91, avg_score:90 },{ week:"2026-03-10", pass_rate:87, avg_score:88 },
-  { week:"2026-03-17", pass_rate:93, avg_score:92 },{ week:"2026-03-23", pass_rate:90, avg_score:91 },
-];
-const MOCK_ISSUE_VOLUME = [
-  { category:"Maintenance", count:47 },{ category:"Food Safety", count:31 },
-  { category:"Customer Service", count:28 },{ category:"Equipment", count:22 },
-  { category:"Cleanliness", count:18 },{ category:"Loss Prevention", count:12 },
-  { category:"Safety Hazard", count:9 },
-];
-const MOCK_SCORECARD = [
-  { name:"BGC Branch", score:94 },{ name:"Ortigas Branch", score:88 },
-  { name:"Makati Branch", score:81 },{ name:"QC Branch", score:73 },
-  { name:"Pasay Branch", score:67 },
-];
-const MOCK_RESOLUTION = [
-  { category:"Maintenance", actual_hrs:6.2, sla_hrs:8 },
-  { category:"Food Safety", actual_hrs:3.1, sla_hrs:2 },
-  { category:"Equipment", actual_hrs:11.4, sla_hrs:12 },
-  { category:"Safety Hazard", actual_hrs:4.8, sla_hrs:2 },
-  { category:"Customer Service", actual_hrs:1.9, sla_hrs:4 },
-];
-const MOCK_CERTIFICATION = [
-  { location:"BGC Branch", certified:18, expiring:2, expired:0 },
-  { location:"Makati Branch", certified:14, expiring:4, expired:2 },
-  { location:"Pasay Branch", certified:11, expiring:3, expired:5 },
-  { location:"QC Branch", certified:16, expiring:1, expired:1 },
-  { location:"Ortigas Branch", certified:20, expiring:0, expired:0 },
-];
-const MOCK_INSIGHTS = [
-  { id:"m1", severity:"critical" as const, title:"8 certifications expiring at Pasay in 14 days", body:"Pasay Branch has 8 staff whose Food Safety certifications expire within 14 days — 40% of the frontline team.", recommendation:"Schedule a group renewal session this week." },
-  { id:"m2", severity:"warning"  as const, title:"Food Safety resolution averaging 3× over SLA", body:"Food Safety issues are averaging 3.1 hours to resolve against a 2-hour SLA — consistent for 3 weeks.", recommendation:"Review escalation rules and confirm current assignees have authority to act." },
-  { id:"m3", severity:"info"     as const, title:"BGC Branch leading composite score 3 months running", body:"BGC Branch has ranked #1 in composite score for 3 consecutive months. Checklist completion 96%, audit pass rate 94%.", recommendation:"Document BGC practices and share as a best-practice template with Pasay and QC." },
-];
+// ─── Types ────────────────────────────────────────────────────────────────────
+type AuditTrendRow    = { week: string; pass_rate: number; avg_score: number };
+type IssueVolumeRow   = { category: string; count: number };
+type ScorecardRow     = { name: string; score: number; fill: string };
+type ResolutionRow    = { category: string; actual_hrs: number; sla_hrs: number };
+type CertRow          = { location: string; certified: number; expiring: number; expired: number };
 
 // ─── Report groups ────────────────────────────────────────────────────────────
 const REPORT_GROUPS: {
@@ -140,8 +107,7 @@ function InsightsPanel() {
         try { setCachedAt(new Date(d.cached_at).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })); } catch {}
       }
     } catch {
-      // fallback: keep mock insights for demo
-      setInsights(MOCK_INSIGHTS);
+      setInsights([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -247,17 +213,17 @@ function ChartCard({ title, subtitle, loading, empty, children, className }: {
 
 // ─── Graphs ───────────────────────────────────────────────────────────────────
 function AuditTrendGraph({ from, to, locationId }: { from:string; to:string; locationId:string }) {
-  const [data, setData] = useState(MOCK_AUDIT_TREND);
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<AuditTrendRow[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
-    const p = new URLSearchParams({ from, to, format:"json", group_by:"week", ...(locationId ? { location_id:locationId } : {}) });
-    apiFetch<{ trend:typeof data }>(`/api/v1/reports/compliance?${p}`)
-      .then(r => { if (r?.trend?.length) setData(r.trend); }).catch(() => {}).finally(() => setLoading(false));
+    const p = new URLSearchParams({ from, to, ...(locationId ? { location_id:locationId } : {}) });
+    apiFetch<{ trend: AuditTrendRow[] }>(`/api/v1/reports/compliance?${p}`)
+      .then(r => { setData(r?.trend ?? []); }).catch(() => { setData([]); }).finally(() => setLoading(false));
   }, [from, to, locationId]);
   const fmtWeek = (v: string) => { const d=new Date(v); return `${d.toLocaleString("default",{month:"short"})} ${d.getDate()}`; };
   return (
-    <ChartCard title="Audit Compliance Trend" subtitle="Weekly pass rate and average score" loading={loading}>
+    <ChartCard title="Audit Compliance Trend" subtitle="Weekly pass rate and average score" loading={loading} empty={!loading && data.length === 0}>
       <ResponsiveContainer width="100%" height={230}>
         <AreaChart data={data} margin={{ top:5, right:10, left:-15, bottom:0 }}>
           <defs>
@@ -278,16 +244,16 @@ function AuditTrendGraph({ from, to, locationId }: { from:string; to:string; loc
 }
 
 function IssueVolumeGraph({ from, to, locationId }: { from:string; to:string; locationId:string }) {
-  const [data, setData] = useState(MOCK_ISSUE_VOLUME);
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<IssueVolumeRow[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
-    const p = new URLSearchParams({ from, to, format:"json", ...(locationId ? { location_id:locationId } : {}) });
-    apiFetch<typeof data>(`/api/v1/reports/issues/by-category?${p}`)
-      .then(r => { if (Array.isArray(r) && r.length) setData(r.slice(0,8)); }).catch(() => {}).finally(() => setLoading(false));
+    const p = new URLSearchParams({ from, to, ...(locationId ? { location_id:locationId } : {}) });
+    apiFetch<IssueVolumeRow[]>(`/api/v1/reports/issues/by-category?${p}`)
+      .then(r => { setData(Array.isArray(r) ? r.slice(0, 8) : []); }).catch(() => { setData([]); }).finally(() => setLoading(false));
   }, [from, to, locationId]);
   return (
-    <ChartCard title="Issue Volume by Category" subtitle="Top issue categories by volume" loading={loading}>
+    <ChartCard title="Issue Volume by Category" subtitle="Top issue categories by volume" loading={loading} empty={!loading && data.length === 0}>
       <ResponsiveContainer width="100%" height={230}>
         <BarChart data={data} layout="vertical" margin={{top:0,right:20,left:5,bottom:0}}>
           <defs>{BAR_COLORS.map((c,i) => <linearGradient key={i} id={`bG${i}`} x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stopColor={c} stopOpacity={0.9}/><stop offset="100%" stopColor={c} stopOpacity={0.5}/></linearGradient>)}</defs>
@@ -305,17 +271,19 @@ function IssueVolumeGraph({ from, to, locationId }: { from:string; to:string; lo
 }
 
 function LocationScorecardGraph({ from, to, locationId }: { from:string; to:string; locationId:string }) {
-  const [data, setData] = useState(MOCK_SCORECARD.map(l => ({ ...l, fill:l.score>=80?"#10B981":l.score>=60?"#F59E0B":"#F43F5E" })));
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<ScorecardRow[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
-    const p = new URLSearchParams({ from, to, format:"json", ...(locationId ? { location_id:locationId } : {}) });
+    const p = new URLSearchParams({ from, to, ...(locationId ? { location_id:locationId } : {}) });
     apiFetch<{ location:string; composite_score:number }[]>(`/api/v1/reports/locations/scorecard?${p}`)
-      .then(r => { if (Array.isArray(r) && r.length) setData(r.map(l => ({ name:l.location, score:l.composite_score, fill:l.composite_score>=80?"#10B981":l.composite_score>=60?"#F59E0B":"#F43F5E" }))); })
-      .catch(() => {}).finally(() => setLoading(false));
+      .then(r => {
+        setData(Array.isArray(r) ? r.map(l => ({ name:l.location, score:l.composite_score, fill:l.composite_score>=80?"#10B981":l.composite_score>=60?"#F59E0B":"#F43F5E" })) : []);
+      })
+      .catch(() => { setData([]); }).finally(() => setLoading(false));
   }, [from, to, locationId]);
   return (
-    <ChartCard title="Location Scorecard" subtitle="Composite score per location" loading={loading}>
+    <ChartCard title="Location Scorecard" subtitle="Composite score per location" loading={loading} empty={!loading && data.length === 0}>
       <div className="flex flex-col gap-2.5 pt-1">
         {data.map(loc => (
           <div key={loc.name} className="flex items-center gap-3">
@@ -337,16 +305,16 @@ function LocationScorecardGraph({ from, to, locationId }: { from:string; to:stri
 }
 
 function ResolutionTimeGraph({ from, to, locationId }: { from:string; to:string; locationId:string }) {
-  const [data, setData] = useState(MOCK_RESOLUTION);
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<ResolutionRow[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
-    const p = new URLSearchParams({ from, to, format:"json", group_by:"category", ...(locationId ? { location_id:locationId } : {}) });
-    apiFetch<typeof data>(`/api/v1/reports/issues/resolution-time?${p}`)
-      .then(r => { if (Array.isArray(r) && r.length) setData(r); }).catch(() => {}).finally(() => setLoading(false));
+    const p = new URLSearchParams({ from, to, ...(locationId ? { location_id:locationId } : {}) });
+    apiFetch<ResolutionRow[]>(`/api/v1/reports/issues/resolution-time?${p}`)
+      .then(r => { setData(Array.isArray(r) ? r : []); }).catch(() => { setData([]); }).finally(() => setLoading(false));
   }, [from, to, locationId]);
   return (
-    <ChartCard title="Resolution Time vs SLA" subtitle="Actual hours vs SLA target by category" loading={loading}>
+    <ChartCard title="Resolution Time vs SLA" subtitle="Actual hours vs SLA target by category" loading={loading} empty={!loading && data.length === 0}>
       <ResponsiveContainer width="100%" height={230}>
         <BarChart data={data} margin={{top:5,right:10,left:-15,bottom:20}}>
           <defs>
@@ -367,16 +335,24 @@ function ResolutionTimeGraph({ from, to, locationId }: { from:string; to:string;
 }
 
 function CertificationStatusGraph({ from, to, locationId }: { from:string; to:string; locationId:string }) {
-  const [data, setData] = useState(MOCK_CERTIFICATION);
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<CertRow[]>([]);
+  const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
-    const p = new URLSearchParams({ from, to, format:"json", group_by:"location", ...(locationId ? { location_id:locationId } : {}) });
-    apiFetch<typeof data>(`/api/v1/reports/training/certification-status?${p}`)
-      .then(r => { if (Array.isArray(r) && r.length) setData(r); }).catch(() => {}).finally(() => setLoading(false));
+    const p = new URLSearchParams({ ...(locationId ? { location_id:locationId } : {}) });
+    apiFetch<{ by_location: { location_name:string; valid:number; expiring_soon:number; expired:number }[] }>(`/api/v1/reports/training/certification-expiry?${p}`)
+      .then(r => {
+        setData((r?.by_location ?? []).map(l => ({
+          location: l.location_name,
+          certified: l.valid,
+          expiring:  l.expiring_soon,
+          expired:   l.expired,
+        })));
+      })
+      .catch(() => { setData([]); }).finally(() => setLoading(false));
   }, [from, to, locationId]);
   return (
-    <ChartCard title="Training Certification Status" subtitle="Certified, expiring, and expired staff by location" loading={loading} className="lg:col-span-3">
+    <ChartCard title="Training Certification Status" subtitle="Certified, expiring, and expired staff by location" loading={loading} empty={!loading && data.length === 0} className="lg:col-span-3">
       <ResponsiveContainer width="100%" height={200}>
         <BarChart data={data} layout="vertical" margin={{top:0,right:20,left:5,bottom:0}}>
           <defs>
@@ -480,15 +456,6 @@ export default function InsightsPage() {
       {/* ── Analytics ──────────────────────────────────────────────────────── */}
       {tab === "analytics" && (
         <div className="space-y-4">
-
-          {/* ── Sample data notice ────────────────────────────────────────── */}
-          <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3">
-            <span className="text-amber-500 text-lg shrink-0">📊</span>
-            <div>
-              <p className="text-sm font-semibold text-amber-800">Frontline is still collecting your data</p>
-              <p className="text-xs text-amber-700 mt-0.5">The charts below show <strong>sample data</strong> as a preview of what you&apos;ll see once your team starts using the platform. Real data will appear automatically as activity is recorded.</p>
-            </div>
-          </div>
 
           {/* ── Filter bar ────────────────────────────────────────────────── */}
           <div className="bg-white rounded-2xl border border-surface-border p-4 flex flex-col gap-3">

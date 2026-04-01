@@ -1006,7 +1006,8 @@ function MyShiftCard() {
       }
       setLocationId(lid);
 
-      const today = new Date().toISOString().slice(0, 10);
+      const _now = new Date();
+      const today = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
       const [shiftsRes, attRes] = await Promise.all([
         listShifts({ user_id: uid, from_date: `${today}T00:00:00`, to_date: `${today}T23:59:59`, page_size: 5 }).catch(() => ({ items: [] as Shift[], total_count: 0 })),
         getMyAttendance({ from_date: today, to_date: today }).catch(() => [] as AttendanceRecord[]),
@@ -1070,7 +1071,16 @@ function MyShiftCard() {
     setActionLoading(false);
   }
 
-  const fmt = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const fmt = (iso: string) => {
+    // Extract wall-clock time directly from ISO string — shift times are stored as
+    // naive local time with +00:00 suffix; converting via new Date() adds a UTC→local
+    // offset that would show the wrong hour.
+    const m = iso.match(/T(\d{2}):(\d{2})/);
+    if (!m) return "";
+    const h = parseInt(m[1]), min = m[2];
+    const ampm = h >= 12 ? "PM" : "AM";
+    return `${h % 12 || 12}:${min} ${ampm}`;
+  };
   const isClockedIn = !!(attendance?.clock_in_at && !attendance?.clock_out_at);
 
   if (loading) return (

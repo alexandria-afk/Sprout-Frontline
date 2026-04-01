@@ -89,7 +89,9 @@ function addDays(d: Date, n: number): Date {
 }
 
 function fmtDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  // Use local date parts — shift times are stored as "naive local" (local time written
+  // with +00:00 suffix), so comparisons must use the local calendar date, not UTC.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function fmtTime(iso: string): string {
@@ -114,7 +116,10 @@ function fmtWallTime(iso: string): string {
 }
 
 function fmtShortDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  // Read the date portion directly from the ISO string to avoid UTC→local offset.
+  const [, mo, day] = iso.slice(0, 10).split("-").map(Number);
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${months[mo - 1]} ${day}`;
 }
 
 function fmtDuration(minutes: number | null): string {
@@ -1428,7 +1433,7 @@ function ManagerSwaps() {
                     {(swap as ShiftSwapRequest & { profiles?: { full_name: string } | null }).profiles?.full_name ?? "Staff"}
                   </td>
                   <td className="px-4 py-3 text-dark-secondary">
-                    {swap.shift ? `${fmtShortDate(swap.shift.start_at)} ${fmtTime(swap.shift.start_at)}` : "—"}
+                    {swap.shift ? `${fmtShortDate(swap.shift.start_at)} ${fmtWallTime(swap.shift.start_at)}` : "—"}
                   </td>
                   <td className="px-4 py-3 text-dark-secondary">
                     {swap.target_user?.full_name ?? "—"}
