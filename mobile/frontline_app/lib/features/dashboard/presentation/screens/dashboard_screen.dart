@@ -2,15 +2,19 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 import 'package:frontline_app/features/dashboard/providers/dashboard_provider.dart';
 import 'package:frontline_app/features/tasks/providers/tasks_provider.dart';
 import 'package:frontline_app/features/shifts/data/models/shift_models.dart';
 import 'package:frontline_app/features/shifts/providers/shifts_provider.dart';
 import 'package:frontline_app/features/training/providers/training_provider.dart';
-import 'package:frontline_app/features/forms/providers/forms_provider.dart';
-import 'package:frontline_app/features/issues/providers/issues_provider.dart';
 import 'package:frontline_app/features/announcements/providers/announcements_provider.dart';
+import 'package:frontline_app/features/ai_insights/providers/ai_insights_provider.dart';
+import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models.dart';
+import 'package:frontline_app/features/notifications/providers/notifications_provider.dart';
+import 'package:frontline_app/features/badges/providers/badges_provider.dart';
 
 // ── Design tokens from MOBILE_DESIGN.md ───────────────────────────────────────
 
@@ -69,23 +73,23 @@ class _HomeBody extends ConsumerWidget {
     final asyncShifts = ref.watch(myShiftsProvider);
     final asyncEnrollments = ref.watch(myEnrollmentsProvider);
 
-    // Compute metrics from real provider data.
     final tasks = asyncTasks.valueOrNull ?? [];
-    final shifts = asyncShifts.valueOrNull ?? [];
     final enrollments = asyncEnrollments.valueOrNull ?? [];
 
     final overdueCount = tasks.where((t) => t.isOverdue).length;
     final openIssueCount = tasks
-        .where((t) => t.status == 'pending' || t.status == 'open' || t.status == 'in_progress')
+        .where((t) =>
+            t.status == 'pending' ||
+            t.status == 'open' ||
+            t.status == 'in_progress')
         .length;
-    final incompleteCourses = enrollments
-        .where((e) => e.status != 'completed')
-        .length;
+    final incompleteCourses =
+        enrollments.where((e) => e.status != 'completed').length;
 
-    // Shifts this week.
     final now = DateTime.now();
     final weekStart = now.subtract(Duration(days: now.weekday - 1));
     final weekEnd = weekStart.add(const Duration(days: 7));
+    final shifts = asyncShifts.valueOrNull ?? [];
     final shiftsThisWeek = shifts.where((s) {
       final dt = DateTime.tryParse(s.startAt);
       return dt != null && dt.isAfter(weekStart) && dt.isBefore(weekEnd);
@@ -97,15 +101,19 @@ class _HomeBody extends ConsumerWidget {
         ref.read(myTasksProvider.notifier).refresh();
         ref.read(myShiftsProvider.notifier).refresh();
         ref.invalidate(myEnrollmentsProvider);
+        ref.read(aiInsightsProvider.notifier).refresh();
+        ref.read(inboxNotificationsProvider.notifier).refresh();
+        ref.invalidate(unreadCountProvider);
+        ref.read(announcementsProvider.notifier).refresh();
       },
       color: _C.sproutGreen,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-          // Greeting header
+          // 0. Greeting header
           SliverToBoxAdapter(child: _GreetingHeader()),
 
-          // Metric cards — 2x2 grid
+          // 1. Stat cards — 2x2 grid
           SliverToBoxAdapter(
             child: _MetricGrid(
               overdueCount: overdueCount,
@@ -117,19 +125,26 @@ class _HomeBody extends ConsumerWidget {
             ),
           ),
 
-          // TODO: Notification cards — AI/schedule-driven, stacked behind each other
+          // 2. AI Insight cards
+          SliverToBoxAdapter(child: _AIInsightsSection()),
 
-          // Unified Inbox
-          SliverToBoxAdapter(child: _InboxSection()),
-
-          // My Shift section
+          // 3. My Shift
           SliverToBoxAdapter(
             child: asyncShifts.when(
               loading: () => const SizedBox.shrink(),
-              error: (e, st) => const SizedBox.shrink(),
+              error: (_, _) => const SizedBox.shrink(),
               data: (shiftList) => _ShiftSection(shifts: shiftList),
             ),
           ),
+
+          // 4. Inbox (notifications)
+          SliverToBoxAdapter(child: _InboxSection()),
+
+          // 5. Leaderboard
+          SliverToBoxAdapter(child: _LeaderboardSection()),
+
+          // 6. Latest Announcements
+          SliverToBoxAdapter(child: _AnnouncementsSection()),
 
           const SliverToBoxAdapter(child: SizedBox(height: 16)),
         ],
@@ -171,6 +186,19 @@ class _GreetingHeader extends ConsumerWidget {
               ],
             ),
           ),
+          GestureDetector(
+            onTap: () => context.go('/issues/report'),
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: _C.sproutGreen,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.add, size: 20, color: Colors.white),
+            ),
+          ),
+          const SizedBox(width: 10),
           GestureDetector(
             onTap: () => _showProfileSheet(context, ref),
             child: const CircleAvatar(
@@ -216,8 +244,8 @@ class _GreetingHeader extends ConsumerWidget {
             const SizedBox(height: 24),
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.red),
-              title: const Text('Sign Out',
-                  style: TextStyle(color: Colors.red)),
+              title:
+                  const Text('Sign Out', style: TextStyle(color: Colors.red)),
               onTap: () {
                 Navigator.pop(context);
                 ref.read(authSessionProvider.notifier).signOut();
@@ -345,31 +373,19 @@ class _MetricCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              value,
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
-                color: color,
-              ),
-            ),
+            Text(value,
+                style: TextStyle(
+                    fontSize: 28, fontWeight: FontWeight.bold, color: color)),
             const SizedBox(height: 4),
-            Text(
-              label,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: _C.textPrimary,
-              ),
-            ),
+            Text(label,
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: _C.textPrimary)),
             const SizedBox(height: 2),
-            Text(
-              detail,
-              style: const TextStyle(
-                fontSize: 12,
-                color: _C.textSecondary,
-              ),
-            ),
+            Text(detail,
+                style:
+                    const TextStyle(fontSize: 12, color: _C.textSecondary)),
           ],
         ),
       ),
@@ -381,9 +397,15 @@ class _MetricCard extends StatelessWidget {
 
 class _SectionCard extends StatelessWidget {
   final String label;
+  final String? actionLabel;
   final String? route;
   final Widget child;
-  const _SectionCard({required this.label, this.route, required this.child});
+  const _SectionCard({
+    required this.label,
+    this.actionLabel,
+    this.route,
+    required this.child,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -411,8 +433,20 @@ class _SectionCard extends StatelessWidget {
                 if (route != null)
                   GestureDetector(
                     onTap: () => context.go(route!),
-                    child: const Icon(Icons.north_east,
-                        size: 16, color: _C.textTertiary),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (actionLabel != null)
+                          Text(actionLabel!,
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                  color: _C.sproutGreen)),
+                        if (actionLabel == null)
+                          const Icon(Icons.north_east,
+                              size: 16, color: _C.textTertiary),
+                      ],
+                    ),
                   ),
               ],
             ),
@@ -430,7 +464,8 @@ class _SectionCard extends StatelessWidget {
 class _InnerRow extends StatelessWidget {
   final Widget child;
   final VoidCallback? onTap;
-  const _InnerRow({required this.child, this.onTap});
+  final Color? backgroundColor;
+  const _InnerRow({required this.child, this.onTap, this.backgroundColor});
 
   @override
   Widget build(BuildContext context) {
@@ -441,7 +476,7 @@ class _InnerRow extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: _C.surface2,
+          color: backgroundColor ?? _C.surface2,
           borderRadius: BorderRadius.circular(10),
         ),
         child: child,
@@ -450,215 +485,141 @@ class _InnerRow extends StatelessWidget {
   }
 }
 
-// ── Unified Inbox section ─────────────────────────────────────────────────────
+// ── AI Insight cards ─────────────────────────────────────────────────────────
 
-/// An inbox item from any source (task, form, issue, course, announcement).
-class _InboxItem {
-  final String kind; // task, form, issue, course, announcement
-  final String id;
-  final String title;
-  final String subtitle;
-  final DateTime? due;
-  final bool overdue;
-  final String route;
-
-  const _InboxItem({
-    required this.kind,
-    required this.id,
-    required this.title,
-    required this.subtitle,
-    this.due,
-    required this.overdue,
-    required this.route,
-  });
-}
-
-const _kindMeta = <String, (IconData, Color, String)>{
-  'task':         (Icons.assignment,           Color(0xFF1D9E75), 'Task'),
-  'form':         (Icons.checklist,            Color(0xFFD97706), 'Form'),
-  'issue':        (Icons.warning_amber,        Color(0xFFFF9500), 'Issue'),
-  'course':       (Icons.school,               Color(0xFF0A84FF), 'Training'),
-  'announcement': (Icons.campaign,             Color(0xFF7C3AED), 'Acknowledge'),
-};
-
-class _InboxSection extends ConsumerWidget {
+class _AIInsightsSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final now = DateTime.now();
-    final items = <_InboxItem>[];
+    final asyncInsights = ref.watch(aiInsightsProvider);
+    final dismissed = ref.watch(dismissedInsightsProvider);
 
-    // Tasks (not completed)
-    final tasks = ref.watch(myTasksProvider).valueOrNull ?? [];
-    for (final t in tasks) {
-      if (t.status == 'completed' || t.status == 'cancelled') continue;
-      final due = t.dueAt != null ? DateTime.tryParse(t.dueAt!) : null;
-      items.add(_InboxItem(
-        kind: 'task',
-        id: t.id,
-        title: t.title,
-        subtitle: t.priority,
-        due: due,
-        overdue: t.isOverdue,
-        route: '/tasks/${t.id}',
-      ));
-    }
+    return asyncInsights.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
+      data: (response) {
+        final visible = response.insights
+            .where((i) => !dismissed.contains(i.dismissKey))
+            .toList();
+        if (visible.isEmpty) return const SizedBox.shrink();
 
-    // Form assignments
-    final forms = ref.watch(formsProvider).valueOrNull ?? [];
-    for (final f in forms) {
-      if (!f.isActive) continue;
-      final due = f.dueAt != null ? DateTime.tryParse(f.dueAt!) : null;
-      items.add(_InboxItem(
-        kind: 'form',
-        id: f.id,
-        title: f.templateTitle,
-        subtitle: f.templateType,
-        due: due,
-        overdue: due != null && due.isBefore(now),
-        route: '/forms/fill/${f.id}',
-      ));
-    }
-
-    // Issues (open / in_progress)
-    final issues = ref.watch(myIssuesProvider).valueOrNull ?? [];
-    for (final i in issues) {
-      if (i.status == 'resolved' || i.status == 'verified_closed') continue;
-      items.add(_InboxItem(
-        kind: 'issue',
-        id: i.id,
-        title: i.title,
-        subtitle: i.status.replaceAll('_', ' '),
-        due: null,
-        overdue: false,
-        route: '/issues',
-      ));
-    }
-
-    // Course enrollments (not completed)
-    final enrollments = ref.watch(myEnrollmentsProvider).valueOrNull ?? [];
-    for (final e in enrollments) {
-      if (e.status == 'completed') continue;
-      items.add(_InboxItem(
-        kind: 'course',
-        id: e.id,
-        title: 'Training course',
-        subtitle: e.status == 'in_progress' ? 'In progress' : 'Not started',
-        due: null,
-        overdue: false,
-        route: '/training',
-      ));
-    }
-
-    // Announcements requiring acknowledgement
-    final announcements =
-        ref.watch(announcementsProvider).valueOrNull ?? [];
-    for (final a in announcements) {
-      if (!a.requiresAcknowledgement || a.isAcknowledged) continue;
-      items.add(_InboxItem(
-        kind: 'announcement',
-        id: a.id,
-        title: a.title,
-        subtitle: 'Acknowledgement required',
-        due: null,
-        overdue: false,
-        route: '/announcements',
-      ));
-    }
-
-    // Sort: overdue first, then by due date ascending, then no-due last
-    items.sort((a, b) {
-      if (a.overdue != b.overdue) return a.overdue ? -1 : 1;
-      if (a.due != null && b.due != null) return a.due!.compareTo(b.due!);
-      if (a.due != null) return -1;
-      if (b.due != null) return 1;
-      return 0;
-    });
-
-    final display = items.take(5).toList();
-    if (display.isEmpty) return const SizedBox.shrink();
-
-    return _SectionCard(
-      label: 'MY INBOX',
-      route: '/tasks',
-      child: Column(
-        children: display.map((item) {
-          final meta = _kindMeta[item.kind]!;
-          final icon = meta.$1;
-          final color = item.overdue ? _C.critical : meta.$2;
-          final kindLabel = meta.$3;
-
-          String detail = kindLabel;
-          if (item.overdue && item.due != null) {
-            final diff = now.difference(item.due!);
-            detail = 'Overdue by ${_humanDuration(diff)}';
-          } else if (item.due != null) {
-            detail = '$kindLabel · ${DateFormat('MMM d, h:mm a').format(item.due!.toLocal())}';
-          } else {
-            detail = '$kindLabel · ${item.subtitle}';
-          }
-
-          return _InnerRow(
-            onTap: () => context.go(item.route),
-            child: Row(
-              children: [
-                Container(
-                  width: 32,
-                  height: 32,
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            children: visible.map((insight) {
+              return Dismissible(
+                key: ValueKey(insight.dismissKey),
+                direction: DismissDirection.startToEnd,
+                onDismissed: (_) {
+                  ref
+                      .read(dismissedInsightsProvider.notifier)
+                      .dismiss(insight.dismissKey);
+                },
+                background: Container(
+                  alignment: Alignment.centerLeft,
+                  padding: const EdgeInsets.only(left: 20),
+                  margin: const EdgeInsets.only(bottom: 10),
                   decoration: BoxDecoration(
-                    color: color.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(8),
+                    color: _C.surface3,
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(icon, size: 16, color: color),
+                  child: const Icon(Icons.check, color: _C.textSecondary),
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(item.title,
-                          style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: _C.textPrimary),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                      Text(detail,
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: item.overdue
-                                  ? _C.critical
-                                  : _C.textSecondary)),
-                    ],
-                  ),
+                child: _AIInsightCard(insight: insight),
+              );
+            }).toList(),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _AIInsightCard extends StatelessWidget {
+  final AIInsight insight;
+  const _AIInsightCard({required this.insight});
+
+  @override
+  Widget build(BuildContext context) {
+    final (accentColor, icon) = switch (insight.severity) {
+      'critical' => (_C.critical, '🔴'),
+      'warning' => (_C.high, '⚠️'),
+      _ => (_C.info, 'ℹ️'),
+    };
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _C.surface1,
+        borderRadius: BorderRadius.circular(12),
+        border: Border(left: BorderSide(color: accentColor, width: 3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(icon, style: const TextStyle(fontSize: 14)),
+              const SizedBox(width: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: accentColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(4),
                 ),
-                const Icon(Icons.chevron_right,
-                    size: 16, color: _C.textTertiary),
-              ],
-            ),
-          );
-        }).toList(),
+                child: Text(insight.severity.toUpperCase(),
+                    style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: accentColor)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(insight.title,
+              style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: _C.textPrimary)),
+          const SizedBox(height: 4),
+          Text(insight.body,
+              style: const TextStyle(
+                  fontSize: 13, color: _C.textSecondary, height: 1.4)),
+          const SizedBox(height: 8),
+          Text(insight.recommendation,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  color: accentColor,
+                  height: 1.4)),
+        ],
       ),
     );
   }
 }
 
-String _humanDuration(Duration d) {
-  if (d.inDays > 0) return '${d.inDays}d';
-  if (d.inHours > 0) return '${d.inHours}h';
-  return '${d.inMinutes}m';
-}
+// ── My Shift section (with clock in/out) ─────────────────────────────────────
 
-// ── My Shift section ──────────────────────────────────────────────────────────
-
-class _ShiftSection extends StatelessWidget {
+class _ShiftSection extends ConsumerStatefulWidget {
   final List<Shift> shifts;
   const _ShiftSection({required this.shifts});
 
   @override
+  ConsumerState<_ShiftSection> createState() => _ShiftSectionState();
+}
+
+class _ShiftSectionState extends ConsumerState<_ShiftSection> {
+  bool _isLoading = false;
+
+  @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
-    // Find today's shift or next upcoming
-    final todayShifts = shifts.where((s) {
+    final activeAttendance = ref.watch(activeAttendanceProvider);
+
+    // Find today's shift.
+    final todayShifts = widget.shifts.where((s) {
       final start = DateTime.tryParse(s.startAt)?.toLocal();
       return start != null &&
           start.year == now.year &&
@@ -666,82 +627,569 @@ class _ShiftSection extends StatelessWidget {
           start.day == now.day;
     }).toList();
 
-    if (todayShifts.isEmpty && shifts.isEmpty) return const SizedBox.shrink();
+    // No shift today.
+    if (todayShifts.isEmpty) {
+      return _SectionCard(
+        label: 'MY SHIFT',
+        route: '/shifts',
+        child: const Padding(
+          padding: EdgeInsets.symmetric(vertical: 8),
+          child: Text('No shift scheduled',
+              style: TextStyle(fontSize: 14, color: _C.textSecondary)),
+        ),
+      );
+    }
 
-    final display = todayShifts.isNotEmpty ? todayShifts.first : shifts.first;
-    final start = DateTime.tryParse(display.startAt)?.toLocal();
-    final end = DateTime.tryParse(display.endAt)?.toLocal();
-    final isActive = start != null && end != null &&
-        now.isAfter(start) && now.isBefore(end);
+    final shift = todayShifts.first;
+    final start = DateTime.tryParse(shift.startAt)?.toLocal();
+    final end = DateTime.tryParse(shift.endAt)?.toLocal();
+    final isClockedIn = activeAttendance != null;
 
     return _SectionCard(
       label: 'MY SHIFT',
       route: '/shifts',
-      child: _InnerRow(
-        onTap: () => context.go('/shifts'),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              decoration: BoxDecoration(
-                color: isActive
-                    ? _C.sproutGreenLight
-                    : _C.surface3,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(
-                isActive ? Icons.timer : Icons.schedule,
-                color: isActive ? _C.sproutGreen : _C.textSecondary,
-                size: 20,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    start != null && end != null
-                        ? '${DateFormat('h:mm a').format(start)} – ${DateFormat('h:mm a').format(end)}'
-                        : 'Scheduled',
-                    style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: _C.textPrimary),
+      child: Column(
+        children: [
+          _InnerRow(
+            onTap: () => context.go('/shifts'),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: isClockedIn ? _C.sproutGreenLight : _C.surface3,
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                  Text(
-                    isActive
-                        ? 'In progress'
-                        : display.locationName ?? 'Upcoming',
-                    style: const TextStyle(
-                        fontSize: 13, color: _C.textSecondary),
+                  child: Icon(
+                    isClockedIn ? Icons.timer : Icons.schedule,
+                    color: isClockedIn ? _C.sproutGreen : _C.textSecondary,
+                    size: 20,
                   ),
-                ],
-              ),
-            ),
-            if (isActive)
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _C.sproutGreen.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(6),
                 ),
-                child: const Text('ACTIVE',
-                    style: TextStyle(
-                        color: _C.sproutGreen,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700)),
-              ),
-          ],
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        start != null && end != null
+                            ? '${DateFormat('h:mm a').format(start)} – ${DateFormat('h:mm a').format(end)}'
+                            : 'Scheduled',
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: _C.textPrimary),
+                      ),
+                      Text(
+                        isClockedIn
+                            ? 'Clocked in at ${DateFormat('h:mm a').format(DateTime.tryParse(activeAttendance.clockInAt)?.toLocal() ?? now)}'
+                            : shift.locationName ?? 'Upcoming',
+                        style: const TextStyle(
+                            fontSize: 13, color: _C.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                if (isClockedIn)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _C.sproutGreen.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Text('ACTIVE',
+                        style: TextStyle(
+                            color: _C.sproutGreen,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700)),
+                  ),
+              ],
+            ),
+          ),
+          // Action buttons
+          if (!isClockedIn)
+            _PrimaryButton(
+              label: 'Clock In',
+              isLoading: _isLoading,
+              onTap: () => _clockIn(shift),
+            ),
+          if (isClockedIn)
+            Row(
+              children: [
+                Expanded(
+                  child: _SecondaryButton(
+                    label: 'On Break',
+                    onTap: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Break tracking coming soon')),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _DestructiveButton(
+                    label: 'Clock Out',
+                    isLoading: _isLoading,
+                    onTap: () => _clockOut(activeAttendance),
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _clockIn(Shift shift) async {
+    setState(() => _isLoading = true);
+    try {
+      final position = await _getPosition();
+      final repo = ref.read(shiftsRepositoryProvider);
+      final attendance = await repo.clockIn(
+        shiftId: shift.id,
+        locationId: shift.locationId ?? '',
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+      ref.read(activeAttendanceProvider.notifier).state = attendance;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Clock in failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _clockOut(AttendanceRecord? attendance) async {
+    if (attendance == null) return;
+    setState(() => _isLoading = true);
+    try {
+      final position = await _getPosition();
+      final repo = ref.read(shiftsRepositoryProvider);
+      await repo.clockOut(
+        attendanceId: attendance.id,
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+      ref.read(activeAttendanceProvider.notifier).state = null;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Clock out failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<Position> _getPosition() async {
+    LocationPermission perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+    }
+    if (perm == LocationPermission.deniedForever ||
+        perm == LocationPermission.denied) {
+      throw Exception('Location permission required');
+    }
+    return Geolocator.getCurrentPosition(
+      locationSettings:
+          const LocationSettings(accuracy: LocationAccuracy.high),
+    );
+  }
+}
+
+// ── Inbox section (notifications) ────────────────────────────────────────────
+
+const _notifTypeMeta = <String, (IconData, Color)>{
+  'task_assigned': (Icons.assignment, Color(0xFF1D9E75)),
+  'form_assigned': (Icons.checklist, Color(0xFFD97706)),
+  'workflow_stage_assigned': (Icons.account_tree, Color(0xFF7C3AED)),
+  'issue_assigned': (Icons.warning_amber, Color(0xFFFF9500)),
+  'issue_comment': (Icons.chat_bubble_outline, Color(0xFF0A84FF)),
+  'issue_status_changed': (Icons.sync, Color(0xFF0A84FF)),
+  'shift_claim_pending': (Icons.schedule, Color(0xFF1D9E75)),
+  'shift_swap_pending': (Icons.swap_horiz, Color(0xFF1D9E75)),
+  'leave_request_pending': (Icons.event_busy, Color(0xFFFF9500)),
+  'form_submission_review': (Icons.rate_review, Color(0xFFD97706)),
+  'cap_generated': (Icons.gpp_bad, Color(0xFFFF3B30)),
+  'announcement': (Icons.campaign, Color(0xFF7C3AED)),
+  'course_enrolled': (Icons.school, Color(0xFF0A84FF)),
+  'scheduled_reminder': (Icons.alarm, Color(0xFFFF9500)),
+};
+
+class _InboxSection extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncNotifs = ref.watch(inboxNotificationsProvider);
+
+    return asyncNotifs.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
+      data: (notifications) {
+        if (notifications.isEmpty) {
+          return _SectionCard(
+            label: 'INBOX',
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('All caught up \u2713',
+                  style: TextStyle(fontSize: 14, color: _C.textSecondary)),
+            ),
+          );
+        }
+
+        return _SectionCard(
+          label: 'INBOX',
+          actionLabel: 'View all \u2192',
+          route: '/notifications',
+          child: Column(
+            children: [
+              ...notifications.map((notif) {
+                final meta =
+                    _notifTypeMeta[notif.type] ?? (Icons.notifications, _C.info);
+                final icon = meta.$1;
+                final color = meta.$2;
+                final timeAgo = _timeAgo(notif.createdAt);
+
+                return _InnerRow(
+                  onTap: () {
+                    ref
+                        .read(inboxNotificationsProvider.notifier)
+                        .markRead(notif.id);
+                    context.go(notif.route);
+                  },
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(icon, size: 16, color: color),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(notif.title,
+                                style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: _C.textPrimary),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            if (notif.body != null && notif.body!.isNotEmpty)
+                              Text(notif.body!,
+                                  style: const TextStyle(
+                                      fontSize: 12, color: _C.textSecondary),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(timeAgo,
+                          style: const TextStyle(
+                              fontSize: 11, color: _C.textTertiary)),
+                    ],
+                  ),
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── Leaderboard section ──────────────────────────────────────────────────────
+
+class _LeaderboardSection extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncConfigs = ref.watch(leaderboardConfigsProvider);
+
+    return asyncConfigs.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
+      data: (configs) {
+        if (configs.isEmpty) return const SizedBox.shrink();
+        // Use the first leaderboard config.
+        final config = configs.first;
+        return _LeaderboardEntries(configId: config.id);
+      },
+    );
+  }
+}
+
+class _LeaderboardEntries extends ConsumerWidget {
+  final String configId;
+  const _LeaderboardEntries({required this.configId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncEntries = ref.watch(leaderboardEntriesProvider(configId));
+    final currentUserId =
+        Supabase.instance.client.auth.currentUser?.id ?? '';
+
+    return asyncEntries.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
+      data: (entries) {
+        if (entries.isEmpty) return const SizedBox.shrink();
+        final top5 = entries.take(5).toList();
+
+        return _SectionCard(
+          label: 'LEADERBOARD',
+          actionLabel: 'View full \u2192',
+          route: '/badges',
+          child: Column(
+            children: top5.asMap().entries.map((e) {
+              final idx = e.key;
+              final entry = e.value;
+              final rank = entry.rank > 0 ? entry.rank : idx + 1;
+              final isMe = entry.userId == currentUserId;
+
+              return _InnerRow(
+                backgroundColor: isMe ? _C.sproutGreenLight : null,
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 24,
+                      child: Text(
+                        '$rank',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: isMe ? _C.sproutGreen : _C.textSecondary,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        entry.userName,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight:
+                              isMe ? FontWeight.w600 : FontWeight.w400,
+                          color: _C.textPrimary,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Text(
+                      '${entry.score.toInt()} pts',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: isMe ? _C.sproutGreen : _C.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── Announcements section ────────────────────────────────────────────────────
+
+class _AnnouncementsSection extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final asyncAnnouncements = ref.watch(announcementsProvider);
+
+    return asyncAnnouncements.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
+      data: (announcements) {
+        if (announcements.isEmpty) return const SizedBox.shrink();
+        final latest = announcements.take(3).toList();
+
+        return _SectionCard(
+          label: 'ANNOUNCEMENTS',
+          actionLabel: 'View all \u2192',
+          route: '/announcements',
+          child: Column(
+            children: latest.map((a) {
+              final timeAgo = _timeAgo(a.createdAt);
+              final preview = a.body.length > 80
+                  ? '${a.body.substring(0, 80)}...'
+                  : a.body;
+
+              return _InnerRow(
+                onTap: () {
+                  ref.read(announcementsProvider.notifier).markRead(a.id);
+                  context.go('/announcements');
+                },
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF7C3AED).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.campaign,
+                          size: 16, color: Color(0xFF7C3AED)),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(a.title,
+                              style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: _C.textPrimary),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                          const SizedBox(height: 2),
+                          Text(preview,
+                              style: const TextStyle(
+                                  fontSize: 12,
+                                  color: _C.textSecondary,
+                                  height: 1.3),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(timeAgo,
+                        style: const TextStyle(
+                            fontSize: 11, color: _C.textTertiary)),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────────────
+
+class _PrimaryButton extends StatelessWidget {
+  final String label;
+  final bool isLoading;
+  final VoidCallback onTap;
+  const _PrimaryButton(
+      {required this.label, this.isLoading = false, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: isLoading ? null : onTap,
+      child: Container(
+        width: double.infinity,
+        height: 50,
+        decoration: BoxDecoration(
+          color: _C.sproutGreen,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: isLoading
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: Colors.white))
+              : Text(label,
+                  style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white)),
         ),
       ),
     );
   }
 }
 
-// ── Audit score section ───────────────────────────────────────────────────────
+class _SecondaryButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  const _SecondaryButton({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 50,
+        decoration: BoxDecoration(
+          color: _C.surface2,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Text(label,
+              style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: _C.textPrimary)),
+        ),
+      ),
+    );
+  }
+}
+
+class _DestructiveButton extends StatelessWidget {
+  final String label;
+  final bool isLoading;
+  final VoidCallback onTap;
+  const _DestructiveButton(
+      {required this.label, this.isLoading = false, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: isLoading ? null : onTap,
+      child: Container(
+        height: 50,
+        decoration: BoxDecoration(
+          color: _C.surface2,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: isLoading
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: _C.critical))
+              : Text(label,
+                  style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: _C.critical)),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Sidekick sheet ───────────────────────────────────────────────────────────
 
 class _SidekickSheet extends StatefulWidget {
   @override
@@ -795,12 +1243,11 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                   ),
                   const SizedBox(width: 10),
                   const Text('Sidekick',
-                      style: TextStyle(
-                          fontSize: 17, fontWeight: FontWeight.w600)),
+                      style:
+                          TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
                 ],
               ),
             ),
-            // Suggestion chips
             SizedBox(
               height: 36,
               child: ListView(
@@ -823,15 +1270,15 @@ class _SidekickSheetState extends State<_SidekickSheet> {
               ),
             ),
             const Spacer(),
-            // Input bar
             Container(
               padding: EdgeInsets.only(
-                left: 12, right: 8, top: 8,
+                left: 12,
+                right: 8,
+                top: 8,
                 bottom: MediaQuery.of(context).padding.bottom + 8,
               ),
               decoration: const BoxDecoration(
-                border: Border(
-                    top: BorderSide(color: _C.surface3)),
+                border: Border(top: BorderSide(color: _C.surface3)),
               ),
               child: Row(
                 children: [
@@ -842,19 +1289,16 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                         hintText: 'Ask anything...',
                         border: InputBorder.none,
                         isDense: true,
-                        contentPadding: EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
+                        contentPadding:
+                            EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       ),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.send,
-                        color: _C.sproutGreen),
+                    icon: const Icon(Icons.send, color: _C.sproutGreen),
                     onPressed: () {
-                      // TODO: Wire to POST /api/v1/ai/chat
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('AI chat coming soon')),
+                        const SnackBar(content: Text('AI chat coming soon')),
                       );
                     },
                   ),
@@ -893,6 +1337,19 @@ class _SuggestionChip extends StatelessWidget {
   }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+String _timeAgo(String isoDate) {
+  final dt = DateTime.tryParse(isoDate);
+  if (dt == null) return '';
+  final diff = DateTime.now().difference(dt);
+  if (diff.inMinutes < 1) return 'now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+  if (diff.inHours < 24) return '${diff.inHours}h';
+  if (diff.inDays < 7) return '${diff.inDays}d';
+  return DateFormat('MMM d').format(dt.toLocal());
+}
+
 // ── Skeleton loading ──────────────────────────────────────────────────────────
 
 class _SkeletonHome extends StatelessWidget {
@@ -906,7 +1363,6 @@ class _SkeletonHome extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Greeting placeholder
             Container(
               width: 180,
               height: 24,
@@ -916,7 +1372,6 @@ class _SkeletonHome extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 24),
-            // Ring placeholders
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: List.generate(
@@ -932,7 +1387,6 @@ class _SkeletonHome extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 24),
-            // Card placeholders
             ...List.generate(
               2,
               (_) => Container(
@@ -976,8 +1430,8 @@ class _ErrorState extends StatelessWidget {
           GestureDetector(
             onTap: onRetry,
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 24, vertical: 12),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
               decoration: BoxDecoration(
                 color: _C.sproutGreen,
                 borderRadius: BorderRadius.circular(12),

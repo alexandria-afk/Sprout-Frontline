@@ -11,6 +11,7 @@ class HiveService {
   static const String pendingSubmissionsBox = 'pending_submissions';
   static const String announcementsCacheBox = 'announcements_cache';
   static const String formsCacheBox = 'forms_cache';
+  static const String insightsCacheBox = 'insights_cache';
 
   /// Call once from main() before runApp().
   static Future<void> init() async {
@@ -20,6 +21,7 @@ class HiveService {
     await Hive.openBox<Map>(pendingSubmissionsBox);
     await Hive.openBox<Map>(announcementsCacheBox);
     await Hive.openBox<Map>(formsCacheBox);
+    await Hive.openBox<Map>(insightsCacheBox);
   }
 
   static Box<Map> get pendingSubmissions =>
@@ -30,4 +32,7 @@ class HiveService {
 
   static Box<Map> get formsCache =>
       Hive.box<Map>(formsCacheBox);
+
+  static Box<Map> get insightsCache =>
+      Hive.box<Map>(insightsCacheBox);
 }
