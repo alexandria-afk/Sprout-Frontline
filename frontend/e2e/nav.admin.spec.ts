@@ -10,7 +10,8 @@ test.describe("Admin Sidebar Navigation", () => {
 
   test("sidebar loads without errors", async ({ page }) => {
     await expect(page).toHaveURL(/dashboard/);
-    const nav = page.locator("nav");
+    // Page may have multiple <nav> elements (sidebar + breadcrumb); use first
+    const nav = page.locator("nav").first();
     await expect(nav).toBeVisible();
   });
 

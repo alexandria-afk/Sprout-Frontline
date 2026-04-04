@@ -40,8 +40,9 @@ test.describe("Training & Maintenance Guides (Admin)", () => {
 
   test("maintenance guides page heading is visible", async ({ page }) => {
     await page.goto("/dashboard/maintenance/guides");
+    // Use .first() to avoid strict mode violation when multiple headings match /guide/i
     await expect(
-      page.getByRole("heading", { name: /guide/i })
+      page.getByRole("heading", { name: /guide/i }).first()
     ).toBeVisible({ timeout: 15_000 });
   });
 

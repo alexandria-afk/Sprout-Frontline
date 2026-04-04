@@ -63,11 +63,28 @@ export async function middleware(request: NextRequest) {
       url.pathname = to;
       return NextResponse.redirect(url);
     };
-    if (role === "staff" && path.startsWith("/dashboard/users")) {
-      return redirect("/dashboard");
+    // Staff — block admin/manager-only areas
+    if (role === "staff") {
+      const staffBlocked = [
+        "/dashboard/users",
+        "/dashboard/settings",
+        "/dashboard/insights",
+        "/dashboard/issues/categories",
+      ];
+      if (staffBlocked.some((p) => path.startsWith(p))) {
+        return redirect("/dashboard");
+      }
     }
-    if (role === "manager" && path.startsWith("/dashboard/users")) {
-      return redirect("/dashboard");
+
+    // Manager — block admin-only areas
+    if (role === "manager") {
+      const managerBlocked = [
+        "/dashboard/users",
+        "/dashboard/settings/roles",
+      ];
+      if (managerBlocked.some((p) => path.startsWith(p))) {
+        return redirect("/dashboard");
+      }
     }
   }
 

@@ -4,10 +4,12 @@ test.describe("Report Pages", () => {
   test("Safety Leaderboard loads with summary cards and table", async ({ page }) => {
     await page.goto("/dashboard/insights/reports/safety/leaderboard");
     await expect(page.getByRole("heading", { name: /leaderboard/i })).toBeVisible();
-    // Wait for data or empty state
-    await page.waitForTimeout(3000);
-    // Summary cards should exist
-    await expect(page.getByText(/participants|no data/i).first()).toBeVisible({ timeout: 15_000 });
+    // Wait for data or empty state (loading spinner clears first)
+    await expect(page.locator(".animate-spin").first()).not.toBeVisible({ timeout: 15_000 });
+    // Either summary cards render (has Participants label) or empty state renders
+    const hasData = await page.getByText("Participants").isVisible().catch(() => false);
+    const hasEmpty = await page.getByText(/no leaderboard data|no data available/i).isVisible().catch(() => false);
+    expect(hasData || hasEmpty).toBe(true);
   });
 
   test("Tasks Report loads with filters and stat cards", async ({ page }) => {

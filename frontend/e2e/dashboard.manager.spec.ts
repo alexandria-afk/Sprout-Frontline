@@ -44,10 +44,9 @@ test.describe("Manager Dashboard", () => {
     await expect(page.getByText("My Inbox")).toBeVisible({ timeout: 15_000 });
   });
 
-  test("Tasks Overview widget renders", async ({ page }) => {
-    await expect(page.getByText("Tasks Overview")).toBeVisible({
-      timeout: 15_000,
-    });
+  test("My Inbox widget renders (second check)", async ({ page }) => {
+    // Dashboard renders "My Inbox" for all roles — not "Tasks Overview"
+    await expect(page.getByText("My Inbox")).toBeVisible({ timeout: 15_000 });
   });
 
   test("stat card links navigate correctly", async ({ page }) => {

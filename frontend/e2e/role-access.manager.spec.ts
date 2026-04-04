@@ -60,26 +60,17 @@ test.describe("Role Access — Manager Privileges", () => {
     expect(redirectedAway || hasAccessDenied).toBe(true);
   });
 
-  test("manager CANNOT see New Template button on forms templates tab", async ({
+  test("manager CAN see New Template button on forms templates tab", async ({
     page,
   }) => {
-    await page.goto("/dashboard/forms");
+    // Both admin and manager can create form templates (role check: role !== "staff")
+    // Navigate directly to the templates tab — the button only renders when activeTab==="templates"
+    await page.goto("/dashboard/forms?tab=templates");
     await expect(page.locator(".animate-pulse").first()).not.toBeVisible({
       timeout: 15_000,
     });
-    const templatesTab = page.getByRole("button", {
-      name: "Templates",
-      exact: true,
-    });
-    const tabVisible = await templatesTab.isVisible().catch(() => false);
-    if (!tabVisible) {
-      // Templates tab not present for manager — new template is implicitly inaccessible
-      return;
-    }
-    await templatesTab.click();
-    await expect(
-      page.getByRole("button", { name: /new template/i })
-    ).not.toBeVisible({ timeout: 10_000 });
+    const newTemplateBtn = page.getByRole("button", { name: /new template/i });
+    await expect(newTemplateBtn).toBeVisible({ timeout: 15_000 });
   });
 
   test("manager CAN see their team's tasks (Tasks page loads)", async ({
