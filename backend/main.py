@@ -80,9 +80,9 @@ limiter = Limiter(key_func=get_remote_address, default_limits=[f"{settings.rate_
 
 app = FastAPI(
     lifespan=lifespan,
-    title="Frontline API",
+    title="Frontliner API",
     version="1.0.0",
-    description="Frontline Operations Platform — Phase 1",
+    description="Frontliner Operations Platform — Phase 1",
     docs_url="/docs",
     redoc_url="/redoc",
 )

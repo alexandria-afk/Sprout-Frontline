@@ -9,8 +9,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Frontline | Sprout Solutions",
-  description: "Frontline operations platform for restaurants, retail, and logistics.",
+  title: "Frontliner | Sprout Solutions",
+  description: "Frontliner operations platform for restaurants, retail, and logistics.",
 };
 
 export const viewport: Viewport = {

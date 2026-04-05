@@ -38,11 +38,11 @@ const Logo = ({ size = "md" }: { size?: "sm" | "md" }) => (
     </div>
     {size === "md" ? (
       <div>
-        <div className="font-bold text-sm leading-tight">Frontline</div>
+        <div className="font-bold text-sm leading-tight">Frontliner</div>
         <div className="text-white/50 text-xs">by Sprout</div>
       </div>
     ) : (
-      <span className="font-bold text-sm text-white">Frontline</span>
+      <span className="font-bold text-sm text-white">Frontliner</span>
     )}
   </div>
 );

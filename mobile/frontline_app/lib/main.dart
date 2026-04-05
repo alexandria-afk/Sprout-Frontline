@@ -37,7 +37,7 @@ class FrontlineApp extends ConsumerWidget {
     final router = ref.watch(routerProvider);
 
     return MaterialApp.router(
-      title: 'Frontline',
+      title: 'Frontliner',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       routerConfig: router,

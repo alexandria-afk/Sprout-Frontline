@@ -21,7 +21,7 @@ export default async function LoginPage() {
               <path d="M21.71 8.29l-3-3a1 1 0 0 0-1.42 0C15.91 6.67 15 9.12 15 12c0 1.71.33 3.33.94 4.79L13.5 18.2A7.09 7.09 0 0 0 8 13.07c0 4.27 3.23 7.77 7.39 8A9 9 0 0 0 21.71 8.29z" />
             </svg>
           </div>
-          <h1 className="text-2xl font-bold text-sprout-navy">Frontline</h1>
+          <h1 className="text-2xl font-bold text-sprout-navy">Frontliner</h1>
           <p className="text-dark-secondary text-sm mt-1">by Sprout Solutions</p>
         </div>
 
