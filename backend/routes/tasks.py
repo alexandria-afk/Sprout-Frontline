@@ -126,6 +126,11 @@ async def list_tasks(
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
 
+    role = (current_user.get("app_metadata") or {}).get("role", "staff")
+    manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
+    if role == "manager" and not location_id and manager_location_id:
+        location_id = manager_location_id
+
     # Resolve team member IDs for manager view
     team_user_ids: Optional[list] = None
     if my_team:

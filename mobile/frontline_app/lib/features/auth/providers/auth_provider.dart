@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/auth/auth_repository.dart';
+import 'package:frontline_app/core/offline/hive_service.dart';
 
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
   return AuthRepository();
@@ -40,6 +41,7 @@ class AuthNotifier extends StateNotifier<AsyncValue<Session?>> {
   }
 
   Future<void> signOut() async {
+    await HiveService.clearUserCaches();
     await _repo.signOut();
     state = const AsyncData(null);
   }

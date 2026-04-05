@@ -40,4 +40,13 @@ class HiveService {
 
   static Box<Map> get insightsCache =>
       Hive.box<Map>(insightsCacheBox);
+
+  /// Clear all user-scoped caches on sign-out to prevent data leaking
+  /// between accounts.
+  static Future<void> clearUserCaches() async {
+    await announcementsCache.clear();
+    await formsCache.clear();
+    await shiftsCache.clear();
+    await insightsCache.clear();
+  }
 }

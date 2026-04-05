@@ -24,7 +24,15 @@ router = APIRouter()
 # ── Response schema ────────────────────────────────────────────────────────────
 
 class InboxItem(BaseModel):
-    kind: Literal["task", "form", "workflow", "course", "announcement", "issue"]
+    kind: Literal[
+        "task", "form", "workflow", "course", "announcement", "issue",
+        # Manager/admin/super_admin action items
+        "shift_claim",    # open-shift claim awaiting approval
+        "shift_swap",     # shift swap awaiting manager approval
+        "leave_request",  # leave request awaiting approval
+        "form_review",    # form submission submitted, awaiting manager review
+        "cap",            # corrective action plan pending review
+    ]
     id: str
     title: str
     description: Optional[str] = None
@@ -135,16 +143,29 @@ async def get_inbox(current_user: dict = Depends(get_current_user)):
         fa_resp = (
             sb.table("form_assignments")
             .select(
-                "id,due_at,created_at,completed,is_deleted,"
+                "id,due_at,created_at,is_deleted,"
                 "form_templates(title,type,description)"
             )
-            .eq("user_id", user_id)
+            .eq("assigned_to_user_id", user_id)
             .eq("organisation_id", org_id)
-            .eq("completed", False)
+            .eq("is_active", True)
             .eq("is_deleted", False)
             .execute()
         )
+        assignment_ids = [fa["id"] for fa in (fa_resp.data or [])]
+        submitted_ids: set = set()
+        if assignment_ids:
+            sub_resp = (
+                sb.table("form_submissions")
+                .select("assignment_id")
+                .in_("assignment_id", assignment_ids)
+                .in_("status", ["submitted", "approved"])
+                .execute()
+            )
+            submitted_ids = {r["assignment_id"] for r in (sub_resp.data or [])}
         for fa in (fa_resp.data or []):
+            if fa["id"] in submitted_ids:
+                continue
             tmpl = fa.get("form_templates") or {}
             items.append(InboxItem(
                 kind="form",
@@ -224,9 +245,10 @@ async def get_inbox(current_user: dict = Depends(get_current_user)):
             .execute()
         )
         ack_resp = (
-            sb.table("announcement_acknowledgements")
+            sb.table("announcement_receipts")
             .select("announcement_id")
             .eq("user_id", user_id)
+            .not_.is_("acknowledged_at", "null")
             .execute()
         )
         acked_ids = {a["announcement_id"] for a in (ack_resp.data or [])}
@@ -252,27 +274,52 @@ async def get_inbox(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.warning("inbox announcements query failed: %s", e)
 
-    # ── 6. Open issues assigned to user ───────────────────────────────────────
+    # ── 6. Open issues ────────────────────────────────────────────────────────
+    # Staff:              only issues directly assigned to them
+    # Manager:            assigned to me  OR  (unassigned AND at my location)
+    # Admin/super_admin:  assigned to me  OR  any unassigned (org-wide)
     try:
-        iss_resp = (
+        _iss_base = (
             sb.table("issues")
             .select(
                 "id,title,description,priority,status,due_at,created_at,is_deleted,"
-                "locations(name)"
+                "assigned_to,location_id,locations(name)"
             )
-            .eq("assigned_to", user_id)
             .eq("organisation_id", org_id)
             .not_.in_("status", ["resolved", "verified_closed"])
             .eq("is_deleted", False)
-            .execute()
         )
+
+        if user_role in ("manager", "admin", "super_admin"):
+            if user_role == "manager" and user_location_id:
+                # Assigned to me  OR  (unassigned AND at my location)
+                iss_resp = _iss_base.or_(
+                    f"assigned_to.eq.{user_id},"
+                    f"and(assigned_to.is.null,location_id.eq.{user_location_id})"
+                ).execute()
+            else:
+                # admin / super_admin: assigned to me OR any unassigned (org-wide)
+                iss_resp = _iss_base.or_(
+                    f"assigned_to.eq.{user_id},assigned_to.is.null"
+                ).execute()
+        else:
+            # Staff: only issues explicitly assigned to them
+            iss_resp = _iss_base.eq("assigned_to", user_id).execute()
+
+        seen_iss_ids: set = set()
         for iss in (iss_resp.data or []):
+            if iss.get("is_deleted"):
+                continue
+            iss_id = iss["id"]
+            if iss_id in seen_iss_ids:
+                continue
+            seen_iss_ids.add(iss_id)
             loc = iss.get("locations")
             loc_name = loc.get("name") if isinstance(loc, dict) else None
             desc = loc_name or _trunc(iss.get("description"))
             items.append(InboxItem(
                 kind="issue",
-                id=iss["id"],
+                id=iss_id,
                 title=iss.get("title") or "Issue",
                 description=desc,
                 priority=iss.get("priority"),
@@ -282,6 +329,189 @@ async def get_inbox(current_user: dict = Depends(get_current_user)):
             ))
     except Exception as e:
         logger.warning("inbox issues query failed: %s", e)
+
+    # ── Manager / Admin / Super-Admin action items ─────────────────────────────
+    # These only appear for users who have approval/review responsibility.
+    is_manager_plus = user_role in ("manager", "admin", "super_admin")
+
+    if is_manager_plus:
+        # ── 7. Pending open-shift claims at this manager's location ───────────
+        try:
+            # open_shift_claims has no organisation_id — scope via shifts inner join
+            sc_query = (
+                sb.table("open_shift_claims")
+                .select(
+                    "id,claimed_at,status,"
+                    "shifts!inner(id,start_at,organisation_id,location_id,locations(name)),"
+                    "profiles!claimed_by(full_name)"
+                )
+                .eq("status", "pending")
+                .eq("shifts.organisation_id", str(org_id))
+            )
+            if user_role == "manager" and user_location_id:
+                sc_query = sc_query.eq("shifts.location_id", str(user_location_id))
+            sc_resp = sc_query.execute()
+            for sc in (sc_resp.data or []):
+                shift = sc.get("shifts") or {}
+                loc = shift.get("locations") or {}
+                loc_name = loc.get("name") if isinstance(loc, dict) else None
+                claimer = sc.get("profiles") or {}
+                claimer_name = claimer.get("full_name") or "Staff member"
+                start_str = shift.get("start_at")
+                shift_date = ""
+                if start_str:
+                    try:
+                        dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+                        shift_date = dt.strftime("%-d %b, %-I:%M %p")
+                    except Exception:
+                        pass
+                items.append(InboxItem(
+                    kind="shift_claim",
+                    id=sc["id"],
+                    title=f"Shift claim: {claimer_name}",
+                    description=f"{loc_name} · {shift_date}" if shift_date else loc_name,
+                    created_at=sc.get("claimed_at") or "",
+                ))
+        except Exception as e:
+            logger.warning("inbox shift_claims query failed: %s", e)
+
+        # ── 8. Shift swaps awaiting manager approval ──────────────────────────
+        try:
+            ss_query = (
+                sb.table("shift_swap_requests")
+                .select(
+                    "id,created_at,organisation_id,"
+                    "shifts!shift_id(start_at,location_id,locations(name)),"
+                    "profiles!requested_by(full_name)"
+                )
+                .eq("status", "pending_manager")
+                .eq("organisation_id", str(org_id))
+            )
+            if user_role == "manager" and user_location_id:
+                ss_query = ss_query.eq("shifts.location_id", str(user_location_id))
+            ss_resp = ss_query.execute()
+            for ss in (ss_resp.data or []):
+                shift = ss.get("shifts") or {}
+                loc = shift.get("locations") or {}
+                loc_name = loc.get("name") if isinstance(loc, dict) else None
+                requester = ss.get("profiles") or {}
+                req_name = requester.get("full_name") or "Staff member"
+                items.append(InboxItem(
+                    kind="shift_swap",
+                    id=ss["id"],
+                    title="Shift swap request",
+                    description=f"{loc_name} · from {req_name}" if loc_name else f"From {req_name}",
+                    created_at=ss.get("created_at") or "",
+                ))
+        except Exception as e:
+            logger.warning("inbox shift_swaps query failed: %s", e)
+
+        # ── 9. Leave requests this manager needs to approve ───────────────────
+        # For manager: requests from staff who report to this user (reports_to = user_id)
+        # For admin / super_admin: all pending requests in the org
+        try:
+            if user_role == "manager":
+                # Find direct reports
+                reports_resp = (
+                    sb.table("profiles")
+                    .select("id")
+                    .eq("reports_to", user_id)
+                    .eq("is_deleted", False)
+                    .execute()
+                )
+                report_ids = [r["id"] for r in (reports_resp.data or [])]
+                if report_ids:
+                    lr_resp = (
+                        sb.table("leave_requests")
+                        .select("id,leave_type,start_date,end_date,created_at,profiles!user_id(full_name)")
+                        .eq("status", "pending")
+                        .eq("organisation_id", str(org_id))
+                        .in_("user_id", report_ids)
+                        .execute()
+                    )
+                else:
+                    lr_resp = type("R", (), {"data": []})()
+            else:
+                # admin / super_admin — all pending in org
+                lr_resp = (
+                    sb.table("leave_requests")
+                    .select("id,leave_type,start_date,end_date,created_at,profiles!user_id(full_name)")
+                    .eq("status", "pending")
+                    .eq("organisation_id", str(org_id))
+                    .execute()
+                )
+            for lr in (lr_resp.data or []):
+                requester = lr.get("profiles") or {}
+                req_name = requester.get("full_name") or "Staff member"
+                leave_type = (lr.get("leave_type") or "leave").replace("_", " ").title()
+                start = lr.get("start_date", "")
+                items.append(InboxItem(
+                    kind="leave_request",
+                    id=lr["id"],
+                    title=f"Leave request: {req_name}",
+                    description=f"{leave_type} · from {start}" if start else leave_type,
+                    created_at=lr.get("created_at") or "",
+                ))
+        except Exception as e:
+            logger.warning("inbox leave_requests query failed: %s", e)
+
+        # ── 10. Form submissions awaiting manager review ──────────────────────
+        try:
+            fs_query = (
+                sb.table("form_submissions")
+                .select(
+                    "id,submitted_at,location_id,"
+                    "form_templates!inner(title,type,organisation_id),"
+                    "profiles!submitted_by(full_name)"
+                )
+                .eq("status", "submitted")
+                .eq("form_templates.organisation_id", str(org_id))
+            )
+            if user_role == "manager" and user_location_id:
+                fs_query = fs_query.eq("location_id", str(user_location_id))
+            fs_resp = fs_query.execute()
+            for fs in (fs_resp.data or []):
+                tmpl = fs.get("form_templates") or {}
+                submitter = fs.get("profiles") or {}
+                sub_name = submitter.get("full_name") or "Staff member"
+                items.append(InboxItem(
+                    kind="form_review",
+                    id=fs["id"],
+                    title=tmpl.get("title") or "Form submission",
+                    description=f"Submitted by {sub_name}",
+                    form_type=tmpl.get("type"),
+                    created_at=fs.get("submitted_at") or "",
+                ))
+        except Exception as e:
+            logger.warning("inbox form_reviews query failed: %s", e)
+
+        # ── 11. Corrective action plans pending review ────────────────────────
+        try:
+            cap_query = (
+                sb.table("corrective_action_plans")
+                .select(
+                    "id,created_at,"
+                    "form_submissions!inner(location_id,"
+                    "form_templates!inner(title,organisation_id))"
+                )
+                .eq("status", "pending_review")
+                .eq("form_submissions.form_templates.organisation_id", str(org_id))
+            )
+            if user_role == "manager" and user_location_id:
+                cap_query = cap_query.eq("form_submissions.location_id", str(user_location_id))
+            cap_resp = cap_query.execute()
+            for cap in (cap_resp.data or []):
+                sub = cap.get("form_submissions") or {}
+                tmpl = sub.get("form_templates") or {}
+                items.append(InboxItem(
+                    kind="cap",
+                    id=cap["id"],
+                    title=f"CAP: {tmpl.get('title') or 'Audit'}",
+                    description="Failed audit — review corrective action plan",
+                    created_at=cap.get("created_at") or "",
+                ))
+        except Exception as e:
+            logger.warning("inbox caps query failed: %s", e)
 
     # ── Sort: overdue ASC → upcoming ASC → no due date DESC ───────────────────
     overdue  = sorted([i for i in items if i.is_overdue],              key=lambda x: x.due_at or "")

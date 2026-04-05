@@ -1,6 +1,9 @@
 import { apiFetch } from "@/services/api/client";
 
-export type InboxItemKind = "task" | "form" | "workflow" | "course" | "announcement" | "issue";
+export type InboxItemKind =
+  | "task" | "form" | "workflow" | "course" | "announcement" | "issue"
+  // Manager / admin / super_admin action items
+  | "shift_claim" | "shift_swap" | "leave_request" | "form_review" | "cap";
 
 export interface InboxItem {
   kind: InboxItemKind;

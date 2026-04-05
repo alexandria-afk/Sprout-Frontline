@@ -111,6 +111,17 @@ final routerProvider = Provider<GoRouter>((ref) {
         ),
       ),
 
+      // Workflow routes — feature not yet implemented on mobile; redirect to
+      // dashboard so to-do list taps don't dead-end.
+      GoRoute(
+        path: '/workflows/instances/:id',
+        redirect: (_, __) => '/dashboard',
+      ),
+      GoRoute(
+        path: '/workflows',
+        redirect: (_, __) => '/dashboard',
+      ),
+
       // ── Tabbed shell routes ─────────────────────────────────────────────
       ShellRoute(
         builder: (context, state, child) => _AppShell(child: child),

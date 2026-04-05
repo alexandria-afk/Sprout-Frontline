@@ -342,6 +342,11 @@ async def list_issues(
     user_id = current_user["sub"]
     db = get_supabase()
 
+    role = (current_user.get("app_metadata") or {}).get("role", "staff")
+    manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
+    if role == "manager" and not location_id and manager_location_id:
+        location_id = manager_location_id
+
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 

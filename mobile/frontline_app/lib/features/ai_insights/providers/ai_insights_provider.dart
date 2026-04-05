@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
 import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models.dart';
 import 'package:frontline_app/features/ai_insights/data/repositories/ai_insights_repository.dart';
@@ -38,14 +39,16 @@ class AIInsightsNotifier extends AsyncNotifier<AIInsightsResponse> {
     state = await AsyncValue.guard(() => _load(refresh: true));
   }
 
-  // ── Hive cache ───────────────────────────────────────────────────────────
+  // ── Hive cache (scoped by user ID) ────────────────────────────────────
+
+  String get _cacheKey =>
+      'ai_insights_${Supabase.instance.client.auth.currentUser?.id ?? 'anon'}';
 
   AIInsightsResponse? _fromCache() {
     final box = HiveService.insightsCache;
-    final raw = box.get('ai_insights');
+    final raw = box.get(_cacheKey);
     if (raw == null) return null;
     final data = Map<String, dynamic>.from(raw);
-    // Only use cache from today.
     final cachedDate = data['date'] as String?;
     final today = DateTime.now().toIso8601String().substring(0, 10);
     if (cachedDate != today) return null;
@@ -56,7 +59,7 @@ class AIInsightsNotifier extends AsyncNotifier<AIInsightsResponse> {
 
   void _toCache(AIInsightsResponse response) {
     final today = DateTime.now().toIso8601String().substring(0, 10);
-    HiveService.insightsCache.put('ai_insights', {
+    HiveService.insightsCache.put(_cacheKey, {
       'date': today,
       'payload': response.toJson(),
     });
@@ -74,16 +77,18 @@ class DismissedInsightsNotifier extends Notifier<Set<String>> {
   @override
   Set<String> build() => _loadDismissed();
 
+  String get _dismissKey =>
+      'dismissed_insights_${Supabase.instance.client.auth.currentUser?.id ?? 'anon'}';
+
   Set<String> _loadDismissed() {
     final box = HiveService.insightsCache;
-    final raw = box.get('dismissed_insights');
+    final raw = box.get(_dismissKey);
     if (raw == null) return {};
     final data = Map<String, dynamic>.from(raw);
     final storedDate = data['date'] as String?;
     final today = DateTime.now().toIso8601String().substring(0, 10);
     if (storedDate != today) {
-      // New day — clear dismissals.
-      box.delete('dismissed_insights');
+      box.delete(_dismissKey);
       return {};
     }
     final ids = (data['ids'] as List?)?.cast<String>() ?? [];
@@ -98,7 +103,7 @@ class DismissedInsightsNotifier extends Notifier<Set<String>> {
 
   void _persist(Set<String> ids) {
     final today = DateTime.now().toIso8601String().substring(0, 10);
-    HiveService.insightsCache.put('dismissed_insights', {
+    HiveService.insightsCache.put(_dismissKey, {
       'date': today,
       'ids': ids.toList(),
     });

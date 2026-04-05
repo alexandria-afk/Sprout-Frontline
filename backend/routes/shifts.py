@@ -111,6 +111,10 @@ async def list_shifts(
     if role == "staff":
         user_id = current_uid
 
+    manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
+    if role == "manager" and not location_id and manager_location_id:
+        location_id = manager_location_id
+
     return await ShiftService.list_shifts(
         org_id=org_id,
         location_id=location_id,
@@ -393,6 +397,9 @@ async def list_attendance(
     # Staff see only their own records
     if role == "staff":
         user_id = current_uid
+    manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
+    if role == "manager" and not location_id and manager_location_id:
+        location_id = manager_location_id
     return await ShiftService.list_attendance(
         org_id,
         user_id=user_id,

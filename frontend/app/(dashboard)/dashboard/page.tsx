@@ -281,11 +281,10 @@ function ProgressRing({
           x="40" y="40"
           textAnchor="middle"
           dominantBaseline="middle"
-          fontSize={pct >= 100 ? "14" : "17"}
-          fontWeight="700"
           fill="#111827"
         >
-          {pct}%
+          <tspan fontSize={pct >= 100 ? "15" : "20"} fontWeight="700">{pct}</tspan>
+          <tspan fontSize="11" fontWeight="600">%</tspan>
         </text>
       </svg>
       <p className="text-[11px] font-semibold tracking-wide uppercase text-dark-secondary">{label}</p>
@@ -590,12 +589,18 @@ const TODO_META: Record<InboxApiItem["kind"], {
   badge: string;
   label: string;
 }> = {
-  task:         { label: "Task",         icon: CheckSquare,    color: "text-sprout-green",  bg: "bg-sprout-green/10",  badge: "bg-sprout-green/10 text-sprout-green" },
-  form:         { label: "Form",         icon: ClipboardList,  color: "text-amber-600",     bg: "bg-amber-50",         badge: "bg-amber-100 text-amber-700" },
-  workflow:     { label: "Workflow",     icon: GitBranch,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
-  course:       { label: "Training",     icon: GraduationCap,  color: "text-blue-600",      bg: "bg-blue-50",          badge: "bg-blue-100 text-blue-700" },
-  announcement: { label: "Announcement", icon: Megaphone,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
-  issue:        { label: "Issue",        icon: AlertTriangle,  color: "text-orange-600",    bg: "bg-orange-50",        badge: "bg-orange-100 text-orange-700" },
+  task:         { label: "Task",          icon: CheckSquare,    color: "text-sprout-green",  bg: "bg-sprout-green/10",  badge: "bg-sprout-green/10 text-sprout-green" },
+  form:         { label: "Form",          icon: ClipboardList,  color: "text-amber-600",     bg: "bg-amber-50",         badge: "bg-amber-100 text-amber-700" },
+  workflow:     { label: "Workflow",      icon: GitBranch,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
+  course:       { label: "Training",      icon: GraduationCap,  color: "text-blue-600",      bg: "bg-blue-50",          badge: "bg-blue-100 text-blue-700" },
+  announcement: { label: "Announcement",  icon: Megaphone,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
+  issue:        { label: "Issue",         icon: AlertTriangle,  color: "text-orange-600",    bg: "bg-orange-50",        badge: "bg-orange-100 text-orange-700" },
+  // Manager / admin / super_admin
+  shift_claim:    { label: "Shift Claim",   icon: CalendarClock,  color: "text-teal-600",      bg: "bg-teal-50",          badge: "bg-teal-100 text-teal-700" },
+  shift_swap:     { label: "Shift Swap",    icon: ArrowRightLeft, color: "text-cyan-600",      bg: "bg-cyan-50",          badge: "bg-cyan-100 text-cyan-700" },
+  leave_request:  { label: "Leave Request", icon: Calendar,       color: "text-indigo-600",    bg: "bg-indigo-50",        badge: "bg-indigo-100 text-indigo-700" },
+  form_review:    { label: "Review",        icon: ClipboardCheck, color: "text-amber-600",     bg: "bg-amber-50",         badge: "bg-amber-100 text-amber-700" },
+  cap:            { label: "CAP",           icon: ShieldCheck,    color: "text-red-600",       bg: "bg-red-50",           badge: "bg-red-100 text-red-700" },
 };
 
 const TODO_PAGE_SIZE = 8;
@@ -642,7 +647,13 @@ function todoHref(item: InboxApiItem): string {
     case "course":       return `/dashboard/training/learn/${item.id}`;
     case "announcement": return "/dashboard/announcements";
     case "issue":        return `/dashboard/issues?tab=issues&id=${item.id}`;
-    default:             return "/dashboard";
+    // Manager / admin / super_admin
+    case "shift_claim":   return "/dashboard/shifts";
+    case "shift_swap":    return "/dashboard/shifts";
+    case "leave_request": return "/dashboard/shifts";
+    case "form_review":   return `/dashboard/forms?tab=submissions&id=${item.id}`;
+    case "cap":           return "/dashboard/forms?tab=audit_cap";
+    default:              return "/dashboard";
   }
 }
 
@@ -667,6 +678,16 @@ function todoPills(item: InboxApiItem): { pill: string; pillStyle: string; pill2
       };
     case "announcement":
       return { pill: "Needs Acknowledgement", pillStyle: "bg-amber-100 text-amber-700" };
+    case "shift_claim":
+      return { pill: "Pending Approval", pillStyle: "bg-teal-100 text-teal-700" };
+    case "shift_swap":
+      return { pill: "Pending Approval", pillStyle: "bg-cyan-100 text-cyan-700" };
+    case "leave_request":
+      return { pill: "Pending Approval", pillStyle: "bg-indigo-100 text-indigo-700" };
+    case "form_review":
+      return { pill: "Submitted", pillStyle: "bg-amber-100 text-amber-700" };
+    case "cap":
+      return { pill: "Needs Review", pillStyle: "bg-red-100 text-red-700" };
     default:
       return { pill: "", pillStyle: "" };
   }

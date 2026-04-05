@@ -97,9 +97,10 @@ class _HomeBody extends ConsumerWidget {
     final weekStart = now.subtract(Duration(days: now.weekday - 1));
     final weekEnd = weekStart.add(const Duration(days: 7));
     final shifts = asyncShifts.valueOrNull ?? [];
+    // Shift start_at is wall-clock (fake UTC) — compare directly, no toLocal.
     final shiftsThisWeek = shifts.where((s) {
-      final dt = DateTime.tryParse(s.startAt)?.toLocal();
-      return dt != null && dt.isAfter(weekStart) && dt.isBefore(weekEnd);
+      final dt = DateTime.tryParse(s.startAt);
+      return dt != null && dt.isAfter(weekStart.toUtc()) && dt.isBefore(weekEnd.toUtc());
     }).length;
 
     return RefreshIndicator(
@@ -110,8 +111,11 @@ class _HomeBody extends ConsumerWidget {
         ref.invalidate(myEnrollmentsProvider);
         if (isManagerPlus) {
           ref.read(aiInsightsProvider.notifier).refresh();
+          ref.invalidate(auditComplianceProvider);
+          ref.invalidate(trainingCompletionProvider);
+          ref.invalidate(shiftsTodayCountProvider);
         }
-        ref.read(inboxNotificationsProvider.notifier).refresh();
+        ref.read(todoItemsProvider.notifier).refresh();
         ref.invalidate(unreadCountProvider);
         ref.read(announcementsProvider.notifier).refresh();
       },
@@ -122,16 +126,18 @@ class _HomeBody extends ConsumerWidget {
           // 0. Greeting header
           SliverToBoxAdapter(child: _GreetingHeader()),
 
-          // 1. Stat cards — 2x2 grid
+          // 1. Stat cards — 2x2 grid (different cards by role)
           SliverToBoxAdapter(
-            child: _MetricGrid(
-              overdueCount: overdueCount,
-              openTaskCount: openTaskCount,
-              incompleteCourses: incompleteCourses,
-              shiftsThisWeek: shiftsThisWeek,
-              totalTasks: tasks.length,
-              totalEnrollments: enrollments.length,
-            ),
+            child: isManagerPlus
+                ? _ManagerMetricGrid(summary: summary)
+                : _MetricGrid(
+                    overdueCount: overdueCount,
+                    openTaskCount: openTaskCount,
+                    incompleteCourses: incompleteCourses,
+                    shiftsThisWeek: shiftsThisWeek,
+                    totalTasks: tasks.length,
+                    totalEnrollments: enrollments.length,
+                  ),
           ),
 
           // 2. AI Insight cards (manager + admin only)
@@ -411,6 +417,98 @@ class _MetricCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ── Manager/Admin metric grid ────────────────────────────────────────────────
+
+class _ManagerMetricGrid extends ConsumerWidget {
+  final DashboardSummary summary;
+  const _ManagerMetricGrid({required this.summary});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final auditRate = ref.watch(auditComplianceProvider).valueOrNull;
+    final trainingRate = ref.watch(trainingCompletionProvider).valueOrNull;
+    final shiftsToday = ref.watch(shiftsTodayCountProvider).valueOrNull;
+
+    // Checklist completion (from today's summary).
+    final checklistPct = (summary.formCompletionRate * 100).round();
+    // Audit compliance (from rolling 30-day summary).
+    final auditPct = auditRate?.round();
+    // Training completion.
+    final trainingPct = trainingRate != null ? trainingRate.round() : null;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: _MetricCard(
+                  value: '$checklistPct%',
+                  label: 'Checklist Completion',
+                  detail: 'Today',
+                  color: checklistPct >= 80
+                      ? _C.sproutGreen
+                      : checklistPct >= 40
+                          ? _C.high
+                          : _C.critical,
+                  onTap: () => context.go('/forms'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _MetricCard(
+                  value: auditPct != null ? '$auditPct%' : '\u2014',
+                  label: 'Audit Compliance',
+                  detail: 'Rolling 30 days',
+                  color: auditPct == null
+                      ? _C.textTertiary
+                      : auditPct >= 80
+                          ? _C.sproutGreen
+                          : auditPct >= 50
+                              ? _C.high
+                              : _C.critical,
+                  onTap: () => context.go('/audits'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: _MetricCard(
+                  value: trainingPct != null ? '$trainingPct%' : '\u2014',
+                  label: 'Training Completion',
+                  detail: 'Course pass rate',
+                  color: trainingPct == null
+                      ? _C.textTertiary
+                      : trainingPct >= 80
+                          ? _C.sproutGreen
+                          : trainingPct >= 50
+                              ? _C.high
+                              : _C.critical,
+                  onTap: () => context.go('/training'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _MetricCard(
+                  value: shiftsToday != null ? '$shiftsToday' : '\u2014',
+                  label: 'Shifts Today',
+                  detail: 'Published today',
+                  color: const Color(0xFF2563EB),
+                  onTap: () => context.go('/shifts'),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -785,12 +883,26 @@ class _AttendanceRingState extends State<_AttendanceRing>
                   strokeWidth: 6,
                 ),
                 child: Center(
-                  child: Text(
-                    '${(_animation.value * 100).round()}%',
-                    style: const TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.bold,
-                      color: _C.textPrimary,
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: '${(_animation.value * 100).round()}',
+                          style: const TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                            color: _C.textPrimary,
+                          ),
+                        ),
+                        const TextSpan(
+                          text: '%',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _C.textSecondary,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -875,32 +987,18 @@ class _AIInsightsSection extends ConsumerWidget {
             .where((i) => !dismissed.contains(i.dismissKey))
             .toList();
         if (visible.isEmpty) return const SizedBox.shrink();
+        final total = response.insights.length;
 
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-          child: Column(
-            children: visible.map((insight) {
-              return Dismissible(
-                key: ValueKey(insight.dismissKey),
-                direction: DismissDirection.startToEnd,
-                onDismissed: (_) {
-                  ref
-                      .read(dismissedInsightsProvider.notifier)
-                      .dismiss(insight.dismissKey);
-                },
-                background: Container(
-                  alignment: Alignment.centerLeft,
-                  padding: const EdgeInsets.only(left: 20),
-                  margin: const EdgeInsets.only(bottom: 10),
-                  decoration: BoxDecoration(
-                    color: _C.surface3,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.check, color: _C.textSecondary),
-                ),
-                child: _AIInsightCard(insight: insight),
-              );
-            }).toList(),
+          child: _StackedInsightCards(
+            insights: visible,
+            totalCount: total,
+            onDismiss: (insight) {
+              ref
+                  .read(dismissedInsightsProvider.notifier)
+                  .dismiss(insight.dismissKey);
+            },
           ),
         );
       },
@@ -908,54 +1006,134 @@ class _AIInsightsSection extends ConsumerWidget {
   }
 }
 
-class _AIInsightCard extends StatelessWidget {
-  final AIInsight insight;
-  const _AIInsightCard({required this.insight});
+class _StackedInsightCards extends StatelessWidget {
+  final List<AIInsight> insights;
+  final int totalCount;
+  final ValueChanged<AIInsight> onDismiss;
+
+  const _StackedInsightCards({
+    required this.insights,
+    required this.totalCount,
+    required this.onDismiss,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final (accentColor, icon) = switch (insight.severity) {
-      'critical' => (_C.critical, '🔴'),
-      'warning' => (_C.high, '⚠️'),
-      _ => (_C.info, 'ℹ️'),
-    };
+    // Show up to 2 peek cards behind the front card.
+    final peekCount = (insights.length - 1).clamp(0, 2);
 
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: _C.surface1,
-        borderRadius: BorderRadius.circular(12),
-        border: Border(left: BorderSide(color: accentColor, width: 3)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return SizedBox(
+      height: 62 + peekCount * 6.0, // card height + peek offsets
+      child: Stack(
         children: [
-          Text(icon, style: const TextStyle(fontSize: 14)),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(insight.title,
-                    style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: _C.textPrimary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-                const SizedBox(height: 2),
-                Text(insight.recommendation,
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: accentColor),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis),
-              ],
+          // Background peek cards (back to front).
+          for (var i = peekCount; i >= 1; i--)
+            Positioned(
+              top: i * 6.0,
+              left: i * 4.0,
+              right: i * 4.0,
+              child: _buildCardBody(
+                insights[i < insights.length ? i : insights.length - 1],
+                dimmed: true,
+              ),
+            ),
+
+          // Front card — dismissible.
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: Dismissible(
+              key: ValueKey(insights.first.dismissKey),
+              direction: DismissDirection.startToEnd,
+              onDismissed: (_) => onDismiss(insights.first),
+              background: Container(
+                alignment: Alignment.centerLeft,
+                padding: const EdgeInsets.only(left: 20),
+                decoration: BoxDecoration(
+                  color: _C.surface3,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.check, color: _C.textSecondary),
+              ),
+              child: Stack(
+                children: [
+                  _buildCardBody(insights.first, dimmed: false),
+                  // Count badge.
+                  Positioned(
+                    top: 6,
+                    right: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: _C.surface3,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        '${totalCount - insights.length + 1}/$totalCount',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: _C.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCardBody(AIInsight insight, {required bool dimmed}) {
+    final (accentColor, iconData) = switch (insight.severity) {
+      'critical' => (_C.critical, Icons.error),
+      'warning' => (_C.high, Icons.warning_amber),
+      _ => (_C.info, Icons.info_outline),
+    };
+
+    return Opacity(
+      opacity: dimmed ? 0.5 : 1.0,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: _C.surface1,
+          borderRadius: BorderRadius.circular(12),
+          border: Border(left: BorderSide(color: accentColor, width: 3)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(iconData, size: 18, color: accentColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(insight.title,
+                      style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: _C.textPrimary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.left),
+                  const SizedBox(height: 2),
+                  Text(insight.recommendation,
+                      style: TextStyle(fontSize: 12, color: accentColor),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.left),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1005,11 +1183,13 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
     }
 
     final shift = upcoming.first;
-    final start = DateTime.tryParse(shift.startAt)?.toLocal();
-    final end = DateTime.tryParse(shift.endAt)?.toLocal();
+    // Shift times are stored as wall-clock (fake UTC) — don't convert to local.
+    // Attendance times are real UTC — DO convert to local.
+    final start = DateTime.tryParse(shift.startAt);
+    final end = DateTime.tryParse(shift.endAt);
     final isClockedIn = activeAttendance != null;
     final isActive = start != null && end != null &&
-        now.isAfter(start) && now.isBefore(end);
+        now.toUtc().isAfter(start) && now.toUtc().isBefore(end);
 
     // Build subtitle: clocked in > active > location + date
     String subtitle;
@@ -1106,7 +1286,7 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
               children: [
                 Expanded(
                   child: _SecondaryButton(
-                    label: 'On Break',
+                    label: 'Start Break',
                     onTap: () {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(content: Text('Break tracking coming soon')),
@@ -1193,35 +1373,34 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
 
 // ── Inbox section (notifications) ────────────────────────────────────────────
 
-const _notifTypeMeta = <String, (IconData, Color)>{
-  'task_assigned': (Icons.assignment, Color(0xFF1D9E75)),
-  'form_assigned': (Icons.checklist, Color(0xFFD97706)),
-  'workflow_stage_assigned': (Icons.account_tree, Color(0xFF7C3AED)),
-  'issue_assigned': (Icons.warning_amber, Color(0xFFFF9500)),
-  'issue_comment': (Icons.chat_bubble_outline, Color(0xFF0A84FF)),
-  'issue_status_changed': (Icons.sync, Color(0xFF0A84FF)),
-  'shift_claim_pending': (Icons.schedule, Color(0xFF1D9E75)),
-  'shift_swap_pending': (Icons.swap_horiz, Color(0xFF1D9E75)),
-  'leave_request_pending': (Icons.event_busy, Color(0xFFFF9500)),
-  'form_submission_review': (Icons.rate_review, Color(0xFFD97706)),
-  'cap_generated': (Icons.gpp_bad, Color(0xFFFF3B30)),
-  'announcement': (Icons.campaign, Color(0xFF7C3AED)),
-  'course_enrolled': (Icons.school, Color(0xFF0A84FF)),
-  'scheduled_reminder': (Icons.alarm, Color(0xFFFF9500)),
+
+const _todoKindMeta = <String, (IconData, Color, String)>{
+  'task':         (Icons.check_box_outlined,   Color(0xFF1D9E75), 'Task'),
+  'form':         (Icons.checklist,            Color(0xFFD97706), 'Form'),
+  'workflow':     (Icons.account_tree,         Color(0xFF7C3AED), 'Workflow'),
+  'course':       (Icons.school,               Color(0xFF2563EB), 'Training'),
+  'announcement': (Icons.campaign,             Color(0xFF7C3AED), 'Announcement'),
+  'issue':        (Icons.warning_amber,        Color(0xFFEA580C), 'Issue'),
+  // Manager / admin / super_admin action items
+  'shift_claim':    (Icons.event_available,    Color(0xFF0D9488), 'Shift Claim'),
+  'shift_swap':     (Icons.swap_horiz,         Color(0xFF0891B2), 'Shift Swap'),
+  'leave_request':  (Icons.calendar_month,     Color(0xFF4F46E5), 'Leave'),
+  'form_review':    (Icons.fact_check,         Color(0xFFD97706), 'Review'),
+  'cap':            (Icons.verified_user,      Color(0xFFDC2626), 'CAP'),
 };
 
 class _InboxSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final asyncNotifs = ref.watch(inboxNotificationsProvider);
+    final asyncTodo = ref.watch(todoItemsProvider);
 
-    return asyncNotifs.when(
+    return asyncTodo.when(
       loading: () => const SizedBox.shrink(),
       error: (_, _) => const SizedBox.shrink(),
-      data: (notifications) {
-        if (notifications.isEmpty) {
+      data: (items) {
+        if (items.isEmpty) {
           return _SectionCard(
-            label: 'INBOX',
+            label: 'MY TO-DO LIST',
             child: const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
               child: Text('All caught up \u2713',
@@ -1230,72 +1409,80 @@ class _InboxSection extends ConsumerWidget {
           );
         }
 
+        final display = items.take(5).toList();
         return _SectionCard(
-          label: 'INBOX',
+          label: 'MY TO-DO LIST',
           actionLabel: 'View all \u2192',
           route: '/notifications',
           child: Column(
-            children: [
-              ...notifications.map((notif) {
-                final meta =
-                    _notifTypeMeta[notif.type] ?? (Icons.notifications, _C.info);
-                final icon = meta.$1;
-                final color = meta.$2;
-                final timeAgo = _timeAgo(notif.createdAt);
+            children: display.map((item) {
+              final meta = _todoKindMeta[item.kind] ??
+                  (Icons.circle, _C.info, item.kind);
+              final icon = meta.$1;
+              final color = item.isOverdue ? _C.critical : meta.$2;
+              final kindLabel = meta.$3;
 
-                return _InnerRow(
-                  onTap: () {
-                    ref
-                        .read(inboxNotificationsProvider.notifier)
-                        .markRead(notif.id);
-                    context.go(notif.route);
-                  },
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          color: color.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Icon(icon, size: 16, color: color),
+              String detail = kindLabel;
+              if (item.isOverdue && item.dueAt != null) {
+                final diff = DateTime.now().difference(item.dueAt!);
+                detail = 'Overdue by ${_humanDuration(diff)}';
+              } else if (item.dueAt != null) {
+                detail = '$kindLabel \u00b7 ${DateFormat('MMM d, h:mm a').format(item.dueAt!)}';
+              } else if (item.priority != null) {
+                detail = '$kindLabel \u00b7 ${item.priority}';
+              }
+
+              return _InnerRow(
+                onTap: () => context.go(item.route),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(notif.title,
-                                style: const TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w600,
-                                    color: _C.textPrimary),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis),
-                            if (notif.body != null && notif.body!.isNotEmpty)
-                              Text(notif.body!,
-                                  style: const TextStyle(
-                                      fontSize: 12, color: _C.textSecondary),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis),
-                          ],
-                        ),
+                      child: Icon(icon, size: 16, color: color),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(item.title,
+                              style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: _C.textPrimary),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis),
+                          Text(detail,
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: item.isOverdue
+                                      ? _C.critical
+                                      : _C.textSecondary)),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      Text(timeAgo,
-                          style: const TextStyle(
-                              fontSize: 11, color: _C.textTertiary)),
-                    ],
-                  ),
-                );
-              }),
-            ],
+                    ),
+                    const Icon(Icons.chevron_right,
+                        size: 16, color: _C.textTertiary),
+                  ],
+                ),
+              );
+            }).toList(),
           ),
         );
       },
     );
   }
+}
+
+String _humanDuration(Duration d) {
+  if (d.inDays > 0) return '${d.inDays}d';
+  if (d.inHours > 0) return '${d.inHours}h';
+  return '${d.inMinutes}m';
 }
 
 // ── Leaderboard section ──────────────────────────────────────────────────────

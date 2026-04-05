@@ -47,7 +47,7 @@ class InboxItem {
   /// Navigation route for this item.
   String get route {
     switch (kind) {
-      case 'task':         return '/issues'; // tasks live under issues tab on mobile
+      case 'task':         return '/tasks/$id';
       case 'form':         return '/forms/fill/$id';
       case 'workflow':
         return workflowInstanceId != null
@@ -56,7 +56,13 @@ class InboxItem {
       case 'course':       return '/training';
       case 'announcement': return '/announcements';
       case 'issue':        return '/issues/$id';
-      default:             return '/dashboard';
+      // Manager / admin / super_admin action items — navigate to shifts or forms
+      case 'shift_claim':   return '/shifts';
+      case 'shift_swap':    return '/shifts';
+      case 'leave_request': return '/shifts';
+      case 'form_review':   return '/forms';
+      case 'cap':           return '/forms';
+      default:              return '/dashboard';
     }
   }
 }

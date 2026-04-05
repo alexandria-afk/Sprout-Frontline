@@ -157,6 +157,13 @@ class DashboardService:
                 shifts_today = shifts_resp.data or []
 
                 # Today's attendance records
+                # Fetch all attendance for the org today — do NOT filter by location_id here.
+                # Reason: staff users may have clocked in with a null/empty location_id on
+                # their attendance record (e.g. web clock-in when app_metadata.location_id
+                # was not set). Location scoping is already enforced by the shifts query
+                # above (shifts are filtered by the manager's location_id), so matching
+                # attendance via shift_id / user_id against those location-scoped shifts is
+                # sufficient and correctly handles null-location attendance records.
                 att_query = (
                     supabase.table("attendance_records")
                     .select("id,user_id,shift_id,clock_in_at,clock_out_at,break_minutes,worked_minutes,location_id")
@@ -164,8 +171,6 @@ class DashboardService:
                     .gte("clock_in_at", today_start)
                     .lte("clock_in_at", today_end)
                 )
-                if role == "manager" and user_location_id:
-                    att_query = att_query.eq("location_id", str(user_location_id))
 
                 att_resp = att_query.execute()
                 att_today = att_resp.data or []

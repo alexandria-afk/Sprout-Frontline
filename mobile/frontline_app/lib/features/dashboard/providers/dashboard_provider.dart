@@ -12,3 +12,21 @@ final dashboardSummaryProvider = FutureProvider<DashboardSummary>((ref) {
   final repo = ref.read(dashboardRepositoryProvider);
   return repo.getSummary();
 });
+
+/// Audit compliance rate — rolling 30 days (manager/admin stat card).
+final auditComplianceProvider = FutureProvider<double?>((ref) {
+  final repo = ref.read(dashboardRepositoryProvider);
+  return repo.getAuditComplianceRate();
+});
+
+/// Training completion rate (manager/admin stat card).
+final trainingCompletionProvider = FutureProvider<double?>((ref) {
+  final repo = ref.read(dashboardRepositoryProvider);
+  return repo.getTrainingCompletionRate();
+});
+
+/// Published shifts count today (manager/admin stat card).
+final shiftsTodayCountProvider = FutureProvider<int?>((ref) {
+  final repo = ref.read(dashboardRepositoryProvider);
+  return repo.getShiftsTodayCount();
+});

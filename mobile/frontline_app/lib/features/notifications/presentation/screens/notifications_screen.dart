@@ -8,12 +8,18 @@ import 'package:frontline_app/features/notifications/providers/notifications_pro
 // ── Kind → icon / color map ───────────────────────────────────────────────────
 
 const _kindMeta = <String, (IconData, Color, String)>{
-  'task':         (Icons.assignment,       Color(0xFF1D9E75), 'Task'),
-  'form':         (Icons.checklist,        Color(0xFFD97706), 'Form'),
-  'workflow':     (Icons.account_tree,     Color(0xFF7C3AED), 'Workflow'),
-  'course':       (Icons.school,           Color(0xFF0A84FF), 'Training'),
-  'announcement': (Icons.campaign,         Color(0xFF7C3AED), 'Announcement'),
-  'issue':        (Icons.warning_amber,    Color(0xFFFF9500), 'Issue'),
+  'task':         (Icons.check_box_outlined,   Color(0xFF1D9E75), 'Task'),
+  'form':         (Icons.checklist,            Color(0xFFD97706), 'Form'),
+  'workflow':     (Icons.account_tree,         Color(0xFF7C3AED), 'Workflow'),
+  'course':       (Icons.school,               Color(0xFF2563EB), 'Training'),
+  'announcement': (Icons.campaign,             Color(0xFF7C3AED), 'Announcement'),
+  'issue':        (Icons.warning_amber,        Color(0xFFEA580C), 'Issue'),
+  // Manager / admin / super_admin action items
+  'shift_claim':    (Icons.event_available,    Color(0xFF0D9488), 'Shift Claim'),
+  'shift_swap':     (Icons.swap_horiz,         Color(0xFF0891B2), 'Shift Swap'),
+  'leave_request':  (Icons.calendar_month,     Color(0xFF4F46E5), 'Leave'),
+  'form_review':    (Icons.fact_check,         Color(0xFFD97706), 'Review'),
+  'cap':            (Icons.verified_user,      Color(0xFFDC2626), 'CAP'),
 };
 
 (IconData, Color, String) _metaFor(String kind) {
