@@ -123,6 +123,10 @@ const MANAGER_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed", 
 const STAFF_COLS: TaskStatus[] = ["pending", "in_progress", "completed"];
 const STAFF_DROPPABLE: TaskStatus[] = ["pending", "in_progress", "completed"];
 
+// Issue drag-and-drop: staff can move to open/in_progress/resolved; managers can use all columns
+const STAFF_ISSUE_DROPPABLE: IssueStatus[] = ["open", "in_progress", "resolved"];
+const MANAGER_ISSUE_DROPPABLE: IssueStatus[] = ["open", "in_progress", "pending_vendor", "resolved", "verified_closed"];
+
 // ── Aging helpers ─────────────────────────────────────────────────────────────
 const TASK_SLA_HOURS: Record<string, number> = {
   critical: 4,
@@ -1143,10 +1147,13 @@ function SkeletonIssueCard() {
 function IssueCard({ issue, onClick, highlighted }: { issue: Issue; onClick: () => void; highlighted?: boolean }) {
   const isRecurring = issue.recurrence_count >= 2;
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={(e) => e.key === "Enter" && onClick()}
       className={clsx(
-        "w-full text-left rounded-xl border p-3.5 flex flex-col gap-2 hover:shadow-md transition-all group",
+        "w-full text-left rounded-xl border p-3.5 flex flex-col gap-2 hover:shadow-md transition-all group cursor-pointer",
         highlighted
           ? "bg-violet-50 border-violet-200 shadow-sm"
           : "bg-white border-surface-border hover:border-sprout-purple/30"
@@ -1212,7 +1219,7 @@ function IssueCard({ issue, onClick, highlighted }: { issue: Issue; onClick: () 
         <Clock className="w-3 h-3 shrink-0" />
         {timeAgo(issue.created_at)}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -2993,12 +3000,15 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
     if (selectedIssue?.id === updated.id) setSelectedIssue(updated);
   };
 
+  const issueDroppable = isManager ? MANAGER_ISSUE_DROPPABLE : STAFF_ISSUE_DROPPABLE;
+
   const handleIssueDragEnd = useCallback(
     async (result: DropResult) => {
       const { draggableId: issueId, source, destination } = result;
       if (!destination) return;
       const newStatus = destination.droppableId as IssueStatus;
       if (newStatus === source.droppableId) return;
+      if (!issueDroppable.includes(newStatus)) return;
       const prevIssues = issues;
       setIssues((prev) => prev.map((i) => (i.id === issueId ? { ...i, status: newStatus } : i)));
       try {
@@ -3008,7 +3018,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
         setIssues(prevIssues);
       }
     },
-    [issues, loadData]
+    [issues, loadData, issueDroppable]
   );
 
   const STATUS_FILTER_PILLS: { key: "all" | IssueStatus; label: string }[] = [
@@ -3207,12 +3217,15 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
           <div className="flex gap-4 overflow-x-auto pb-4">
             {KANBAN_COLUMNS.map((col) => {
               const colIssues = issuesByStatus(col.key);
-              const isDroppable = isManager;
+              const isDroppable = issueDroppable.includes(col.key);
               return (
                 <div key={col.key} className="flex flex-col gap-3 min-w-[240px] w-[240px] shrink-0">
                   <div className="flex items-center gap-2">
                     <col.icon className={clsx("w-4 h-4", col.iconColor)} />
                     <span className="text-sm font-semibold text-dark">{col.label}</span>
+                    {!isDroppable && (
+                      <span className="text-[10px] text-gray-400 italic">(manager)</span>
+                    )}
                     <span className="ml-auto text-xs text-dark-secondary bg-surface-page border border-surface-border rounded-full px-2 py-0.5">
                       {colIssues.length}
                     </span>
@@ -3233,7 +3246,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
                           </div>
                         ) : (
                           colIssues.map((issue, index) => (
-                            <Draggable key={issue.id} draggableId={issue.id} index={index} isDragDisabled={!isManager}>
+                            <Draggable key={issue.id} draggableId={issue.id} index={index}>
                               {(dragProvided, dragSnapshot) => (
                                 <div
                                   ref={dragProvided.innerRef}

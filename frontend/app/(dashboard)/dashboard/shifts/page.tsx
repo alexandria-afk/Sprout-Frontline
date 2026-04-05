@@ -188,7 +188,12 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 
 // ── Week Navigator ────────────────────────────────────────────────────────────
 
-function WeekNav({ weekStart, onChange }: { weekStart: Date; onChange: (d: Date) => void }) {
+function WeekNav({ weekStart, onChange, onToday, todayActive }: {
+  weekStart: Date;
+  onChange: (d: Date) => void;
+  onToday?: () => void;
+  todayActive?: boolean;
+}) {
   const weekEnd = addDays(weekStart, 6);
   return (
     <div className="flex items-center gap-3">
@@ -201,7 +206,10 @@ function WeekNav({ weekStart, onChange }: { weekStart: Date; onChange: (d: Date)
       <button onClick={() => onChange(addDays(weekStart, 7))} className={btnSecondary} style={{ padding: "6px 10px" }}>
         <ChevronRight className="w-4 h-4" />
       </button>
-      <button onClick={() => onChange(getMondayOfWeek(new Date()))} className={clsx(btnSecondary, "text-xs")}>
+      <button
+        onClick={() => { onChange(getMondayOfWeek(new Date())); onToday?.(); }}
+        className={clsx(btnSecondary, "text-xs", todayActive && "bg-sprout-purple/10 border-sprout-purple/40 text-sprout-purple font-semibold")}
+      >
         Today
       </button>
     </div>
@@ -1235,7 +1243,7 @@ function ManagerRoster({
           <button className={clsx(btnSecondary, "text-sprout-purple border-sprout-purple/30 bg-sprout-purple/5 hover:bg-sprout-purple/10")} onClick={() => setShowAI(true)}>
             <Sparkles className="w-4 h-4" /> Generate with AI
           </button>
-          <button className={btnPrimary} onClick={() => setAddShiftDate(weekStart)}>
+          <button className={btnPrimary} onClick={() => setAddShiftDate(new Date())}>
             <Plus className="w-4 h-4" /> Add Shift
           </button>
         </div>
@@ -2144,10 +2152,16 @@ function ManagerSettings() {
 
 function StaffSchedule({ userId }: { userId: string }) {
   const [weekStart, setWeekStart] = useState(() => getMondayOfWeek(new Date()));
+  const [showTodayOnly, setShowTodayOnly] = useState(false);
   const [shifts, setShifts] = useState<Shift[]>([]);
   const [loading, setLoading] = useState(true);
   const [claimingId, setClaimingId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  function handleWeekChange(d: Date) {
+    setWeekStart(d);
+    setShowTodayOnly(false);
+  }
 
   useEffect(() => {
     setLoading(true);
@@ -2174,12 +2188,19 @@ function StaffSchedule({ userId }: { userId: string }) {
   // Staff only sees published (not draft) shifts assigned to them
   const myShifts = shifts.filter(s => s.assigned_to_user_id === userId && s.status !== "draft");
   const openShifts = shifts.filter(s => s.is_open_shift && !s.assigned_to_user_id && s.status === "open");
-  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const todayStr = fmtDate(new Date());
+  const allDays = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const days = showTodayOnly ? allDays.filter(d => fmtDate(d) === todayStr) : allDays;
 
   return (
     <div className="space-y-4" data-testid="my-schedule-view">
       {banner && <Banner type={banner.type} message={banner.msg} onDismiss={() => setBanner(null)} />}
-      <WeekNav weekStart={weekStart} onChange={setWeekStart} />
+      <WeekNav
+        weekStart={weekStart}
+        onChange={handleWeekChange}
+        onToday={() => setShowTodayOnly(true)}
+        todayActive={showTodayOnly}
+      />
 
       {loading ? (
         <div className="flex items-center justify-center py-12"><Loader2 className="w-5 h-5 animate-spin text-sprout-purple" /></div>
@@ -2231,8 +2252,10 @@ function StaffSchedule({ userId }: { userId: string }) {
               </div>
             );
           })}
-          {myShifts.length === 0 && openShifts.length === 0 && (
-            <div className="text-center py-12 text-dark-secondary text-sm">No shifts this week</div>
+          {days.length === 0 || (myShifts.length === 0 && openShifts.length === 0) && (
+            <div className="text-center py-12 text-dark-secondary text-sm">
+              {showTodayOnly ? "No shifts today" : "No shifts this week"}
+            </div>
           )}
         </div>
       )}

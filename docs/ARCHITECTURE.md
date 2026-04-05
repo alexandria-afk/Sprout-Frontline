@@ -1,6 +1,6 @@
 # Architecture Reference
 **Frontline Operations Platform**
-_Last updated: 2026-04-01 — updated for pull-out form type, analytics endpoints, settings page, show_options conditional logic, aging & SLA feature, maintenance refactor (maintenance_tickets removed), break_records table, attendance worked_minutes, feature flags, pending_vendor issue status, org feature-flags API, Feature Settings admin page, notifications table + service + reminder loop, mobile expanded to 14 modules, verified\_closed issue status_
+_Last updated: 2026-04-05 — unified inbox API (`/api/v1/inbox`), My To-Do List widget (status-based), dashboard fixes (clock-in timezone, break type modal, shift time always visible), issues kanban drag-and-drop fix, shifts today filter + default date fix, dashboard service on_break per-location distribution_
 
 ---
 
@@ -471,17 +471,43 @@ All routes are prefixed `/api/v1`. Auth required on all routes except `/health`,
 | `POST` | `/{id}/attachments` | Upload attachment |
 | `PUT` | `/{id}/attachments/{attachment_id}/annotate` | Save annotated version of attachment |
 
-### Notifications — `/api/v1/notifications`
+### Inbox — `/api/v1/inbox`
+
+Status-based unified to-do list for the current user. Aggregates 6 entity types server-side and returns them sorted by urgency (overdue → upcoming → no due date).
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/` | List notifications for current user; filters: `unread_only`, `type`, pagination |
+| `GET` | `/` | Returns `{ items: InboxItem[], total: int }` for the current user |
+
+**InboxItem schema:** `kind` ("task"\|"form"\|"workflow"\|"course"\|"announcement"\|"issue"), `id`, `title`, `description`, `priority`, `form_type`, `workflow_instance_id`, `is_mandatory`, `due_at`, `is_overdue`, `created_at`.
+
+**Queries (all filtered by user + org, soft-delete excluded):**
+- `task` — `task_assignees` join `tasks` where status not in (completed, cancelled)
+- `form` — `form_assignments` where completed = false
+- `workflow` — `workflow_stage_instances` where assigned_to = user and status = in_progress
+- `course` — `course_enrollments` where status = not_started
+- `announcement` — `announcements` where requires_acknowledgement = true and user has not yet acknowledged, filtered by user's role/location
+- `issue` — `issues` where assigned_to = user and status not in (resolved, verified_closed)
+
+**Route file:** `backend/routes/inbox.py`
+**Frontend service:** `frontend/services/inbox.ts` — `getInboxItems()`
+
+> **Distinct from notifications:** The inbox is status-based (items stay until done). The notifications table is event-based (each event creates one row; marked read/dismissed independently). The dashboard "My To-Do List" widget uses `/api/v1/inbox`. The sidebar unread badge uses `/api/v1/notifications/unread-count`.
+
+---
+
+### Notifications — `/api/v1/notifications`
+
+Event log — each trigger event creates a row regardless of underlying entity status. Powers the sidebar unread badge and full notification history screen.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | List notifications for current user; filters: `is_read`, `type`, pagination |
 | `GET` | `/unread-count` | Returns `{ count: N }` for the current user |
 | `POST` | `/{id}/read` | Mark a single notification as read |
 | `POST` | `/read-all` | Mark all of current user's notifications as read |
 | `POST` | `/{id}/dismiss` | Dismiss (soft-delete) a notification |
 | `PUT` | `/fcm-token` | Register or update user's FCM device token |
-| `GET` | `/log` | FCM notification send log (admin) |
 
 **Notification table:** `notifications` — columns: `id`, `organisation_id`, `recipient_user_id`, `type` (14-value CHECK enum — see ALLOWED_VALUES.md), `title`, `body`, `entity_type`, `entity_id`, `is_read`, `is_dismissed`, `created_at`.
 
@@ -742,7 +768,7 @@ All dashboard routes are protected by `middleware.ts`. Staff role is blocked fro
 
 | Route | File | Description |
 |---|---|---|
-| `/dashboard` | `(dashboard)/dashboard/page.tsx` | Main home; role-differentiated (admin/manager vs staff); daily AI brief (localStorage cached). For admin/manager, brief fetches `/reports/aging/tasks` and `/reports/aging/issues` in parallel; if SLA breaches exist, a third sentence is appended naming the worst location and item count. |
+| `/dashboard` | `(dashboard)/dashboard/page.tsx` | Main home; role-differentiated (admin/manager vs staff). Widgets: stat cards, My Shift card (clock-in/out/break with break-type modal), **My To-Do List** (status-based, single `GET /api/v1/inbox` call — tasks, forms, workflows, courses, announcements, issues sorted by urgency), leaderboard, announcements carousel. Daily AI brief (localStorage cached) fetches `/reports/aging/tasks` and `/reports/aging/issues`; if SLA breaches exist, a third sentence is appended. My Shift card shows real clock-in time in local timezone; shift time always visible even when clocked in. |
 | `/dashboard/tasks` | `dashboard/tasks/page.tsx` | Task list with status, priority, date filters |
 | `/dashboard/issues` | `dashboard/issues/page.tsx` | Issue list with multi-filter; includes kanban and list views for both issues and tasks. Age badges on every card/row — color-coded green/yellow/red based on % of SLA elapsed. Issues use `issue_categories.sla_hours` (default 24h); tasks use `_TASK_SLA_HOURS` (critical=4h, high=24h, medium=72h, low=168h). `/dashboard/tasks` redirects here. |
 | `/dashboard/issues/categories` | `dashboard/issues/categories/page.tsx` | Issue category editor (custom fields, escalation rules) |

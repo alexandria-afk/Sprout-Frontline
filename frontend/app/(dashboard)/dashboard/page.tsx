@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import clsx from "clsx";
 import {
   LayoutDashboard,
@@ -39,13 +39,12 @@ import {
   Users,
 } from "lucide-react";
 import { getDashboardSummary, type DashboardSummary, type AttendanceSummary, type AttendanceLocationRow } from "@/services/dashboard";
-import { getMyAssignments, type FormAssignment } from "@/services/forms";
 import { listAnnouncements } from "@/services/announcements";
 import { listCAPs } from "@/services/caps";
-import { myTasks, taskSummary } from "@/services/tasks";
+import { taskSummary } from "@/services/tasks";
 import { getSafetyLeaderboard } from "@/services/safety";
-import { getMyWorkflowTasks, type WorkflowStageInstance } from "@/services/workflows";
 import { listIssues } from "@/services/issues";
+import { getInboxItems, type InboxItem as InboxApiItem } from "@/services/inbox";
 import { getMyEnrollments, getLmsAnalytics, type CourseEnrollment, type LmsAnalytics } from "@/services/lms";
 import { listShifts, clockIn, clockOut, startBreak, endBreak, getBreakStatus, getMyAttendance } from "@/services/shifts";
 import { createClient } from "@/services/supabase/client";
@@ -580,35 +579,26 @@ function AdminDashboard({ role, locationId }: { role: string; locationId: string
   );
 }
 
-// ── Unified Inbox ──────────────────────────────────────────────────────────────
-type InboxItem = {
-  kind: "form" | "task" | "workflow" | "incident" | "issue" | "course" | "announcement";
-  id: string;
-  title: string;
-  description: string;    // shown under title
-  pill: string;           // first dynamic pill (form type, priority, audience, …)
-  pillStyle: string;      // tailwind classes for the first dynamic pill
-  pill2?: string;         // optional second dynamic pill (Required, Needs Acknowledgement, …)
-  pillStyle2?: string;    // tailwind classes for the second dynamic pill
-  due: Date | null;
-  overdue: boolean;
-  href: string;
-  createdAt: Date;
+// ── Notification type metadata ────────────────────────────────────────────────
+
+// ── To-Do List metadata ───────────────────────────────────────────────────────
+
+const TODO_META: Record<InboxApiItem["kind"], {
+  icon: LucideIcon;
+  color: string;
+  bg: string;
+  badge: string;
+  label: string;
+}> = {
+  task:         { label: "Task",         icon: CheckSquare,    color: "text-sprout-green",  bg: "bg-sprout-green/10",  badge: "bg-sprout-green/10 text-sprout-green" },
+  form:         { label: "Form",         icon: ClipboardList,  color: "text-amber-600",     bg: "bg-amber-50",         badge: "bg-amber-100 text-amber-700" },
+  workflow:     { label: "Workflow",     icon: GitBranch,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
+  course:       { label: "Training",     icon: GraduationCap,  color: "text-blue-600",      bg: "bg-blue-50",          badge: "bg-blue-100 text-blue-700" },
+  announcement: { label: "Announcement", icon: Megaphone,      color: "text-sprout-purple", bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
+  issue:        { label: "Issue",        icon: AlertTriangle,  color: "text-orange-600",    bg: "bg-orange-50",        badge: "bg-orange-100 text-orange-700" },
 };
 
-const INBOX_META = {
-  form:         { label: "Form",         icon: ClipboardList,  color: "text-amber-600",    bg: "bg-amber-50",         badge: "bg-amber-100 text-amber-700" },
-  task:         { label: "Task",         icon: CheckSquare,    color: "text-sprout-green", bg: "bg-sprout-green/10",  badge: "bg-sprout-green/10 text-sprout-green" },
-  workflow:     { label: "Workflow",     icon: GitBranch,      color: "text-sprout-purple",bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
-  incident:     { label: "Incident",     icon: TriangleAlert,  color: "text-red-500",      bg: "bg-red-50",           badge: "bg-red-100 text-red-600" },
-  issue:        { label: "Issue",        icon: AlertTriangle,  color: "text-orange-600",   bg: "bg-orange-50",        badge: "bg-orange-100 text-orange-700" },
-  course:       { label: "Training",     icon: GraduationCap,  color: "text-blue-600",     bg: "bg-blue-50",          badge: "bg-blue-100 text-blue-700" },
-  announcement: { label: "Announcement", icon: Megaphone,      color: "text-sprout-purple",bg: "bg-sprout-purple/10", badge: "bg-sprout-purple/10 text-sprout-purple" },
-};
-
-const INBOX_PAGE_SIZE = 8;
-
-// ── Priority pill style ───────────────────────────────────────────────────────
+const TODO_PAGE_SIZE = 8;
 
 const PRIORITY_PILL: Record<string, string> = {
   critical: "bg-red-100 text-red-700",
@@ -616,8 +606,6 @@ const PRIORITY_PILL: Record<string, string> = {
   medium:   "bg-amber-100 text-amber-700",
   low:      "bg-gray-100 text-gray-500",
 };
-
-// ── Form-type pill style ──────────────────────────────────────────────────────
 
 const FORM_TYPE_PILL: Record<string, string> = {
   checklist: "bg-emerald-100 text-emerald-700",
@@ -632,8 +620,6 @@ function formTypeLabel(raw: string): string {
   return raw.charAt(0).toUpperCase() + raw.slice(1);
 }
 
-// ── Due-date helper ───────────────────────────────────────────────────────────
-
 function dueBadge(due: Date | null, overdue: boolean): string | null {
   if (!due) return null;
   const diffMs = Math.abs(due.getTime() - Date.now());
@@ -646,11 +632,52 @@ function dueBadge(due: Date | null, overdue: boolean): string | null {
   return `Due in ${diffDays}d`;
 }
 
-// ── My Inbox ──────────────────────────────────────────────────────────────────
+function todoHref(item: InboxApiItem): string {
+  switch (item.kind) {
+    case "task":         return `/dashboard/issues?tab=tasks&id=${item.id}`;
+    case "form":         return `/dashboard/forms/fill/${item.id}`;
+    case "workflow":     return item.workflow_instance_id
+      ? `/dashboard/workflows/instances/${item.workflow_instance_id}`
+      : "/dashboard/workflows/instances";
+    case "course":       return `/dashboard/training/learn/${item.id}`;
+    case "announcement": return "/dashboard/announcements";
+    case "issue":        return `/dashboard/issues?tab=issues&id=${item.id}`;
+    default:             return "/dashboard";
+  }
+}
+
+function todoPills(item: InboxApiItem): { pill: string; pillStyle: string; pill2?: string; pillStyle2?: string } {
+  switch (item.kind) {
+    case "task":
+    case "issue": {
+      const priKey = (item.priority || "low").toLowerCase();
+      return { pill: priKey.charAt(0).toUpperCase() + priKey.slice(1), pillStyle: PRIORITY_PILL[priKey] ?? "bg-gray-100 text-gray-500" };
+    }
+    case "form": {
+      const rawType = item.form_type || "form";
+      return { pill: formTypeLabel(rawType), pillStyle: FORM_TYPE_PILL[rawType] ?? "bg-slate-100 text-slate-600" };
+    }
+    case "workflow":
+      return { pill: "Action needed", pillStyle: "bg-violet-100 text-violet-700" };
+    case "course":
+      return {
+        pill: "Training",
+        pillStyle: "bg-blue-100 text-blue-700",
+        ...(item.is_mandatory ? { pill2: "Required", pillStyle2: "bg-red-100 text-red-700" } : {}),
+      };
+    case "announcement":
+      return { pill: "Needs Acknowledgement", pillStyle: "bg-amber-100 text-amber-700" };
+    default:
+      return { pill: "", pillStyle: "" };
+  }
+}
+
+// ── My To-Do List ─────────────────────────────────────────────────────────────
 
 function MyInbox({ isManager = false }: { isManager?: boolean }) {
+  void isManager;
   const router = useRouter();
-  const [items, setItems] = useState<InboxItem[]>([]);
+  const [items, setItems] = useState<InboxApiItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -659,196 +686,10 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
     setFetchError(null);
     setLoading(true);
     try {
-      const now = new Date();
-      const results: InboxItem[] = [];
-
-      const [formsRes, tasksRes, workflowsRes, enrollmentsRes, announcementsRes, issuesRes] =
-        await Promise.allSettled([
-          getMyAssignments(),
-          myTasks(),
-          getMyWorkflowTasks(),
-          getMyEnrollments(),
-          listAnnouncements(),
-          listIssues({ my_issues: true }),
-        ]);
-
-      // ── Form assignments ──────────────────────────────────────────────────
-      if (formsRes.status === "fulfilled") {
-        for (const fa of formsRes.value) {
-          if (fa.completed) continue;
-          const due     = fa.due_at ? new Date(fa.due_at) : null;
-          const rawType = fa.form_templates?.type ?? "form";
-          results.push({
-            kind: "form",
-            id: fa.id,
-            title: fa.form_templates?.title ?? "Form",
-            description: fa.form_templates?.description ?? "",
-            pill:      formTypeLabel(rawType),
-            pillStyle: FORM_TYPE_PILL[rawType] ?? "bg-slate-100 text-slate-600",
-            due,
-            overdue: due ? due < now : false,
-            href: `/dashboard/forms/fill/${fa.id}`,
-            createdAt: new Date(fa.created_at),
-          });
-        }
-      }
-
-      // ── Tasks (pending / in_progress only) ────────────────────────────────
-      if (tasksRes.status === "fulfilled") {
-        for (const t of tasksRes.value) {
-          if (t.status === "completed" || t.status === "cancelled") continue;
-          const due     = t.due_at ? new Date(t.due_at) : null;
-          const priKey  = t.priority.toLowerCase();
-          const priLabel = t.priority.charAt(0).toUpperCase() + t.priority.slice(1);
-          results.push({
-            kind: "task",
-            id: t.id,
-            title: t.title,
-            description: t.description ?? t.locations?.name ?? "",
-            pill:      priLabel,
-            pillStyle: PRIORITY_PILL[priKey] ?? "bg-gray-100 text-gray-500",
-            due,
-            overdue: due ? due < now : false,
-            href: `/dashboard/issues?tab=tasks&id=${t.id}`,
-            createdAt: new Date(t.created_at),
-          });
-        }
-      }
-
-      // ── Workflow stage instances (in_progress only) ───────────────────────
-      if (workflowsRes.status === "fulfilled") {
-        for (const wsi of workflowsRes.value) {
-          if (wsi.status !== "in_progress") continue;
-          const due        = wsi.due_at ? new Date(wsi.due_at) : null;
-          const instanceId = wsi.workflow_instance_id ?? wsi.workflow_instances?.id;
-          const rawAction  = wsi.workflow_stages?.action_type ?? "";
-          const actionLabel = rawAction
-            ? rawAction.charAt(0).toUpperCase() + rawAction.slice(1).replace(/_/g, " ")
-            : "Action required";
-          results.push({
-            kind: "workflow",
-            id: wsi.id,
-            title: wsi.workflow_stages?.name ?? "Workflow step",
-            description: wsi.workflow_instances?.workflow_definitions?.name ?? "",
-            pill:      actionLabel,
-            pillStyle: "bg-violet-100 text-violet-700",
-            due,
-            overdue: due ? due < now : false,
-            href: instanceId
-              ? `/dashboard/workflows/fill/${instanceId}/${wsi.id}`
-              : "/dashboard/workflows",
-            createdAt: new Date(wsi.started_at ?? Date.now()),
-          });
-        }
-      }
-
-      // ── Course enrollments (not_started only — starting removes from inbox) ─
-      if (enrollmentsRes.status === "fulfilled") {
-        for (const ce of enrollmentsRes.value) {
-          if (ce.status !== "not_started") continue;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const course = (ce as any).courses as {
-            title?: string;
-            description?: string | null;
-            estimated_duration_mins?: number | null;
-            is_mandatory?: boolean;
-            course_modules?: { id: string }[];
-          } | undefined;
-          const moduleCount = course?.course_modules?.length ?? null;
-          const modulePill  = moduleCount != null
-            ? `${moduleCount} Module${moduleCount !== 1 ? "s" : ""}`
-            : course?.estimated_duration_mins
-              ? `${course.estimated_duration_mins} min`
-              : null;
-          results.push({
-            kind: "course",
-            id: ce.id,
-            title: course?.title ?? "Training course",
-            description: course?.description ?? "",
-            pill:      modulePill ?? "Training",
-            pillStyle: "bg-blue-100 text-blue-700",
-            ...(course?.is_mandatory ? { pill2: "Required", pillStyle2: "bg-red-100 text-red-700" } : {}),
-            due: null,
-            overdue: false,
-            href: `/dashboard/training/learn/${ce.id}`,
-            createdAt: new Date(Date.now()),
-          });
-        }
-      }
-
-      // ── Announcements requiring acknowledgement ────────────────────────────
-      if (announcementsRes.status === "fulfilled") {
-        for (const ann of announcementsRes.value.items ?? []) {
-          if (!ann.requires_acknowledgement || ann.my_acknowledged) continue;
-          // Derive broadcast audience from target_roles
-          const roles = ann.target_roles ?? [];
-          let audience: string;
-          if (!roles.length) {
-            audience = "All Staff";
-          } else if (roles.every((r) => ["super_admin", "admin"].includes(r))) {
-            audience = "Admins";
-          } else if (roles.every((r) => ["manager", "super_admin", "admin"].includes(r))) {
-            audience = "Leadership";
-          } else if (roles.includes("manager") && roles.includes("staff")) {
-            audience = "All Staff";
-          } else if (roles.includes("manager")) {
-            audience = "Managers";
-          } else {
-            audience = "Staff";
-          }
-          results.push({
-            kind: "announcement",
-            id: ann.id,
-            title: ann.title,
-            description: (ann.body ?? "").slice(0, 100),
-            pill:      audience,
-            pillStyle: "bg-slate-100 text-slate-600",
-            pill2:      "Needs Acknowledgement",
-            pillStyle2: "bg-amber-100 text-amber-700",
-            due: null,
-            overdue: false,
-            href: `/dashboard/announcements`,
-            createdAt: new Date(ann.created_at),
-          });
-        }
-      }
-
-      // ── Assigned open issues ──────────────────────────────────────────────
-      if (issuesRes.status === "fulfilled") {
-        for (const issue of issuesRes.value.data) {
-          if (issue.status === "resolved" || issue.status === "verified_closed") continue;
-          const due    = issue.due_at ? new Date(issue.due_at) : null;
-          const priKey = issue.priority.toLowerCase();
-          const priLabel = issue.priority.charAt(0).toUpperCase() + issue.priority.slice(1);
-          results.push({
-            kind: "issue",
-            id: issue.id,
-            title: issue.title,
-            description: issue.description ?? issue.locations?.name ?? "",
-            pill:      priLabel,
-            pillStyle: PRIORITY_PILL[priKey] ?? "bg-gray-100 text-gray-500",
-            due,
-            overdue: due ? due < now : false,
-            href: `/dashboard/issues`,
-            createdAt: new Date(issue.created_at),
-          });
-        }
-      }
-
-      // ── Sort: most overdue → upcoming → no due date (newest first) ────────
-      results.sort((a, b) => {
-        if (a.overdue && b.overdue) return a.due!.getTime() - b.due!.getTime();
-        if (a.overdue) return -1;
-        if (b.overdue) return 1;
-        if (a.due && b.due) return a.due.getTime() - b.due.getTime();
-        if (a.due) return -1;
-        if (b.due) return 1;
-        return b.createdAt.getTime() - a.createdAt.getTime();
-      });
-
-      setItems(results);
+      const res = await getInboxItems();
+      setItems(res.items);
     } catch (e) {
-      setFetchError((e as Error).message || "Failed to load inbox");
+      setFetchError((e as Error).message || "Failed to load to-do list");
     } finally {
       setLoading(false);
     }
@@ -856,14 +697,14 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
 
   useEffect(() => { fetchItems(); }, [fetchItems]);
 
-  const displayed = showAll ? items : items.slice(0, INBOX_PAGE_SIZE);
+  const displayed = showAll ? items : items.slice(0, TODO_PAGE_SIZE);
 
   return (
     <div className="bg-white rounded-xl border border-surface-border p-4 md:p-6">
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs font-semibold tracking-wide uppercase text-dark-secondary flex items-center gap-2">
           <Inbox className="w-4 h-4 text-sprout-purple" />
-          My Inbox
+          My To-Do List
           {items.length > 0 && (
             <span className="px-1.5 py-0.5 rounded-full bg-sprout-purple text-white text-[10px] font-bold">
               {items.length}
@@ -881,7 +722,7 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
       ) : fetchError ? (
         <div className="flex items-center gap-2 text-sm text-red-500 py-2">
           <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>Could not load inbox.</span>
+          <span>Could not load to-do list.</span>
           <button onClick={fetchItems} className="ml-1 text-xs text-sprout-purple hover:underline">
             Retry
           </button>
@@ -893,13 +734,15 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
       ) : (
         <div className="flex flex-col divide-y divide-surface-border">
           {displayed.map((item) => {
-            const meta    = INBOX_META[item.kind];
+            const meta    = TODO_META[item.kind];
             const Icon    = meta.icon;
-            const dueText = dueBadge(item.due, item.overdue);
+            const due     = item.due_at ? new Date(item.due_at) : null;
+            const dueText = dueBadge(due, item.is_overdue);
+            const { pill, pillStyle, pill2, pillStyle2 } = todoPills(item);
             return (
               <button
                 key={`${item.kind}-${item.id}`}
-                onClick={() => router.push(item.href)}
+                onClick={() => router.push(todoHref(item))}
                 className="py-3 flex items-start gap-3 w-full text-left hover:bg-gray-50 rounded-lg px-2 -mx-2 transition-colors"
               >
                 {/* Left: colored icon */}
@@ -917,41 +760,25 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
                   )}
                 </div>
 
-                {/* Right: type pill + dynamic pills + due date */}
+                {/* Right: type badge + dynamic pills + due date */}
                 <div className="flex flex-col items-end gap-1 shrink-0 pt-0.5">
-                  {/* Pills row */}
                   <div className="flex items-center gap-1 flex-wrap justify-end">
-                    {item.kind !== "announcement" && item.kind !== "course" && (
-                      <span className={clsx(
-                        "text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap",
-                        meta.badge,
-                      )}>
-                        {meta.label}
+                    <span className={clsx("text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap", meta.badge)}>
+                      {meta.label}
+                    </span>
+                    {pill && (
+                      <span className={clsx("text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap", pillStyle)}>
+                        {pill}
                       </span>
                     )}
-                    {item.pill && (
-                      <span className={clsx(
-                        "text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap",
-                        item.pillStyle,
-                      )}>
-                        {item.pill}
-                      </span>
-                    )}
-                    {item.pill2 && (
-                      <span className={clsx(
-                        "text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap",
-                        item.pillStyle2,
-                      )}>
-                        {item.pill2}
+                    {pill2 && (
+                      <span className={clsx("text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap", pillStyle2)}>
+                        {pill2}
                       </span>
                     )}
                   </div>
-                  {/* Row 3: due date */}
                   {dueText && (
-                    <span className={clsx(
-                      "text-[10px] font-medium whitespace-nowrap",
-                      item.overdue ? "text-red-500" : "text-dark/40",
-                    )}>
+                    <span className={clsx("text-[10px] font-medium whitespace-nowrap", item.is_overdue ? "text-red-500" : "text-dark/40")}>
                       {dueText}
                     </span>
                   )}
@@ -960,7 +787,7 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
             );
           })}
 
-          {items.length > INBOX_PAGE_SIZE && (
+          {items.length > TODO_PAGE_SIZE && (
             <button
               onClick={() => setShowAll((v) => !v)}
               className="w-full text-center text-xs text-sprout-purple hover:underline py-2"
@@ -976,6 +803,7 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
 
 // ── My Shift Card ─────────────────────────────────────────────────────────────
 function MyShiftCard() {
+  const pathname = usePathname();
   const [shift, setShift]           = useState<Shift | null>(null);
   const [attendance, setAttendance] = useState<AttendanceRecord | null>(null);
   const [onBreak, setOnBreak]       = useState(false);
@@ -984,50 +812,61 @@ function MyShiftCard() {
   const [actionLoading, setActionLoading] = useState(false);
   const [locationId, setLocationId] = useState<string | null>(null);
   const [userId, setUserId]         = useState<string | null>(null);
+  const [breakTypeModal, setBreakTypeModal] = useState(false);
 
-  useEffect(() => {
-    async function load() {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const uid = session?.user?.id ?? null;
-      setUserId(uid);
-      if (!uid) { setLoading(false); return; }
+  const loadAttendance = useCallback(async () => {
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    const uid = session?.user?.id ?? null;
+    setUserId(uid);
+    if (!uid) { setLoading(false); return; }
 
-      // Prefer app_metadata; fall back to profile row (JWT may lag after location assignment)
-      let lid = (session?.user?.app_metadata?.location_id as string) ?? null;
-      if (!lid) {
-        const supabase2 = createClient();
-        const { data: profile } = await supabase2
-          .from("profiles")
-          .select("location_id")
-          .eq("id", uid)
-          .maybeSingle();
-        lid = profile?.location_id ?? null;
-      }
-      setLocationId(lid);
-
-      const _now = new Date();
-      const today = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
-      const [shiftsRes, attRes] = await Promise.all([
-        listShifts({ user_id: uid, from_date: `${today}T00:00:00`, to_date: `${today}T23:59:59`, page_size: 5 }).catch(() => ({ items: [] as Shift[], total_count: 0 })),
-        getMyAttendance({ from_date: today, to_date: today }).catch(() => [] as AttendanceRecord[]),
-      ]);
-
-      const todayShift = (shiftsRes as { items: Shift[] }).items.find(s => s.assigned_to_user_id === uid) ?? null;
-      setShift(todayShift);
-
-      const openAtt = (attRes as AttendanceRecord[]).find(a => a.clock_in_at && !a.clock_out_at) ?? null;
-      setAttendance(openAtt);
-
-      if (openAtt) {
-        const bs = await getBreakStatus(openAtt.id).catch(() => ({ on_break: false, active_break: null }));
-        setOnBreak(bs.on_break);
-        setActiveBreakId(bs.active_break?.id ?? null);
-      }
-      setLoading(false);
+    // Prefer app_metadata; fall back to profile row (JWT may lag after location assignment)
+    let lid = (session?.user?.app_metadata?.location_id as string) ?? null;
+    if (!lid) {
+      const supabase2 = createClient();
+      const { data: profile } = await supabase2
+        .from("profiles")
+        .select("location_id")
+        .eq("id", uid)
+        .maybeSingle();
+      lid = profile?.location_id ?? null;
     }
-    load();
+    setLocationId(lid);
+
+    const _now = new Date();
+    const today = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
+    const [shiftsRes, attRes] = await Promise.all([
+      listShifts({ user_id: uid, from_date: `${today}T00:00:00`, to_date: `${today}T23:59:59`, page_size: 5 }).catch(() => ({ items: [] as Shift[], total_count: 0 })),
+      getMyAttendance({ from_date: `${today}T00:00:00`, to_date: `${today}T23:59:59` }).catch(() => [] as AttendanceRecord[]),
+    ]);
+
+    const todayShift = (shiftsRes as { items: Shift[] }).items.find(s => s.assigned_to_user_id === uid) ?? null;
+    setShift(todayShift);
+
+    const openAtt = (attRes as AttendanceRecord[]).find(a => a.clock_in_at && !a.clock_out_at) ?? null;
+    setAttendance(openAtt);
+
+    if (openAtt) {
+      const bs = await getBreakStatus(openAtt.id).catch(() => ({ on_break: false, active_break: null }));
+      setOnBreak(bs.on_break);
+      setActiveBreakId(bs.active_break?.id ?? null);
+    } else {
+      setOnBreak(false);
+      setActiveBreakId(null);
+    }
+    setLoading(false);
   }, []);
+
+  // Load on mount and whenever the route changes back to /dashboard (in-app navigation)
+  useEffect(() => { loadAttendance(); }, [loadAttendance, pathname]);
+
+  // Re-sync when returning to this browser tab from another tab/window
+  useEffect(() => {
+    const handleVisibility = () => { if (document.visibilityState === "visible") loadAttendance(); };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [loadAttendance]);
 
   async function getCoords(): Promise<{ lat?: number; lng?: number }> {
     return new Promise((resolve) => {
@@ -1060,26 +899,37 @@ function MyShiftCard() {
 
   async function handleBreakToggle() {
     if (!attendance) return;
-    setActionLoading(true);
     if (onBreak) {
+      setActionLoading(true);
       await endBreak({ attendance_id: attendance.id }).catch(() => null);
       setOnBreak(false); setActiveBreakId(null);
+      setActionLoading(false);
     } else {
-      const br = await startBreak({ attendance_id: attendance.id }).catch(() => null);
-      if (br) { setOnBreak(true); setActiveBreakId(br.id); }
+      setBreakTypeModal(true);
     }
+  }
+
+  async function handleStartBreak(breakType: "meal" | "rest" | "other") {
+    if (!attendance) return;
+    setBreakTypeModal(false);
+    setActionLoading(true);
+    const br = await startBreak({ attendance_id: attendance.id, break_type: breakType }).catch(() => null);
+    if (br) { setOnBreak(true); setActiveBreakId(br.id); }
     setActionLoading(false);
   }
 
+  // Shift times are stored as wall-clock with a fake +00:00 — extract directly.
   const fmt = (iso: string) => {
-    // Extract wall-clock time directly from ISO string — shift times are stored as
-    // naive local time with +00:00 suffix; converting via new Date() adds a UTC→local
-    // offset that would show the wrong hour.
     const m = iso.match(/T(\d{2}):(\d{2})/);
     if (!m) return "";
     const h = parseInt(m[1]), min = m[2];
-    const ampm = h >= 12 ? "PM" : "AM";
-    return `${h % 12 || 12}:${min} ${ampm}`;
+    return `${h % 12 || 12}:${min} ${h >= 12 ? "PM" : "AM"}`;
+  };
+  // Attendance timestamps are real UTC — convert to the user's local timezone.
+  const fmtLocal = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+    } catch { return ""; }
   };
   const isClockedIn = !!(attendance?.clock_in_at && !attendance?.clock_out_at);
 
@@ -1101,13 +951,14 @@ function MyShiftCard() {
       ) : (
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            {isClockedIn ? (
-              <p className="text-sm font-semibold text-dark">
-                Clocked in at {fmt(attendance!.clock_in_at!)}
-                {onBreak && <span className="ml-2 text-xs font-medium text-amber-600">· On break</span>}
+            <p className="text-sm font-semibold text-dark">
+              {fmt(shift.start_at)} – {fmt(shift.end_at)}
+            </p>
+            {isClockedIn && (
+              <p className="text-xs text-sprout-green font-medium mt-0.5">
+                Clocked in at {fmtLocal(attendance!.clock_in_at!)}
+                {onBreak && <span className="ml-2 text-amber-600">· On break</span>}
               </p>
-            ) : (
-              <p className="text-sm font-semibold text-dark">{fmt(shift.start_at)} – {fmt(shift.end_at)}</p>
             )}
             {shift.locations?.name && (
               <p className="text-xs text-dark-secondary mt-0.5 flex items-center gap-1">
@@ -1135,6 +986,28 @@ function MyShiftCard() {
                 </button>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {breakTypeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-xs p-6">
+            <p className="text-sm font-semibold text-dark mb-1">Start Break</p>
+            <p className="text-xs text-dark-secondary mb-4">What kind of break?</p>
+            <div className="grid grid-cols-3 gap-3">
+              {(["meal", "rest", "other"] as const).map(t => (
+                <button key={t} onClick={() => handleStartBreak(t)}
+                  className="flex flex-col items-center gap-2 p-4 rounded-xl border border-surface-border hover:border-sprout-purple hover:bg-sprout-purple/5 transition-colors capitalize text-sm font-medium text-dark">
+                  <Coffee className="w-5 h-5 text-sprout-purple" />
+                  {t}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setBreakTypeModal(false)}
+              className="mt-4 w-full text-xs text-dark-secondary hover:text-dark transition-colors">
+              Cancel
+            </button>
           </div>
         </div>
       )}

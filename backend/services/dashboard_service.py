@@ -136,9 +136,9 @@ class DashboardService:
                     .eq("organisation_id", str(org_id))
                     .execute()
                 )
-                late_threshold = 0
+                late_threshold = 15  # default: 15 minutes when no attendance_rules row exists
                 if rules_resp.data:
-                    late_threshold = rules_resp.data[0].get("late_threshold_mins") or 0
+                    late_threshold = rules_resp.data[0].get("late_threshold_mins") or 15
 
                 # Today's published, assigned shifts
                 shifts_query = (
@@ -173,18 +173,22 @@ class DashboardService:
                 att_by_shift = {a["shift_id"]: a for a in att_today if a.get("shift_id")}
                 att_by_user = {a["user_id"]: a for a in att_today if a.get("user_id")}
 
-                # Open breaks count
+                # Open breaks — fetch records so we can distribute counts per location
                 att_ids = [a["id"] for a in att_today]
+                att_id_to_loc = {a["id"]: a.get("location_id") for a in att_today}
                 open_breaks_count = 0
+                open_break_att_ids: set = set()
                 if att_ids:
                     brk_resp = (
                         supabase.table("break_records")
-                        .select("attendance_id", count="exact")
+                        .select("attendance_id")
                         .in_("attendance_id", att_ids)
                         .is_("break_end_at", "null")
                         .execute()
                     )
-                    open_breaks_count = brk_resp.count or 0
+                    brk_records = brk_resp.data or []
+                    open_breaks_count = len(brk_records)
+                    open_break_att_ids = {b["attendance_id"] for b in brk_records}
 
                 # User names for not-clocked-in
                 all_user_ids = list({
@@ -256,7 +260,7 @@ class DashboardService:
                         loc["clocked_in"] += 1
 
                         # Late check
-                        if start_str and att.get("clock_in_at") and late_threshold > 0:
+                        if start_str and att.get("clock_in_at"):
                             try:
                                 shift_start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                                 clock_in = datetime.fromisoformat(att["clock_in_at"].replace("Z", "+00:00"))
@@ -296,6 +300,12 @@ class DashboardService:
                             "user_name": user_name,
                             "shift_start": shift_time,
                         })
+
+                # Distribute open-break counts to the correct location bucket
+                for att_id in open_break_att_ids:
+                    loc_id = att_id_to_loc.get(att_id)
+                    if loc_id and loc_id in by_location_map:
+                        by_location_map[loc_id]["on_break"] += 1
 
                 # Org-wide rates
                 present_rate = round(total_clocked_in / total_scheduled * 100) if total_scheduled > 0 else 0

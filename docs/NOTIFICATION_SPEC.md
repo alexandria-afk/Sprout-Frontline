@@ -1,31 +1,44 @@
 # Notification & Inbox System Spec
 
-**This document defines the centralized notification system, inbox, push notifications, and AI insight integration.**
+**This document defines the centralized notification system, My To-Do List, push notifications, and AI insight integration.**
 
 ---
 
 ## Architecture Overview
 
-Three channels for surfacing information to users:
+Four channels for surfacing information to users:
 
-### 1. Inbox (web + mobile)
-- The primary place users check for actionable items
-- Powered by a centralized `notifications` table
-- Shows on web dashboard as a widget, and on mobile as a card section + full list screen
-- Tapping an item navigates to the source entity
+### 1. My To-Do List (web + mobile)
+- **Status-based**: shows everything the user still needs to action — regardless of when the triggering event happened
+- Powered by `GET /api/v1/inbox` — aggregates 6 entity types server-side
+- Entity types: tasks (not completed/cancelled), form assignments (not submitted), workflow stage instances (in_progress), course enrollments (not_started), announcements (requires acknowledgement, not yet acknowledged), issues (assigned to user, not resolved/closed)
+- Sorted: overdue first (due_at ASC) → upcoming (due_at ASC) → no due date (created_at DESC)
+- Items **stay** in the list until the underlying entity is done — completing a task removes it; marking an announcement acknowledged removes it
+- Web: "My To-Do List" widget on dashboard (`frontend/app/(dashboard)/dashboard/page.tsx`)
+- Mobile: full-screen "My To-Do List" (`notifications_screen.dart`) via `todoItemsProvider`
+- Route file: `backend/routes/inbox.py`
+- Frontend service: `frontend/services/inbox.ts` — `getInboxItems()`
+- Mobile model: `inbox_models.dart`, repository method `getInboxItems()`, provider `todoItemsProvider`
 
-### 2. Push Notifications (mobile only, FCM)
+### 2. Notifications (event log)
+- **Event-based**: each trigger event (task assigned, issue commented on, etc.) creates one row
+- Powered by the `notifications` table via `GET /api/v1/notifications`
+- Items persist as history; users mark them read or dismiss them
+- Powers the **sidebar unread badge** (polls `GET /api/v1/notifications/unread-count` every 60 s)
+- Does NOT drive the My To-Do List widget
+
+### 3. Push Notifications (mobile only, FCM)
 - OS-level banners
 - User controls on/off in app settings
 - Only three triggers: task assigned, form assigned, scheduled reminders
 - Light touch — everything else is inbox-only
 
-### 3. AI Insight Cards (web dashboard + mobile dashboard)
+### 4. AI Insight Cards (web dashboard + mobile dashboard)
 - AI-generated observations and anomaly alerts
 - Integrated into the AI Daily Brief on web dashboard
 - Shown as dismissable cards on mobile dashboard (per MOBILE_DESIGN.md)
 - Not stored in the notifications table — generated dynamically
-- Separate from the inbox
+- Separate from the to-do list and notifications
 
 ---
 
@@ -263,62 +276,59 @@ POST   /api/v1/notifications/{id}/dismiss
 
 ---
 
-## Part 5: Web Inbox
+## Part 5: Web — My To-Do List Widget
 
 ### Dashboard Widget
 
-Replace the current MyInbox widget (which polls multiple endpoints) with a single call to `GET /api/v1/notifications`.
+The "My To-Do List" widget calls `GET /api/v1/inbox` once and renders the sorted result.
 
-- Show latest 10 unread notifications
-- Each item: icon (by type) + title + body + time ago + read/unread dot
-- Tapping navigates to the source entity
-- "Mark all read" button
-- "View all" expands or navigates to full list
+- Each item: kind-based icon + title + description (location name or entity description) + type badge + priority/form-type pill + overdue/due-date label
+- Tapping navigates to the source entity (no read-marking — item disappears when the underlying work is done)
+- "View all N items" expands inline when count exceeds 8
+- "All caught up!" empty state when the list is empty
+- Implementation: `MyInbox` function in `dashboard/page.tsx`; helpers `TODO_META`, `PRIORITY_PILL`, `FORM_TYPE_PILL`, `todoPills()`, `todoHref()`, `dueBadge()`
 
 ### Navigation Mapping
 
-| entity_type | Navigates to |
+| kind | Navigates to |
 |---|---|
-| task | /dashboard/tasks → task detail |
-| form_assignment | /dashboard/forms/fill/{id} |
-| workflow_instance | /dashboard/workflows/fill/{instanceId}/{stageId} |
-| issue | /dashboard/issues → issue detail |
-| shift_claim | /dashboard/shifts (claims tab) |
-| shift_swap | /dashboard/shifts (swaps tab) |
-| leave_request | /dashboard/shifts (leave tab) |
-| form_submission | /dashboard/forms → submission detail |
-| cap | /dashboard/audits/caps/{id} |
-| announcement | /dashboard/announcements → detail |
-| course_enrollment | /dashboard/training/learn/{enrollmentId} |
+| task | `/dashboard/issues?tab=tasks&id={id}` |
+| form | `/dashboard/forms/fill/{id}` |
+| workflow | `/dashboard/workflows/instances/{workflow_instance_id}` |
+| course | `/dashboard/training/learn/{id}` |
+| announcement | `/dashboard/announcements` |
+| issue | `/dashboard/issues?tab=issues&id={id}` |
 
-### Unread Badge
+### Unread Badge (notifications, not to-do list)
 
-Show unread count badge next to "Dashboard" in the sidebar nav. Poll `GET /notifications/unread-count` every 60 seconds, or use Supabase Realtime subscription on the notifications table for the current user.
+Sidebar unread badge is driven by **notifications**, not the to-do list. Poll `GET /api/v1/notifications/unread-count` every 60 seconds to keep badge current.
 
 ---
 
-## Part 6: Mobile Inbox
+## Part 6: Mobile — My To-Do List Screen
+
+### Full Screen
+
+`NotificationsScreen` (`notifications_screen.dart`) renders the to-do list via `todoItemsProvider`:
+- Calls `GET /api/v1/inbox` via `NotificationsRepository.getInboxItems()`
+- Each row: kind icon + title + description + due badge + kind badge chip
+- Tap navigates using `InboxItem.route`
+- Pull to refresh
+- Empty state: "You're all caught up!"
+
+### Model & Provider
+
+- `InboxItem` model: `inbox_models.dart`
+- Repository method: `NotificationsRepository.getInboxItems()`
+- Provider: `todoItemsProvider` (`AsyncNotifierProvider<TodoItemsNotifier, List<InboxItem>>`)
 
 ### Dashboard Home Screen
 
-Per MOBILE_DESIGN.md, show an "INBOX" card section on the home screen:
-- Latest 5 unread notifications as inner rows
-- Each row: icon + title + time ago
-- Tap → navigate to entity + auto-mark as read
-- "View all →" link
+Per MOBILE_DESIGN.md, the home screen inbox card section should show the latest 5 items from `todoItemsProvider` (kind icon + title + due badge). "View all →" navigates to the full `NotificationsScreen`.
 
-### Unread Badge
+### Unread Badge (notifications)
 
-Show unread count on the Home tab icon in bottom nav.
-
-### Full Notification List Screen
-
-Accessible from "View all" or bell icon:
-- Full scrollable list
-- Pull to refresh
-- Swipe left to dismiss
-- Tap to navigate + mark read
-- Filter tabs: All | Unread
+The bottom nav unread badge is driven by `unreadCountProvider` → `GET /api/v1/notifications/unread-count`. This is separate from the to-do list count.
 
 ---
 
