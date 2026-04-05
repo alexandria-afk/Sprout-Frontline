@@ -108,10 +108,10 @@ class TaskDetail {
     return TaskDetail(
       task: Task.fromJson(json),
       messages: rawMessages
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(TaskMessage.fromJson)
           .toList(),
-      statusHistory: rawHistory.cast<Map<String, dynamic>>(),
+      statusHistory: rawHistory.map((e) => Map<String, dynamic>.from(e as Map)).toList(),
     );
   }
 }

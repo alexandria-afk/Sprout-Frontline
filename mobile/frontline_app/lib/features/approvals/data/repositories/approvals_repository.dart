@@ -7,10 +7,10 @@ class ApprovalsRepository {
     final response = await DioClient.instance
         .get('/api/v1/workflows/instances/my-tasks');
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
@@ -43,10 +43,10 @@ class ApprovalsRepository {
     final response = await DioClient.instance
         .get('/api/v1/shifts/swaps', queryParameters: {'status': 'pending'});
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
@@ -68,10 +68,10 @@ class ApprovalsRepository {
     final response = await DioClient.instance
         .get('/api/v1/shifts/claims', queryParameters: {'status': 'pending'});
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
@@ -93,10 +93,10 @@ class ApprovalsRepository {
     final response = await DioClient.instance
         .get('/api/v1/shifts/leave', queryParameters: {'status': 'pending'});
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }

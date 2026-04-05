@@ -61,7 +61,7 @@ class CourseDetail {
     return CourseDetail(
       course: Course.fromJson(json),
       modules: rawModules
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(CourseModule.fromJson)
           .toList()
         ..sort((a, b) => a.displayOrder.compareTo(b.displayOrder)),
@@ -106,12 +106,12 @@ class CourseModule {
       isRequired: (json['is_required'] as bool?) ?? true,
       estimatedDurationMins: json['estimated_duration_mins'] as int?,
       slides: rawSlides
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(CourseSlide.fromJson)
           .toList()
         ..sort((a, b) => a.displayOrder.compareTo(b.displayOrder)),
       questions: rawQuestions
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(QuizQuestion.fromJson)
           .toList()
         ..sort((a, b) => a.displayOrder.compareTo(b.displayOrder)),
@@ -174,7 +174,7 @@ class QuizQuestion {
       questionType: (json['question_type'] as String?) ?? 'multiple_choice',
       imageUrl: json['image_url'] as String?,
       options: rawOptions
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(QuizOption.fromJson)
           .toList(),
       explanation: json['explanation'] as String?,

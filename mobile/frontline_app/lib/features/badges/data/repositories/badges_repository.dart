@@ -1,5 +1,18 @@
+import 'package:dio/dio.dart';
 import 'package:frontline_app/core/api/dio_client.dart';
 import 'package:frontline_app/features/badges/data/models/badge_models.dart';
+
+List<Map<String, dynamic>> _safeList(dynamic data) {
+  List? raw;
+  if (data is List) {
+    raw = data;
+  } else if (data is Map) {
+    final items = data['items'] ?? data['data'];
+    if (items is List) raw = items;
+  }
+  if (raw == null) return [];
+  return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+}
 
 class BadgesRepository {
   Future<PointsSummary> getMyPoints() async {
@@ -8,23 +21,20 @@ class BadgesRepository {
           await DioClient.instance.get('/api/v1/gamification/points/my');
       return PointsSummary.fromJson(
           Map<String, dynamic>.from(response.data as Map));
-    } catch (_) {
-      // Backend may 500 if points table has no row for user yet.
-      return const PointsSummary(userId: '', totalPoints: 0);
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      if (code == 404 || code == 500) {
+        // Backend may 500 if points table has no row for user yet.
+        return const PointsSummary(userId: '', totalPoints: 0);
+      }
+      rethrow;
     }
   }
 
   Future<List<EarnedBadge>> getMyBadges() async {
     final response =
         await DioClient.instance.get('/api/v1/gamification/badges/my');
-    final data = response.data;
-    if (data is List) {
-      return data
-          .cast<Map<String, dynamic>>()
-          .map(EarnedBadge.fromJson)
-          .toList();
-    }
-    return [];
+    return _safeList(response.data).map(EarnedBadge.fromJson).toList();
   }
 
   /// Fetch all leaderboard configs.
@@ -32,19 +42,7 @@ class BadgesRepository {
     try {
       final response =
           await DioClient.instance.get('/api/v1/gamification/leaderboards');
-      final data = response.data;
-      final List items;
-      if (data is Map) {
-        items = (data['items'] ?? data['data'] ?? []) as List;
-      } else if (data is List) {
-        items = data;
-      } else {
-        return [];
-      }
-      return items
-          .cast<Map<String, dynamic>>()
-          .map(LeaderboardConfig.fromJson)
-          .toList();
+      return _safeList(response.data).map(LeaderboardConfig.fromJson).toList();
     } catch (_) {
       return [];
     }
@@ -59,8 +57,7 @@ class BadgesRepository {
       final data = response.data;
       if (data is Map && data['entries'] is List) {
         return (data['entries'] as List)
-            .cast<Map<String, dynamic>>()
-            .map(LeaderboardEntry.fromJson)
+            .map((e) => LeaderboardEntry.fromJson(Map<String, dynamic>.from(e as Map)))
             .toList();
       }
       return [];

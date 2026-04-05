@@ -8,7 +8,7 @@ class AuditsRepository {
     final data = response.data;
     if (data is List) {
       return data
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(AuditTemplate.fromJson)
           .toList();
     }

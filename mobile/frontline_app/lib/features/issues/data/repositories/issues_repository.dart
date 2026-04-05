@@ -17,8 +17,7 @@ class IssuesRepository {
       return [];
     }
     return items
-        .cast<Map<String, dynamic>>()
-        .map(Issue.fromJson)
+        .map((e) => Issue.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
 
@@ -36,8 +35,7 @@ class IssuesRepository {
       return [];
     }
     return items
-        .cast<Map<String, dynamic>>()
-        .map(IssueCategory.fromJson)
+        .map((e) => IssueCategory.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
 

@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:frontline_app/core/api/dio_client.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 import 'package:frontline_app/features/dashboard/providers/dashboard_provider.dart';
@@ -16,6 +18,9 @@ import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models
 import 'package:frontline_app/features/notifications/providers/notifications_provider.dart';
 import 'package:frontline_app/features/badges/providers/badges_provider.dart';
 import 'package:frontline_app/features/badges/data/models/badge_models.dart';
+import 'package:frontline_app/core/auth/role_provider.dart';
+import 'package:frontline_app/features/dashboard/data/models/dashboard_summary.dart';
+import 'dart:math' as math;
 
 // ── Design tokens from MOBILE_DESIGN.md ───────────────────────────────────────
 
@@ -65,7 +70,7 @@ class DashboardScreen extends ConsumerWidget {
 // ── Home body ─────────────────────────────────────────────────────────────────
 
 class _HomeBody extends ConsumerWidget {
-  final dynamic summary;
+  final DashboardSummary summary;
   const _HomeBody({required this.summary});
 
   @override
@@ -73,12 +78,13 @@ class _HomeBody extends ConsumerWidget {
     final asyncTasks = ref.watch(myTasksProvider);
     final asyncShifts = ref.watch(myShiftsProvider);
     final asyncEnrollments = ref.watch(myEnrollmentsProvider);
+    final isManagerPlus = ref.watch(isManagerOrAboveProvider);
 
     final tasks = asyncTasks.valueOrNull ?? [];
     final enrollments = asyncEnrollments.valueOrNull ?? [];
 
     final overdueCount = tasks.where((t) => t.isOverdue).length;
-    final openIssueCount = tasks
+    final openTaskCount = tasks
         .where((t) =>
             t.status == 'pending' ||
             t.status == 'open' ||
@@ -92,7 +98,7 @@ class _HomeBody extends ConsumerWidget {
     final weekEnd = weekStart.add(const Duration(days: 7));
     final shifts = asyncShifts.valueOrNull ?? [];
     final shiftsThisWeek = shifts.where((s) {
-      final dt = DateTime.tryParse(s.startAt);
+      final dt = DateTime.tryParse(s.startAt)?.toLocal();
       return dt != null && dt.isAfter(weekStart) && dt.isBefore(weekEnd);
     }).length;
 
@@ -102,7 +108,9 @@ class _HomeBody extends ConsumerWidget {
         ref.read(myTasksProvider.notifier).refresh();
         ref.read(myShiftsProvider.notifier).refresh();
         ref.invalidate(myEnrollmentsProvider);
-        ref.read(aiInsightsProvider.notifier).refresh();
+        if (isManagerPlus) {
+          ref.read(aiInsightsProvider.notifier).refresh();
+        }
         ref.read(inboxNotificationsProvider.notifier).refresh();
         ref.invalidate(unreadCountProvider);
         ref.read(announcementsProvider.notifier).refresh();
@@ -118,7 +126,7 @@ class _HomeBody extends ConsumerWidget {
           SliverToBoxAdapter(
             child: _MetricGrid(
               overdueCount: overdueCount,
-              openIssueCount: openIssueCount,
+              openTaskCount: openTaskCount,
               incompleteCourses: incompleteCourses,
               shiftsThisWeek: shiftsThisWeek,
               totalTasks: tasks.length,
@@ -126,8 +134,18 @@ class _HomeBody extends ConsumerWidget {
             ),
           ),
 
-          // 2. AI Insight cards
-          SliverToBoxAdapter(child: _AIInsightsSection()),
+          // 2. AI Insight cards (manager + admin only)
+          if (ref.watch(isManagerOrAboveProvider))
+            SliverToBoxAdapter(child: _AIInsightsSection()),
+
+          // 2.5 Team Attendance (manager + admin only)
+          if (isManagerPlus && summary.attendance != null)
+            SliverToBoxAdapter(
+              child: _TeamAttendanceSection(
+                attendance: summary.attendance!,
+                isAdmin: ref.watch(isAdminProvider),
+              ),
+            ),
 
           // 3. My Shift
           SliverToBoxAdapter(
@@ -264,7 +282,7 @@ class _GreetingHeader extends ConsumerWidget {
 
 class _MetricGrid extends StatelessWidget {
   final int overdueCount;
-  final int openIssueCount;
+  final int openTaskCount;
   final int incompleteCourses;
   final int shiftsThisWeek;
   final int totalTasks;
@@ -272,7 +290,7 @@ class _MetricGrid extends StatelessWidget {
 
   const _MetricGrid({
     required this.overdueCount,
-    required this.openIssueCount,
+    required this.openTaskCount,
     required this.incompleteCourses,
     required this.shiftsThisWeek,
     required this.totalTasks,
@@ -301,13 +319,13 @@ class _MetricGrid extends StatelessWidget {
               const SizedBox(width: 12),
               Expanded(
                 child: _MetricCard(
-                  value: openIssueCount.toString(),
-                  label: 'Open Issues',
-                  detail: openIssueCount == 0
-                      ? 'Nothing to report'
+                  value: openTaskCount.toString(),
+                  label: 'Open Tasks',
+                  detail: openTaskCount == 0
+                      ? 'All done'
                       : 'Needs attention',
-                  color: openIssueCount > 0 ? _C.high : _C.positive,
-                  onTap: () => context.go('/issues/report'),
+                  color: openTaskCount > 0 ? _C.high : _C.positive,
+                  onTap: () => context.go('/tasks'),
                 ),
               ),
             ],
@@ -363,31 +381,35 @@ class _MetricCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: _C.surface1,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(value,
-                style: TextStyle(
-                    fontSize: 28, fontWeight: FontWeight.bold, color: color)),
-            const SizedBox(height: 4),
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: _C.textPrimary)),
-            const SizedBox(height: 2),
-            Text(detail,
-                style:
-                    const TextStyle(fontSize: 12, color: _C.textSecondary)),
-          ],
+    return Semantics(
+      label: '$value $label. $detail',
+      button: true,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: _C.surface1,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(value,
+                  style: TextStyle(
+                      fontSize: 28, fontWeight: FontWeight.bold, color: color)),
+              const SizedBox(height: 4),
+              Text(label,
+                  style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: _C.textPrimary)),
+              const SizedBox(height: 2),
+              Text(detail,
+                  style:
+                      const TextStyle(fontSize: 12, color: _C.textSecondary)),
+            ],
+          ),
         ),
       ),
     );
@@ -434,19 +456,26 @@ class _SectionCard extends StatelessWidget {
                 if (route != null)
                   GestureDetector(
                     onTap: () => context.go(route!),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (actionLabel != null)
-                          Text(actionLabel!,
-                              style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                  color: _C.sproutGreen)),
-                        if (actionLabel == null)
-                          const Icon(Icons.north_east,
-                              size: 16, color: _C.textTertiary),
-                      ],
+                    behavior: HitTestBehavior.opaque,
+                    child: SizedBox(
+                      height: 44,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 16),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (actionLabel != null)
+                              Text(actionLabel!,
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w500,
+                                      color: _C.sproutGreen)),
+                            if (actionLabel == null)
+                              const Icon(Icons.north_east,
+                                  size: 16, color: _C.textTertiary),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
               ],
@@ -486,6 +515,350 @@ class _InnerRow extends StatelessWidget {
   }
 }
 
+// ── Team Attendance section ──────────────────────────────────────────────────
+
+class _TeamAttendanceSection extends StatelessWidget {
+  final AttendanceData attendance;
+  final bool isAdmin;
+
+  const _TeamAttendanceSection({
+    required this.attendance,
+    required this.isAdmin,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return _SectionCard(
+      label: isAdmin ? 'ATTENDANCE TODAY' : 'MY TEAM TODAY',
+      child: Column(
+        children: [
+          // 3 rings row
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _AttendanceRing(
+                value: attendance.presentRate,
+                label: 'PRESENT',
+                greenThreshold: 95,
+                yellowThreshold: 85,
+              ),
+              _AttendanceRing(
+                value: attendance.onTimeRate,
+                label: 'ON TIME',
+                greenThreshold: 90,
+                yellowThreshold: 80,
+              ),
+              _AttendanceRing(
+                value: attendance.utilizationRate,
+                label: 'UTILIZATION',
+                greenThreshold: 95,
+                yellowThreshold: 85,
+              ),
+            ],
+          ),
+          // Admin: per-location table
+          if (isAdmin && attendance.byLocation.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            const Divider(height: 1, color: _C.surface3),
+            const SizedBox(height: 12),
+            ...attendance.byLocation.map(
+              (loc) => _LocationRow(location: loc),
+            ),
+          ],
+          // Manager: "Not clocked in" list
+          if (!isAdmin) ...[
+            ..._buildNotClockedInList(),
+          ],
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildNotClockedInList() {
+    final missing = <MissingStaff>[];
+    for (final loc in attendance.byLocation) {
+      missing.addAll(loc.notClockedIn);
+    }
+    if (missing.isEmpty) return [];
+    return [
+      const SizedBox(height: 16),
+      const Divider(height: 1, color: _C.surface3),
+      const SizedBox(height: 12),
+      const Text(
+        'Not clocked in',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+          color: _C.textSecondary,
+        ),
+      ),
+      const SizedBox(height: 8),
+      ...missing.map(
+        (m) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(
+            children: [
+              const Icon(Icons.person_outline,
+                  size: 16, color: _C.textSecondary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  m.userName,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: _C.textPrimary,
+                  ),
+                ),
+              ),
+              Text(
+                m.shiftStart,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: _C.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ];
+  }
+}
+
+class _LocationRow extends StatelessWidget {
+  final LocationAttendance location;
+  const _LocationRow({required this.location});
+
+  @override
+  Widget build(BuildContext context) {
+    final rate = location.presentRate;
+    final statusColor = rate >= 95
+        ? _C.positive
+        : rate >= 85
+            ? _C.high
+            : _C.critical;
+    final statusNote = rate >= 95
+        ? 'On track'
+        : rate >= 85
+            ? 'Needs attention'
+            : 'Below target';
+
+    return GestureDetector(
+      onTap: () => context.go('/shifts'),
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Row(
+          children: [
+            Expanded(
+              flex: 3,
+              child: Text(
+                location.locationName,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: _C.textPrimary,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Text(
+                '${location.clockedIn}/${location.scheduled}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: _C.textSecondary,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 1,
+              child: Text(
+                '$rate%',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: statusColor,
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Text(
+                statusNote,
+                textAlign: TextAlign.end,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: statusColor,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            const Icon(Icons.chevron_right, size: 16, color: _C.textTertiary),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AttendanceRing extends StatefulWidget {
+  final int value;
+  final String label;
+  final int greenThreshold;
+  final int yellowThreshold;
+
+  const _AttendanceRing({
+    required this.value,
+    required this.label,
+    required this.greenThreshold,
+    required this.yellowThreshold,
+  });
+
+  @override
+  State<_AttendanceRing> createState() => _AttendanceRingState();
+}
+
+class _AttendanceRingState extends State<_AttendanceRing>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _animation = Tween<double>(begin: 0, end: widget.value / 100.0).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeOut),
+    );
+    _controller.forward();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AttendanceRing oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value) {
+      _animation = Tween<double>(
+        begin: _animation.value,
+        end: widget.value / 100.0,
+      ).animate(
+        CurvedAnimation(parent: _controller, curve: Curves.easeOut),
+      );
+      _controller
+        ..reset()
+        ..forward();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Color get _ringColor {
+    final v = widget.value;
+    if (v >= widget.greenThreshold) return _C.positive;
+    if (v >= widget.yellowThreshold) return _C.high;
+    return _C.critical;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 80,
+              height: 80,
+              child: CustomPaint(
+                painter: _RingPainter(
+                  progress: _animation.value,
+                  color: _ringColor,
+                  backgroundColor: _C.surface3,
+                  strokeWidth: 6,
+                ),
+                child: Center(
+                  child: Text(
+                    '${(_animation.value * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: _C.textPrimary,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              widget.label,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: _C.textSecondary,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+  final Color backgroundColor;
+  final double strokeWidth;
+
+  _RingPainter({
+    required this.progress,
+    required this.color,
+    required this.backgroundColor,
+    required this.strokeWidth,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = (math.min(size.width, size.height) - strokeWidth) / 2;
+
+    // Background ring
+    final bgPaint = Paint()
+      ..color = backgroundColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+    canvas.drawCircle(center, radius, bgPaint);
+
+    // Progress ring
+    final fgPaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2, // start at top
+      2 * math.pi * progress,
+      false,
+      fgPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RingPainter oldDelegate) =>
+      oldDelegate.progress != progress ||
+      oldDelegate.color != color;
+}
+
 // ── AI Insight cards ─────────────────────────────────────────────────────────
 
 class _AIInsightsSection extends ConsumerWidget {
@@ -495,16 +868,8 @@ class _AIInsightsSection extends ConsumerWidget {
     final dismissed = ref.watch(dismissedInsightsProvider);
 
     return asyncInsights.when(
-      loading: () => const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 16),
-        child: Text('Loading insights...',
-            style: TextStyle(fontSize: 12, color: _C.textTertiary)),
-      ),
-      error: (e, _) => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Text('Insight error: $e',
-            style: const TextStyle(fontSize: 12, color: _C.critical)),
-      ),
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
       data: (response) {
         final visible = response.insights
             .where((i) => !dismissed.contains(i.dismissKey))
@@ -612,19 +977,22 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
-    final activeAttendance = ref.watch(activeAttendanceProvider);
+    final activeAttendance = ref.watch(activeAttendanceProvider).valueOrNull;
 
-    // Find today's shift.
-    final todayShifts = widget.shifts.where((s) {
-      final start = DateTime.tryParse(s.startAt)?.toLocal();
-      return start != null &&
-          start.year == now.year &&
-          start.month == now.month &&
-          start.day == now.day;
-    }).toList();
+    // Find active shift (clocked in or currently in progress) or next upcoming.
+    final upcoming = widget.shifts.where((s) {
+      final end = DateTime.tryParse(s.endAt);
+      // Keep shifts that haven't ended yet.
+      return end != null && end.isAfter(now);
+    }).toList()
+      ..sort((a, b) {
+        final aStart = DateTime.tryParse(a.startAt) ?? now;
+        final bStart = DateTime.tryParse(b.startAt) ?? now;
+        return aStart.compareTo(bStart);
+      });
 
-    // No shift today.
-    if (todayShifts.isEmpty) {
+    // No upcoming shift.
+    if (upcoming.isEmpty) {
       return _SectionCard(
         label: 'MY SHIFT',
         route: '/shifts',
@@ -636,10 +1004,30 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
       );
     }
 
-    final shift = todayShifts.first;
+    final shift = upcoming.first;
     final start = DateTime.tryParse(shift.startAt)?.toLocal();
     final end = DateTime.tryParse(shift.endAt)?.toLocal();
     final isClockedIn = activeAttendance != null;
+    final isActive = start != null && end != null &&
+        now.isAfter(start) && now.isBefore(end);
+
+    // Build subtitle: clocked in > active > location + date
+    String subtitle;
+    if (isClockedIn) {
+      subtitle = 'Clocked in at ${DateFormat('h:mm a').format(DateTime.tryParse(activeAttendance.clockInAt)?.toLocal() ?? now)}';
+    } else if (start != null) {
+      final isToday = start.year == now.year &&
+          start.month == now.month && start.day == now.day;
+      final loc = shift.locationName ?? '';
+      if (isToday) {
+        subtitle = loc.isNotEmpty ? loc : 'Today';
+      } else {
+        final dateStr = DateFormat('EEE, MMM d').format(start);
+        subtitle = loc.isNotEmpty ? '$loc · $dateStr' : dateStr;
+      }
+    } else {
+      subtitle = shift.locationName ?? 'Upcoming';
+    }
 
     return _SectionCard(
       label: 'MY SHIFT',
@@ -654,12 +1042,16 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: isClockedIn ? _C.sproutGreenLight : _C.surface3,
+                    color: (isClockedIn || isActive)
+                        ? _C.sproutGreenLight
+                        : _C.surface3,
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(
-                    isClockedIn ? Icons.timer : Icons.schedule,
-                    color: isClockedIn ? _C.sproutGreen : _C.textSecondary,
+                    (isClockedIn || isActive) ? Icons.timer : Icons.schedule,
+                    color: (isClockedIn || isActive)
+                        ? _C.sproutGreen
+                        : _C.textSecondary,
                     size: 20,
                   ),
                 ),
@@ -678,16 +1070,14 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
                             color: _C.textPrimary),
                       ),
                       Text(
-                        isClockedIn
-                            ? 'Clocked in at ${DateFormat('h:mm a').format(DateTime.tryParse(activeAttendance.clockInAt)?.toLocal() ?? now)}'
-                            : shift.locationName ?? 'Upcoming',
+                        subtitle,
                         style: const TextStyle(
                             fontSize: 13, color: _C.textSecondary),
                       ),
                     ],
                   ),
                 ),
-                if (isClockedIn)
+                if (isClockedIn || isActive)
                   Container(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -750,7 +1140,7 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
         latitude: position.latitude,
         longitude: position.longitude,
       );
-      ref.read(activeAttendanceProvider.notifier).state = attendance;
+      ref.read(activeAttendanceProvider.notifier).set(attendance);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -773,7 +1163,7 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
         latitude: position.latitude,
         longitude: position.longitude,
       );
-      ref.read(activeAttendanceProvider.notifier).state = null;
+      ref.read(activeAttendanceProvider.notifier).set(null);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1066,8 +1456,8 @@ class _AnnouncementsSection extends ConsumerWidget {
           child: Column(
             children: latest.map((a) {
               final timeAgo = _timeAgo(a.createdAt);
-              final preview = a.body.length > 80
-                  ? '${a.body.substring(0, 80)}...'
+              final preview = a.body.characters.length > 80
+                  ? '${a.body.characters.take(80)}...'
                   : a.body;
 
               return _InnerRow(
@@ -1226,7 +1616,14 @@ class _DestructiveButton extends StatelessWidget {
   }
 }
 
-// ── Sidekick sheet ───────────────────────────────────────────────────────────
+// ── Sidekick sheet (AI chat) ─────────────────────────────────────────────────
+
+class _ChatMessage {
+  final String role; // 'user' or 'assistant'
+  final String content;
+  const _ChatMessage({required this.role, required this.content});
+  Map<String, dynamic> toJson() => {'role': role, 'content': content};
+}
 
 class _SidekickSheet extends StatefulWidget {
   @override
@@ -1235,11 +1632,70 @@ class _SidekickSheet extends StatefulWidget {
 
 class _SidekickSheetState extends State<_SidekickSheet> {
   final _controller = TextEditingController();
+  final _scrollController = ScrollController();
+  final List<_ChatMessage> _messages = [];
+  bool _isSending = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _send() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _isSending) return;
+    _controller.clear();
+
+    setState(() {
+      _messages.add(_ChatMessage(role: 'user', content: text));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final response = await DioClient.instance.post(
+        '/api/v1/ai/chat',
+        data: {
+          'messages': _messages.map((m) => m.toJson()).toList(),
+        },
+        options: Options(receiveTimeout: const Duration(seconds: 60)),
+      );
+      final data = response.data;
+      final reply = data is Map
+          ? (data['reply'] as String?) ?? 'No response'
+          : 'No response';
+      setState(() {
+        _messages.add(_ChatMessage(role: 'assistant', content: reply));
+      });
+    } catch (_) {
+      setState(() {
+        _messages.add(const _ChatMessage(
+            role: 'assistant',
+            content: 'Sorry, I couldn\'t process that. Please try again.'));
+      });
+    } finally {
+      setState(() => _isSending = false);
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  void _useSuggestion(String text) {
+    _controller.text = text;
+    _send();
   }
 
   @override
@@ -1248,7 +1704,7 @@ class _SidekickSheetState extends State<_SidekickSheet> {
       initialChildSize: 0.55,
       maxChildSize: 0.85,
       minChildSize: 0.3,
-      builder: (_, scrollCtrl) => Container(
+      builder: (_, sheetScrollCtrl) => Container(
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -1265,7 +1721,7 @@ class _SidekickSheetState extends State<_SidekickSheet> {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
                   Container(
@@ -1282,31 +1738,104 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                   const Text('Sidekick',
                       style:
                           TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  if (_messages.isNotEmpty)
+                    GestureDetector(
+                      onTap: () => setState(() => _messages.clear()),
+                      child: const Text('Reset',
+                          style: TextStyle(
+                              fontSize: 13, color: _C.textSecondary)),
+                    ),
                 ],
               ),
             ),
-            SizedBox(
-              height: 36,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                children: [
-                  _SuggestionChip(
-                    label: "What's overdue?",
-                    onTap: () => _controller.text = "What's overdue?",
-                  ),
-                  _SuggestionChip(
-                    label: 'Summarize my day',
-                    onTap: () => _controller.text = 'Summarize my day',
-                  ),
-                  _SuggestionChip(
-                    label: "Who's on shift?",
-                    onTap: () => _controller.text = "Who's on shift?",
-                  ),
-                ],
+            // Suggestion chips (only when no messages yet)
+            if (_messages.isEmpty)
+              SizedBox(
+                height: 36,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: [
+                    _SuggestionChip(
+                      label: "What's overdue?",
+                      onTap: () => _useSuggestion("What's overdue?"),
+                    ),
+                    _SuggestionChip(
+                      label: 'Summarize my day',
+                      onTap: () => _useSuggestion('Summarize my day'),
+                    ),
+                    _SuggestionChip(
+                      label: "Who's on shift?",
+                      onTap: () => _useSuggestion("Who's on shift?"),
+                    ),
+                  ],
+                ),
               ),
+            // Chat messages
+            Expanded(
+              child: _messages.isEmpty
+                  ? const Center(
+                      child: Text('Ask me anything about your work',
+                          style: TextStyle(
+                              fontSize: 14, color: _C.textSecondary)))
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _messages.length + (_isSending ? 1 : 0),
+                      itemBuilder: (_, i) {
+                        if (i == _messages.length) {
+                          // Typing indicator
+                          return const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: EdgeInsets.only(top: 8),
+                              child: SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFF7C3AED)),
+                              ),
+                            ),
+                          );
+                        }
+                        final msg = _messages[i];
+                        final isUser = msg.role == 'user';
+                        return Align(
+                          alignment: isUser
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.75,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isUser
+                                  ? _C.sproutGreen
+                                  : _C.surface2,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text(
+                              msg.content,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: isUser
+                                    ? Colors.white
+                                    : _C.textPrimary,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
             ),
-            const Spacer(),
+            // Input bar
             Container(
               padding: EdgeInsets.only(
                 left: 12,
@@ -1322,6 +1851,8 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                   Expanded(
                     child: TextField(
                       controller: _controller,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) => _send(),
                       decoration: const InputDecoration(
                         hintText: 'Ask anything...',
                         border: InputBorder.none,
@@ -1332,12 +1863,10 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.send, color: _C.sproutGreen),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('AI chat coming soon')),
-                      );
-                    },
+                    icon: Icon(Icons.send,
+                        color:
+                            _isSending ? _C.textTertiary : _C.sproutGreen),
+                    onPressed: _isSending ? null : _send,
                   ),
                 ],
               ),
@@ -1377,68 +1906,127 @@ class _SuggestionChip extends StatelessWidget {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 String _timeAgo(String isoDate) {
-  final dt = DateTime.tryParse(isoDate);
+  final dt = DateTime.tryParse(isoDate)?.toLocal();
   if (dt == null) return '';
   final diff = DateTime.now().difference(dt);
+  if (diff.isNegative) return '';
   if (diff.inMinutes < 1) return 'now';
   if (diff.inMinutes < 60) return '${diff.inMinutes}m';
   if (diff.inHours < 24) return '${diff.inHours}h';
   if (diff.inDays < 7) return '${diff.inDays}d';
-  return DateFormat('MMM d').format(dt.toLocal());
+  return DateFormat('MMM d').format(dt);
 }
 
 // ── Skeleton loading ──────────────────────────────────────────────────────────
 
-class _SkeletonHome extends StatelessWidget {
+class _SkeletonHome extends StatefulWidget {
   const _SkeletonHome();
 
   @override
+  State<_SkeletonHome> createState() => _SkeletonHomeState();
+}
+
+class _SkeletonHomeState extends State<_SkeletonHome>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmer;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmer = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 180,
-              height: 24,
-              decoration: BoxDecoration(
-                color: _C.surface3,
-                borderRadius: BorderRadius.circular(6),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: List.generate(
-                3,
-                (_) => Container(
-                  width: 76,
-                  height: 76,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(color: _C.surface3, width: 6),
+    return AnimatedBuilder(
+      animation: _shimmer,
+      builder: (_, __) {
+        final opacity = 0.3 + 0.3 * (0.5 + 0.5 * (_shimmer.value * 2 - 1).abs());
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Opacity(
+                  opacity: opacity,
+                  child: Container(
+                    width: 180,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: _C.surface3,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
                   ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 24),
-            ...List.generate(
-              2,
-              (_) => Container(
-                width: double.infinity,
-                height: 100,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                  color: _C.surface1,
-                  borderRadius: BorderRadius.circular(16),
+                const SizedBox(height: 24),
+                Row(
+                  children: List.generate(
+                    2,
+                    (_) => Expanded(
+                      child: Opacity(
+                        opacity: opacity,
+                        child: Container(
+                          height: 90,
+                          margin: const EdgeInsets.only(right: 12),
+                          decoration: BoxDecoration(
+                            color: _C.surface1,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(height: 12),
+                Row(
+                  children: List.generate(
+                    2,
+                    (_) => Expanded(
+                      child: Opacity(
+                        opacity: opacity,
+                        child: Container(
+                          height: 90,
+                          margin: const EdgeInsets.only(right: 12),
+                          decoration: BoxDecoration(
+                            color: _C.surface1,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                ...List.generate(
+                  2,
+                  (_) => Opacity(
+                    opacity: opacity,
+                    child: Container(
+                      width: double.infinity,
+                      height: 100,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        color: _C.surface1,
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }

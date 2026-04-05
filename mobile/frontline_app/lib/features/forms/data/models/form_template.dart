@@ -23,7 +23,7 @@ class FormTemplate {
     final rawFields = json['fields'] as List?;
     if (rawFields != null && rawFields.isNotEmpty) {
       allFields.addAll(rawFields
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(FormFieldDef.fromJson));
     }
 
@@ -33,7 +33,7 @@ class FormTemplate {
       if (section is Map) {
         final sectionFields = section['fields'] as List? ?? [];
         allFields.addAll(sectionFields
-            .cast<Map<String, dynamic>>()
+            .map((e) => Map<String, dynamic>.from(e as Map)).toList()
             .map(FormFieldDef.fromJson));
       }
     }

@@ -197,7 +197,7 @@ class _ShiftCard extends ConsumerWidget {
         now.isAfter(start) &&
         now.isBefore(end);
 
-    final activeAttendance = ref.watch(activeAttendanceProvider);
+    final activeAttendance = ref.watch(activeAttendanceProvider).valueOrNull;
     final isClockedIn =
         activeAttendance != null && activeAttendance.shiftId == shift.id;
 
@@ -314,7 +314,7 @@ class _ShiftCard extends ConsumerWidget {
         latitude: pos.latitude,
         longitude: pos.longitude,
       );
-      ref.read(activeAttendanceProvider.notifier).state = record;
+      ref.read(activeAttendanceProvider.notifier).set(record);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -333,7 +333,7 @@ class _ShiftCard extends ConsumerWidget {
   }
 
   Future<void> _clockOut(BuildContext context, WidgetRef ref) async {
-    final attendance = ref.read(activeAttendanceProvider);
+    final attendance = ref.read(activeAttendanceProvider).valueOrNull;
     if (attendance == null) return;
     try {
       final pos = await _getPosition();
@@ -343,7 +343,7 @@ class _ShiftCard extends ConsumerWidget {
         latitude: pos.latitude,
         longitude: pos.longitude,
       );
-      ref.read(activeAttendanceProvider.notifier).state = null;
+      ref.read(activeAttendanceProvider.notifier).set(null);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(

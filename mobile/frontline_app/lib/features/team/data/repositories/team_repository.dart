@@ -13,10 +13,10 @@ class TeamRepository {
       },
     );
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }
@@ -32,10 +32,10 @@ class TeamRepository {
       },
     );
     final data = response.data;
-    if (data is List) return data.cast<Map<String, dynamic>>();
+    if (data is List) return data.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     if (data is Map) {
       final items = data['items'] ?? data['data'];
-      if (items is List) return items.cast<Map<String, dynamic>>();
+      if (items is List) return items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     }
     return [];
   }

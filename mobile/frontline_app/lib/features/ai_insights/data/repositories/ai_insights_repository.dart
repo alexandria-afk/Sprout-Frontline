@@ -18,8 +18,10 @@ class AIInsightsRepository {
       ),
     );
 
-    return AIInsightsResponse.fromJson(
-      Map<String, dynamic>.from(response.data as Map),
-    );
+    final raw = response.data;
+    final map = raw is Map<String, dynamic>
+        ? raw
+        : Map<String, dynamic>.from(raw as Map);
+    return AIInsightsResponse.fromJson(map);
   }
 }

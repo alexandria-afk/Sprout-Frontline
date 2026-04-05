@@ -38,7 +38,7 @@ class AuditTemplate {
       passingScore:
           (json['passing_score'] as num?)?.toDouble() ?? 80,
       sections: rawSections
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(AuditSection.fromJson)
           .toList()
         ..sort((a, b) => a.displayOrder.compareTo(b.displayOrder)),
@@ -70,7 +70,7 @@ class AuditSection {
       title: (json['title'] as String?) ?? '',
       displayOrder: (json['display_order'] as int?) ?? 0,
       fields: rawFields
-          .cast<Map<String, dynamic>>()
+          .map((e) => Map<String, dynamic>.from(e as Map)).toList()
           .map(AuditField.fromJson)
           .toList()
         ..sort((a, b) => a.displayOrder.compareTo(b.displayOrder)),

@@ -38,7 +38,7 @@ class AppNotification {
     return switch (entityType) {
       'task' => '/tasks/$entityId',
       'form_assignment' => '/forms/fill/$entityId',
-      'issue' => '/issues',
+      'issue' => '/issues/$entityId',
       'announcement' => '/announcements',
       'course_enrollment' => '/training',
       'shift_claim' || 'shift_swap' => '/shifts',

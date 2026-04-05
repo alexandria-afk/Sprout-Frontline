@@ -37,9 +37,13 @@ class MyShiftsNotifier extends AsyncNotifier<List<Shift>> {
   }
 
   List<Shift> _fromCache() {
-    final box = HiveService.formsCache; // reuse general cache
+    final box = HiveService.shiftsCache;
     final raw = box.get('shifts_my');
     if (raw == null) return [];
+    // Date-based expiry: discard if cached date is not today.
+    final cachedDate = raw['cached_date'] as String?;
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    if (cachedDate != today) return [];
     final list = (raw['items'] as List?) ?? [];
     return list
         .cast<Map>()
@@ -48,8 +52,10 @@ class MyShiftsNotifier extends AsyncNotifier<List<Shift>> {
   }
 
   void _toCache(List<Shift> shifts) {
-    HiveService.formsCache.put('shifts_my', {
+    final today = DateTime.now().toIso8601String().substring(0, 10);
+    HiveService.shiftsCache.put('shifts_my', {
       'items': shifts.map((s) => s.toJson()).toList(),
+      'cached_date': today,
     });
   }
 }
@@ -64,4 +70,29 @@ final openShiftsProvider = FutureProvider<List<Shift>>((ref) async {
 // ── Active attendance (for clock-out tracking) ────────────────────────────────
 
 final activeAttendanceProvider =
-    StateProvider<AttendanceRecord?>((ref) => null);
+    AsyncNotifierProvider<ActiveAttendanceNotifier, AttendanceRecord?>(
+  ActiveAttendanceNotifier.new,
+);
+
+class ActiveAttendanceNotifier extends AsyncNotifier<AttendanceRecord?> {
+  @override
+  Future<AttendanceRecord?> build() async {
+    final repo = ref.read(shiftsRepositoryProvider);
+    try {
+      return await repo.getActiveAttendance();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void set(AttendanceRecord? record) {
+    state = AsyncData(record);
+  }
+
+  Future<void> refresh() async {
+    state = await AsyncValue.guard(() async {
+      final repo = ref.read(shiftsRepositoryProvider);
+      return repo.getActiveAttendance();
+    });
+  }
+}

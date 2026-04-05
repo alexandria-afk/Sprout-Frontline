@@ -53,6 +53,24 @@ class ShiftsRepository {
         Map<String, dynamic>.from(response.data as Map));
   }
 
+  /// Fetch the active attendance record (status=present) for the current user.
+  Future<AttendanceRecord?> getActiveAttendance() async {
+    final response = await DioClient.instance.get(
+      '/api/v1/shifts/attendance',
+      queryParameters: {'status': 'present'},
+    );
+    final data = response.data;
+    List? raw;
+    if (data is Map) {
+      final items = data['items'] ?? data['data'];
+      if (items is List) raw = items;
+    } else if (data is List) {
+      raw = data;
+    }
+    if (raw == null || raw.isEmpty) return null;
+    return AttendanceRecord.fromJson(Map<String, dynamic>.from(raw.first as Map));
+  }
+
   /// Claim an open shift.
   Future<ShiftClaim> claimShift(String shiftId) async {
     final response = await DioClient.instance
@@ -63,10 +81,13 @@ class ShiftsRepository {
 }
 
 List<Map<String, dynamic>> _unwrapList(dynamic data) {
-  if (data is List) return data.cast<Map<String, dynamic>>();
-  if (data is Map) {
+  List? raw;
+  if (data is List) {
+    raw = data;
+  } else if (data is Map) {
     final items = data['items'] ?? data['data'];
-    if (items is List) return items.cast<Map<String, dynamic>>();
+    if (items is List) raw = items;
   }
-  return [];
+  if (raw == null) return [];
+  return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
 }

@@ -26,6 +26,10 @@ import 'package:frontline_app/features/approvals/providers/approvals_provider.da
 import 'package:frontline_app/features/announcements/presentation/screens/create_announcement_screen.dart';
 import 'package:frontline_app/features/tasks/presentation/screens/create_task_screen.dart';
 import 'package:frontline_app/features/team/presentation/screens/team_screen.dart';
+import 'package:frontline_app/features/notifications/presentation/screens/notifications_screen.dart';
+import 'package:frontline_app/features/notifications/providers/notifications_provider.dart';
+import 'package:dio/dio.dart';
+import 'package:frontline_app/core/api/dio_client.dart';
 
 final routerProvider = Provider<GoRouter>((ref) {
   final authState = ref.watch(authSessionProvider);
@@ -155,6 +159,10 @@ final routerProvider = Provider<GoRouter>((ref) {
             path: '/badges',
             builder: (context, state) => const BadgesScreen(),
           ),
+          GoRoute(
+            path: '/notifications',
+            builder: (context, state) => const NotificationsScreen(),
+          ),
         ],
       ),
     ],
@@ -172,6 +180,7 @@ class _AppShell extends ConsumerWidget {
     final isManager = ref.watch(isManagerOrAboveProvider);
     final pendingCount =
         isManager ? ref.watch(pendingApprovalsCountProvider) : 0;
+    final unreadCount = ref.watch(unreadCountProvider).valueOrNull ?? 0;
 
     const sproutGreen = Color(0xFF1D9E75);
     const textTertiary = Color(0xFFC7C7CC);
@@ -218,9 +227,17 @@ class _AppShell extends ConsumerWidget {
           selectedIndex: _selectedIndex(context),
           onDestinationSelected: (i) => _onTap(context, ref, i),
           destinations: [
-            const NavigationDestination(
-                icon: Icon(Icons.home_outlined),
-                selectedIcon: Icon(Icons.home),
+            NavigationDestination(
+                icon: Badge(
+                  isLabelVisible: unreadCount > 0,
+                  label: Text('$unreadCount'),
+                  child: const Icon(Icons.home_outlined),
+                ),
+                selectedIcon: Badge(
+                  isLabelVisible: unreadCount > 0,
+                  label: Text('$unreadCount'),
+                  child: const Icon(Icons.home),
+                ),
                 label: 'Home'),
             const NavigationDestination(
                 icon: Icon(Icons.assignment_outlined),
@@ -261,6 +278,7 @@ class _AppShell extends ConsumerWidget {
         loc.startsWith('/announcements') ||
         loc.startsWith('/audits') ||
         loc.startsWith('/badges') ||
+        loc.startsWith('/notifications') ||
         loc.startsWith('/training') ||
         loc.startsWith('/approvals') ||
         loc.startsWith('/team')) {
@@ -423,6 +441,13 @@ class _OfflineBanner extends StatelessWidget {
   }
 }
 
+class _SidekickChatMessage {
+  final String role; // 'user' or 'assistant'
+  final String content;
+  const _SidekickChatMessage({required this.role, required this.content});
+  Map<String, dynamic> toJson() => {'role': role, 'content': content};
+}
+
 class _GlobalSidekickSheet extends StatefulWidget {
   @override
   State<_GlobalSidekickSheet> createState() => _GlobalSidekickSheetState();
@@ -430,20 +455,86 @@ class _GlobalSidekickSheet extends StatefulWidget {
 
 class _GlobalSidekickSheetState extends State<_GlobalSidekickSheet> {
   final _controller = TextEditingController();
+  final _scrollController = ScrollController();
+  final List<_SidekickChatMessage> _messages = [];
+  bool _isSending = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _send() async {
+    final text = _controller.text.trim();
+    if (text.isEmpty || _isSending) return;
+    _controller.clear();
+
+    setState(() {
+      _messages.add(_SidekickChatMessage(role: 'user', content: text));
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final response = await DioClient.instance.post(
+        '/api/v1/ai/chat',
+        data: {
+          'messages': _messages.map((m) => m.toJson()).toList(),
+        },
+        options: Options(receiveTimeout: const Duration(seconds: 60)),
+      );
+      final data = response.data;
+      final reply = data is Map
+          ? (data['reply'] as String?) ?? 'No response'
+          : 'No response';
+      setState(() {
+        _messages.add(_SidekickChatMessage(role: 'assistant', content: reply));
+      });
+    } catch (_) {
+      setState(() {
+        _messages.add(const _SidekickChatMessage(
+            role: 'assistant',
+            content: 'Sorry, I couldn\'t process that. Please try again.'));
+      });
+    } finally {
+      setState(() => _isSending = false);
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  void _useSuggestion(String text) {
+    _controller.text = text;
+    _send();
   }
 
   @override
   Widget build(BuildContext context) {
+    const purple = Color(0xFF7C3AED);
+    const sproutGreen = Color(0xFF1D9E75);
+    const textSecondary = Color(0xFF8E8E93);
+    const textTertiary = Color(0xFFC7C7CC);
+    const surface2 = Color(0xFFF2F2F7);
+    const surface3 = Color(0xFFE5E5EA);
+
     return DraggableScrollableSheet(
       initialChildSize: 0.55,
       maxChildSize: 0.85,
       minChildSize: 0.3,
-      builder: (_, scrollCtrl) => Container(
+      builder: (_, sheetScrollCtrl) => Container(
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -452,20 +543,23 @@ class _GlobalSidekickSheetState extends State<_GlobalSidekickSheet> {
           children: [
             const SizedBox(height: 8),
             Container(
-              width: 36, height: 4,
+              width: 36,
+              height: 4,
               decoration: BoxDecoration(
-                color: SproutColors.border,
+                color: surface3,
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               child: Row(
                 children: [
                   Container(
-                    width: 28, height: 28,
+                    width: 28,
+                    height: 28,
                     decoration: BoxDecoration(
-                      color: const Color(0xFF7C3AED),
+                      color: purple,
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: const Icon(Icons.auto_awesome,
@@ -475,52 +569,122 @@ class _GlobalSidekickSheetState extends State<_GlobalSidekickSheet> {
                   const Text('Sidekick',
                       style: TextStyle(
                           fontSize: 17, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  if (_messages.isNotEmpty)
+                    GestureDetector(
+                      onTap: () => setState(() => _messages.clear()),
+                      child: const Text('Reset',
+                          style: TextStyle(
+                              fontSize: 13, color: textSecondary)),
+                    ),
                 ],
               ),
             ),
-            SizedBox(
-              height: 36,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                children: [
-                  _chip("What's overdue?"),
-                  _chip('Summarize my day'),
-                  _chip("Who's on shift?"),
-                ],
+            // Suggestion chips (only when no messages yet)
+            if (_messages.isEmpty)
+              SizedBox(
+                height: 36,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: [
+                    _sidekickChip("What's overdue?", surface2, surface3),
+                    _sidekickChip('Summarize my day', surface2, surface3),
+                    _sidekickChip("Who's on shift?", surface2, surface3),
+                  ],
+                ),
               ),
+            // Chat messages
+            Expanded(
+              child: _messages.isEmpty
+                  ? const Center(
+                      child: Text('Ask me anything about your work',
+                          style: TextStyle(
+                              fontSize: 14, color: textSecondary)))
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.all(16),
+                      itemCount: _messages.length + (_isSending ? 1 : 0),
+                      itemBuilder: (_, i) {
+                        if (i == _messages.length) {
+                          // Typing indicator
+                          return const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: EdgeInsets.only(top: 8),
+                              child: SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: purple),
+                              ),
+                            ),
+                          );
+                        }
+                        final msg = _messages[i];
+                        final isUser = msg.role == 'user';
+                        return Align(
+                          alignment: isUser
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 10),
+                            constraints: BoxConstraints(
+                              maxWidth:
+                                  MediaQuery.of(context).size.width * 0.75,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isUser ? sproutGreen : surface2,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Text(
+                              msg.content,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: isUser
+                                    ? Colors.white
+                                    : const Color(0xFF1C1C1E),
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
             ),
-            const Spacer(),
+            // Input bar
             Container(
               padding: EdgeInsets.only(
-                left: 12, right: 8, top: 8,
+                left: 12,
+                right: 8,
+                top: 8,
                 bottom: MediaQuery.of(context).padding.bottom + 8,
               ),
               decoration: const BoxDecoration(
-                border: Border(top: BorderSide(color: SproutColors.border)),
+                border: Border(top: BorderSide(color: surface3)),
               ),
               child: Row(
                 children: [
                   Expanded(
                     child: TextField(
                       controller: _controller,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: (_) => _send(),
                       decoration: const InputDecoration(
                         hintText: 'Ask anything...',
                         border: InputBorder.none,
                         isDense: true,
-                        contentPadding: EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 10),
+                        contentPadding:
+                            EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                       ),
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.send,
-                        color: SproutColors.green),
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('AI chat coming soon')),
-                      );
-                    },
+                    icon: Icon(Icons.send,
+                        color: _isSending ? textTertiary : sproutGreen),
+                    onPressed: _isSending ? null : _send,
                   ),
                 ],
               ),
@@ -531,17 +695,17 @@ class _GlobalSidekickSheetState extends State<_GlobalSidekickSheet> {
     );
   }
 
-  Widget _chip(String label) {
+  Widget _sidekickChip(String label, Color bg, Color border) {
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: GestureDetector(
-        onTap: () => _controller.text = label,
+        onTap: () => _useSuggestion(label),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
-            color: SproutColors.pageBg,
+            color: bg,
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: SproutColors.border),
+            border: Border.all(color: border),
           ),
           child: Text(label, style: const TextStyle(fontSize: 13)),
         ),

@@ -15,8 +15,7 @@ class AnnouncementsRepository {
       return [];
     }
     return items
-        .cast<Map<String, dynamic>>()
-        .map(Announcement.fromJson)
+        .map((e) => Announcement.fromJson(Map<String, dynamic>.from(e as Map)))
         .toList();
   }
 

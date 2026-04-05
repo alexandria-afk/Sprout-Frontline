@@ -12,8 +12,7 @@ class AIInsightsResponse {
     return AIInsightsResponse(
       brief: (json['brief'] as String?) ?? '',
       insights: rawInsights
-          .cast<Map<String, dynamic>>()
-          .map(AIInsight.fromJson)
+          .map((e) => AIInsight.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
     );
   }
@@ -53,6 +52,6 @@ class AIInsight {
         'recommendation': recommendation,
       };
 
-  /// Unique key for dismiss tracking (stable per insight per day).
-  String get dismissKey => '${severity}_${title.hashCode}';
+  /// Unique key for dismiss tracking (stable across app restarts).
+  String get dismissKey => '${severity}_$title';
 }

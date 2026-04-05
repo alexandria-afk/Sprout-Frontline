@@ -6,13 +6,17 @@ class TasksRepository {
   Future<List<Task>> getMyTasks() async {
     final response = await DioClient.instance.get('/api/v1/tasks/my');
     final data = response.data;
+    List? raw;
     if (data is List) {
-      return data
-          .cast<Map<String, dynamic>>()
-          .map(Task.fromJson)
-          .toList();
+      raw = data;
+    } else if (data is Map) {
+      final items = data['items'] ?? data['data'];
+      if (items is List) raw = items;
     }
-    return [];
+    if (raw == null) return [];
+    return raw
+        .map((e) => Task.fromJson(Map<String, dynamic>.from(e as Map)))
+        .toList();
   }
 
   /// Fetch full task detail with messages and status history.

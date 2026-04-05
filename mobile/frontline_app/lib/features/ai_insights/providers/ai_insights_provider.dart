@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
 import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models.dart';
@@ -28,9 +27,7 @@ class AIInsightsNotifier extends AsyncNotifier<AIInsightsResponse> {
       final fresh = await repo.getInsights(refresh: refresh);
       _toCache(fresh);
       return fresh;
-    } catch (e, st) {
-      debugPrint('[AIInsights] fetch error: $e');
-      debugPrint('[AIInsights] $st');
+    } catch (_) {
       if (cached != null) return cached;
       rethrow;
     }

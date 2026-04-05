@@ -11,6 +11,7 @@ class HiveService {
   static const String pendingSubmissionsBox = 'pending_submissions';
   static const String announcementsCacheBox = 'announcements_cache';
   static const String formsCacheBox = 'forms_cache';
+  static const String shiftsCacheBox = 'shifts_cache';
   static const String insightsCacheBox = 'insights_cache';
 
   /// Call once from main() before runApp().
@@ -21,6 +22,7 @@ class HiveService {
     await Hive.openBox<Map>(pendingSubmissionsBox);
     await Hive.openBox<Map>(announcementsCacheBox);
     await Hive.openBox<Map>(formsCacheBox);
+    await Hive.openBox<Map>(shiftsCacheBox);
     await Hive.openBox<Map>(insightsCacheBox);
   }
 
@@ -32,6 +34,9 @@ class HiveService {
 
   static Box<Map> get formsCache =>
       Hive.box<Map>(formsCacheBox);
+
+  static Box<Map> get shiftsCache =>
+      Hive.box<Map>(shiftsCacheBox);
 
   static Box<Map> get insightsCache =>
       Hive.box<Map>(insightsCacheBox);
