@@ -52,6 +52,7 @@ import type { Announcement, Task, TaskSummary, Issue, Shift, AttendanceRecord, S
 import { AnnouncementCard, proxied } from "@/components/announcements/AnnouncementCard";
 import { getDashboardInsights, type AiInsight } from "@/services/ai";
 import Link from "next/link";
+import { useTranslation } from "@/lib/i18n";
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 function SkeletonCard() {
@@ -118,6 +119,7 @@ const SEV_STYLES = {
 } as const;
 
 function DailyBriefCard() {
+  const { t } = useTranslation();
   const [brief, setBrief]         = useState<string>("");
   const [insights, setInsights]   = useState<AiInsight[]>([]);
   const [loading, setLoading]     = useState(true);
@@ -164,7 +166,7 @@ function DailyBriefCard() {
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
             <p className="font-bold text-xs tracking-wide uppercase bg-gradient-to-r from-violet-600 to-purple-500 bg-clip-text text-transparent">
-              Your Daily Brief by Sidekick
+              {t("dashboard.dailyBriefTitle")}
             </p>
             <p className="text-[11px] text-dark/30 shrink-0">{dateStr}</p>
           </div>
@@ -301,8 +303,9 @@ function TeamAttendanceCard({
   role: string;
   attendance: AttendanceSummary | null | undefined;
 }) {
+  const { t } = useTranslation();
   const isAdmin = ["super_admin", "admin"].includes(role);
-  const title = isAdmin ? "ATTENDANCE TODAY" : "MY TEAM TODAY";
+  const title = isAdmin ? t("dashboard.attendanceToday").toUpperCase() : t("dashboard.myTeamToday").toUpperCase();
   const [locExpanded, setLocExpanded] = useState(false);
 
   if (!attendance) {
@@ -313,10 +316,10 @@ function TeamAttendanceCard({
             <Users className="w-4 h-4 text-blue-600" /> {title}
           </p>
           <Link href="/dashboard/shifts" className="flex items-center gap-1 text-xs text-sprout-green hover:underline font-medium">
-            View all <ArrowRight className="w-3 h-3" />
+            {t("dashboard.viewAll")} <ArrowRight className="w-3 h-3" />
           </Link>
         </div>
-        <p className="text-xs text-dark-secondary">No shifts scheduled for today</p>
+        <p className="text-xs text-dark-secondary">{t("dashboard.noShiftsToday")}</p>
       </div>
     );
   }
@@ -331,7 +334,7 @@ function TeamAttendanceCard({
           <Users className="w-4 h-4 text-blue-600" /> {title}
         </p>
         <Link href="/dashboard/shifts" className="flex items-center gap-1 text-xs text-sprout-green hover:underline font-medium">
-          View all <ArrowRight className="w-3 h-3" />
+          {t("dashboard.viewAll")} <ArrowRight className="w-3 h-3" />
         </Link>
       </div>
 
@@ -412,6 +415,7 @@ function TeamAttendanceCard({
 
 // ── Admin / Manager dashboard ─────────────────────────────────────────────────
 function AdminDashboard({ role, locationId }: { role: string; locationId: string }) {
+  const { t } = useTranslation();
   const router = useRouter();
   const [todaySummary, setTodaySummary] = useState<DashboardSummary | null>(null);
   const [auditSummary, setAuditSummary] = useState<DashboardSummary | null>(null);
@@ -462,13 +466,13 @@ function AdminDashboard({ role, locationId }: { role: string; locationId: string
               const pct = rate !== null ? Math.round(rate * 100) : null;
               return (
                 <StatCard
-                  label="Checklist Completion"
+                  label={t("dashboard.checklistCompletion")}
                   value={pct !== null ? `${pct}%` : "—"}
                   icon={ClipboardCheck}
                   iconBg={pct === null ? "bg-gray-100" : pct >= 80 ? "bg-sprout-green/10" : pct >= 40 ? "bg-amber-100" : "bg-red-50"}
                   iconColor={pct === null ? "text-gray-400" : pct >= 80 ? "text-sprout-green" : pct >= 40 ? "text-amber-600" : "text-red-500"}
                   href="/dashboard/forms"
-                  sub={<p className="text-xs text-dark-secondary">Today</p>}
+                  sub={<p className="text-xs text-dark-secondary">{t("dashboard.today")}</p>}
                 />
               );
             })()}
@@ -478,13 +482,13 @@ function AdminDashboard({ role, locationId }: { role: string; locationId: string
               const pct = rate !== null ? Math.round(rate * 100) : null;
               return (
                 <StatCard
-                  label="Audit Compliance"
+                  label={t("dashboard.auditCompliance")}
                   value={pct !== null ? `${pct}%` : "—"}
                   icon={ShieldCheck}
                   iconBg={pct === null ? "bg-gray-100" : pct >= 80 ? "bg-sprout-green/10" : pct >= 50 ? "bg-amber-100" : "bg-red-50"}
                   iconColor={pct === null ? "text-gray-400" : pct >= 80 ? "text-sprout-green" : pct >= 50 ? "text-amber-600" : "text-red-500"}
                   href="/dashboard/audits"
-                  sub={<p className="text-xs text-dark-secondary">Rolling 30 days</p>}
+                  sub={<p className="text-xs text-dark-secondary">{t("dashboard.rolling30Days")}</p>}
                 />
               );
             })()}
@@ -493,25 +497,25 @@ function AdminDashboard({ role, locationId }: { role: string; locationId: string
               const pct = trainingAnalytics != null ? Math.round(trainingAnalytics.completion_rate) : null;
               return (
                 <StatCard
-                  label="Training Completion"
+                  label={t("dashboard.trainingCompletion")}
                   value={pct !== null ? `${pct}%` : "—"}
                   icon={GraduationCap}
                   iconBg={pct === null ? "bg-gray-100" : pct >= 80 ? "bg-teal-50" : pct >= 50 ? "bg-amber-100" : "bg-red-50"}
                   iconColor={pct === null ? "text-gray-400" : pct >= 80 ? "text-teal-600" : pct >= 50 ? "text-amber-600" : "text-red-500"}
                   href="/dashboard/insights/reports/training"
-                  sub={<p className="text-xs text-dark-secondary">Course pass rate</p>}
+                  sub={<p className="text-xs text-dark-secondary">{t("dashboard.coursePassRate")}</p>}
                 />
               );
             })()}
             {/* Shifts & Attendance */}
             <StatCard
-              label="Shifts Today"
+              label={t("dashboard.shiftsToday")}
               value={todayShiftsCount !== null ? todayShiftsCount : "—"}
               icon={CalendarClock}
               iconBg="bg-blue-50"
               iconColor="text-blue-600"
               href="/dashboard/shifts"
-              sub={<p className="text-xs text-dark-secondary">Published today</p>}
+              sub={<p className="text-xs text-dark-secondary">{t("dashboard.publishedToday")}</p>}
             />
           </>
         )}
@@ -535,14 +539,14 @@ function AdminDashboard({ role, locationId }: { role: string; locationId: string
         <div className="bg-white rounded-xl border border-surface-border p-6">
           <div className="flex items-center justify-between mb-4">
             <p className="text-xs font-semibold tracking-wide uppercase text-dark-secondary flex items-center gap-2">
-              <Megaphone className="w-4 h-4 text-sprout-purple" /> Latest Announcements
+              <Megaphone className="w-4 h-4 text-sprout-purple" /> {t("dashboard.latestAnnouncements")}
               <span className="ml-1 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold">{announcements.length}</span>
             </p>
             <button
               onClick={() => router.push("/dashboard/announcements")}
               className="flex items-center gap-1 text-xs text-sprout-green hover:underline font-medium"
             >
-              View all <ArrowRight className="w-3 h-3" />
+              {t("dashboard.viewAll")} <ArrowRight className="w-3 h-3" />
             </button>
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -824,6 +828,7 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
 
 // ── My Shift Card ─────────────────────────────────────────────────────────────
 function MyShiftCard() {
+  const { t } = useTranslation();
   const pathname = usePathname();
   const [shift, setShift]           = useState<Shift | null>(null);
   const [attendance, setAttendance] = useState<AttendanceRecord | null>(null);
@@ -964,11 +969,11 @@ function MyShiftCard() {
   return (
     <div className="bg-white rounded-xl border border-surface-border p-4">
       <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide mb-3 flex items-center gap-1.5">
-        <CalendarClock className="w-3.5 h-3.5" /> My Shift
+        <CalendarClock className="w-3.5 h-3.5" /> {t("dashboard.myShift")}
       </p>
 
       {!shift ? (
-        <p className="text-sm text-dark-secondary">No shift today.</p>
+        <p className="text-sm text-dark-secondary">{t("dashboard.noShiftToday")}.</p>
       ) : (
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
@@ -1038,6 +1043,7 @@ function MyShiftCard() {
 
 // ── Mini Leaderboard ──────────────────────────────────────────────────────────
 function MiniLeaderboard({ locationId }: { locationId?: string }) {
+  const { t } = useTranslation();
   const [allEntries, setAllEntries] = useState<SafetyPoints[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1101,8 +1107,8 @@ function MiniLeaderboard({ locationId }: { locationId?: string }) {
     <div className="bg-white rounded-xl border border-surface-border p-4 md:p-6">
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs font-semibold tracking-wide uppercase text-dark-secondary flex items-center gap-2">
-          <Trophy className="w-4 h-4 text-yellow-500" /> Leaderboard
-          <span className="text-[10px] font-normal normal-case">your branch</span>
+          <Trophy className="w-4 h-4 text-yellow-500" /> {t("dashboard.leaderboard")}
+          <span className="text-[10px] font-normal normal-case">{t("dashboard.yourBranch")}</span>
         </p>
         <a href="/dashboard/safety" className="flex items-center gap-1 text-xs text-sprout-green hover:underline font-medium">
           View full <ArrowRight className="w-3 h-3" />
@@ -1147,6 +1153,7 @@ function MiniLeaderboard({ locationId }: { locationId?: string }) {
 
 // ── Staff dashboard ────────────────────────────────────────────────────────────
 function StaffDashboard({ name }: { name: string }) {
+  const { t } = useTranslation();
   const router = useRouter();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [overdueCount, setOverdueCount] = useState(0);
@@ -1186,7 +1193,7 @@ function StaffDashboard({ name }: { name: string }) {
   }, []);
 
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const greeting = hour < 12 ? t("dashboard.goodMorning") : hour < 17 ? t("dashboard.goodAfternoon") : t("dashboard.goodEvening");
   const firstName = name.split(" ")[0];
 
   return (
@@ -1194,31 +1201,31 @@ function StaffDashboard({ name }: { name: string }) {
       {/* Greeting */}
       <div className="bg-white rounded-xl border border-surface-border px-6 py-5">
         <p className="text-xl font-bold text-dark">{greeting}, {firstName}! 👋</p>
-        <p className="text-sm text-dark-secondary mt-1">Here&apos;s a summary of what needs your attention today.</p>
+        <p className="text-sm text-dark-secondary mt-1">{t("dashboard.greetingSummary")}</p>
       </div>
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {loading ? Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />) : (
           <>
-            <StatCard label="Overdue Items" value={overdueCount}
+            <StatCard label={t("dashboard.overdueItems")} value={overdueCount}
               icon={TriangleAlert}
               iconBg={overdueCount > 0 ? "bg-red-50" : "bg-gray-100"}
               iconColor={overdueCount > 0 ? "text-red-600" : "text-gray-400"}
               href="/dashboard/tasks" />
-            <StatCard label="Open Issues" value={openIssuesCount}
+            <StatCard label={t("dashboard.openIssues")} value={openIssuesCount}
               icon={AlertTriangle}
               iconBg={openIssuesCount > 0 ? "bg-orange-50" : "bg-gray-100"}
               iconColor={openIssuesCount > 0 ? "text-orange-600" : "text-gray-400"}
               href="/dashboard/issues" />
-            <StatCard label="Courses to Complete" value={coursesToComplete}
+            <StatCard label={t("dashboard.coursesToComplete")} value={coursesToComplete}
               icon={GraduationCap}
               iconBg={coursesToComplete > 0 ? "bg-teal-50" : "bg-gray-100"}
               iconColor={coursesToComplete > 0 ? "text-teal-600" : "text-gray-400"}
               href="/dashboard/training" />
             {/* Shifts this week */}
             <StatCard
-              label="Shifts This Week"
+              label={t("dashboard.shiftsThisWeek")}
               value={myShiftsThisWeek !== null ? myShiftsThisWeek : "—"}
               icon={CalendarClock}
               iconBg="bg-blue-50"
@@ -1243,14 +1250,14 @@ function StaffDashboard({ name }: { name: string }) {
         <div className="bg-white rounded-xl border border-surface-border p-6">
           <div className="flex items-center justify-between mb-4">
             <p className="text-xs font-semibold tracking-wide uppercase text-dark-secondary flex items-center gap-2">
-              <Megaphone className="w-4 h-4 text-sprout-purple" /> Latest Announcements
+              <Megaphone className="w-4 h-4 text-sprout-purple" /> {t("dashboard.latestAnnouncements")}
               <span className="ml-1 px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-semibold">{announcements.length}</span>
             </p>
             <button
               onClick={() => router.push("/dashboard/announcements")}
               className="flex items-center gap-1 text-xs text-sprout-green hover:underline font-medium"
             >
-              View all <ArrowRight className="w-3 h-3" />
+              {t("dashboard.viewAll")} <ArrowRight className="w-3 h-3" />
             </button>
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -1354,6 +1361,7 @@ function OnboardingBanner() {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
+  const { t } = useTranslation();
   const [role, setRole] = useState("staff"); // default to most restrictive
   const [name, setName] = useState("there");
   const [orgId, setOrgId] = useState("");
@@ -1389,9 +1397,9 @@ export default function DashboardPage() {
           <LayoutDashboard className="w-5 h-5 text-sprout-green" />
         </div>
         <div>
-          <h1 className="text-2xl font-bold text-dark">Dashboard</h1>
+          <h1 className="text-2xl font-bold text-dark">{t("dashboard.pageTitle")}</h1>
           <p className="text-sm text-dark-secondary">
-            {isStaff ? "Your tasks and updates" : "Last 30 days"}
+            {isStaff ? t("dashboard.pageSubtitleStaff") : t("dashboard.pageSubtitleAdmin")}
           </p>
         </div>
       </div>
