@@ -67,7 +67,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Frontline',
+                    'Frontliner',
                     style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                       color: SproutColors.navy,
                       fontWeight: FontWeight.bold,
