@@ -79,7 +79,7 @@ async def get_current_user(
             sb = get_supabase()
             profile = (
                 sb.table("profiles")
-                .select("organisation_id, role, location_id")
+                .select("organisation_id, role, location_id, language")
                 .eq("id", user_id)
                 .eq("is_deleted", False)
                 .maybe_single()
@@ -91,6 +91,7 @@ async def get_current_user(
                     "organisation_id": str(profile.data["organisation_id"]),
                     "role": profile.data["role"],
                     "location_id": profile.data.get("location_id"),
+                    "language": profile.data.get("language") or "en",
                 }
                 payload = {**payload, "app_metadata": app_meta}
         except Exception:

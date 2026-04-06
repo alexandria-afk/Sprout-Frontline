@@ -28,6 +28,7 @@ import 'package:frontline_app/features/tasks/presentation/screens/create_task_sc
 import 'package:frontline_app/features/team/presentation/screens/team_screen.dart';
 import 'package:frontline_app/features/notifications/presentation/screens/notifications_screen.dart';
 import 'package:frontline_app/features/notifications/providers/notifications_provider.dart';
+import 'package:frontline_app/features/settings/presentation/screens/settings_screen.dart';
 import 'package:dio/dio.dart';
 import 'package:frontline_app/core/api/dio_client.dart';
 
@@ -109,6 +110,12 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => AuditFillScreen(
           templateId: state.pathParameters['id']!,
         ),
+      ),
+
+      // Settings — language picker and preferences
+      GoRoute(
+        path: '/settings',
+        builder: (context, state) => const SettingsScreen(),
       ),
 
       // Workflow routes — feature not yet implemented on mobile; redirect to
@@ -396,6 +403,14 @@ class _AppShell extends ConsumerWidget {
                   context.go('/tasks/create');
                 },
               ),
+            _MoreTile(
+              icon: Icons.language_outlined,
+              label: 'Language / ภาษา',
+              onTap: () {
+                Navigator.pop(context);
+                context.go('/settings');
+              },
+            ),
             const SizedBox(height: 8),
           ],
         ),

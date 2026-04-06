@@ -19,7 +19,7 @@ export default async function DashboardLayout({
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar role={role} />
+      <Sidebar role={role} userId={user.id} />
       <main className="flex-1 bg-surface-page overflow-auto min-w-0">
         {/* pt-16 / pb-24 on mobile = top header + bottom tab bar clearance */}
         <div className="p-4 md:p-8 pt-[4.5rem] md:pt-8 pb-24 md:pb-8">

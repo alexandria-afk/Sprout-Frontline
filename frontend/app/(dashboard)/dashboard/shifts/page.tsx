@@ -7,7 +7,7 @@ import {
   CalendarClock, ChevronLeft, ChevronRight, Plus, Clock,
   CheckCircle2, XCircle, AlertCircle, User, MapPin,
   Loader2, X, Sparkles, ToggleLeft, ToggleRight,
-  Calendar, Coffee, ArrowRightLeft, FileText,
+  Calendar, Coffee, ArrowRightLeft, FileText, CalendarCheck,
   ClipboardList, TimerReset, TrendingUp, BarChart3,
   RefreshCw, Check, Ban, Globe, Filter,
 } from "lucide-react";
@@ -1121,7 +1121,7 @@ function CreateTemplateModal({
 // ── Manager Tabs ──────────────────────────────────────────────────────────────
 
 type ManagerTab = "roster" | "open" | "swaps" | "timesheets" | "leave" | "templates";
-type StaffTab = "schedule" | "clockin" | "timesheet" | "leave" | "availability";
+type StaffTab = "schedule" | "open_shifts" | "swaps" | "clockin" | "timesheet" | "leave" | "availability";
 
 // ── Manager: Roster ───────────────────────────────────────────────────────────
 
@@ -2602,6 +2602,218 @@ function StaffTimesheet() {
   );
 }
 
+// ── Staff: Open Shifts ────────────────────────────────────────────────────────
+
+function StaffOpenShifts() {
+  const [shifts, setShifts] = useState<Shift[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [claimingId, setClaimingId] = useState<string | null>(null);
+  const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await listShifts({ status: "open", page_size: 100 });
+      setShifts(r.items.filter(s => s.is_open_shift && !s.assigned_to_user_id));
+    } catch { setShifts([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function handleClaim(shiftId: string) {
+    setClaimingId(shiftId);
+    try {
+      await claimShift(shiftId);
+      setBanner({ type: "success", msg: "Shift claimed! Awaiting manager approval." });
+      load();
+    } catch (e) {
+      setBanner({ type: "error", msg: (e as Error).message });
+    } finally { setClaimingId(null); }
+  }
+
+  const byDate = shifts.reduce<Record<string, Shift[]>>((acc, s) => {
+    const d = s.start_at.slice(0, 10);
+    (acc[d] ??= []).push(s);
+    return acc;
+  }, {});
+  const sortedDates = Object.keys(byDate).sort();
+
+  return (
+    <div className="space-y-4">
+      {banner && <Banner type={banner.type} message={banner.msg} onDismiss={() => setBanner(null)} />}
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-5 h-5 animate-spin text-sprout-purple" />
+        </div>
+      ) : sortedDates.length === 0 ? (
+        <div className="text-center py-12 text-dark-secondary text-sm">No open shifts available right now</div>
+      ) : (
+        <div className="space-y-3">
+          {sortedDates.map(date => (
+            <div key={date}>
+              <p className="text-xs font-semibold text-dark-secondary mb-2 uppercase tracking-wide">
+                {new Date(date + "T00:00:00").toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+              </p>
+              {byDate[date].map(shift => (
+                <div key={shift.id} className="bg-blue-50 rounded-xl border border-blue-200 p-4 mb-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-blue-800">{shift.role ?? "Open Shift"}</p>
+                      <p className="text-sm text-blue-600 mt-0.5">
+                        {fmtWallTime(shift.start_at)} – {fmtWallTime(shift.end_at)}
+                      </p>
+                      {shift.notes && <p className="text-xs text-blue-500 mt-1">{shift.notes}</p>}
+                    </div>
+                    <button
+                      onClick={() => handleClaim(shift.id)}
+                      disabled={claimingId === shift.id}
+                      className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1 shrink-0"
+                    >
+                      {claimingId === shift.id
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <Check className="w-3 h-3" />}
+                      Claim
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Staff: Shift Swap ─────────────────────────────────────────────────────────
+
+function StaffSwaps({ userId }: { userId: string }) {
+  const [swaps, setSwaps] = useState<ShiftSwapRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [myShifts, setMyShifts] = useState<Shift[]>([]);
+  const [selectedShiftId, setSelectedShiftId] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setSwaps(await listSwapRequests()); }
+    catch { setSwaps([]); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function openCreate() {
+    const r = await listShifts({ page_size: 50 });
+    setMyShifts(r.items.filter(s => s.assigned_to_user_id === userId && s.status !== "draft"));
+    setSelectedShiftId("");
+    setShowCreate(true);
+  }
+
+  async function handleSubmit() {
+    if (!selectedShiftId) return;
+    setSubmitting(true);
+    try {
+      await createSwapRequest({ shift_id: selectedShiftId });
+      setBanner({ type: "success", msg: "Swap request submitted! Awaiting manager approval." });
+      setShowCreate(false);
+      load();
+    } catch (e) {
+      setBanner({ type: "error", msg: (e as Error).message });
+    } finally { setSubmitting(false); }
+  }
+
+  const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
+    pending_peer:    { label: "Awaiting peer",     cls: "bg-amber-100 text-amber-700" },
+    pending_manager: { label: "Awaiting approval", cls: "bg-amber-100 text-amber-700" },
+    approved:        { label: "Approved",           cls: "bg-green-100 text-green-700" },
+    rejected:        { label: "Declined",           cls: "bg-red-100 text-red-600"    },
+    cancelled:       { label: "Cancelled",          cls: "bg-gray-100 text-gray-500"  },
+  };
+
+  return (
+    <div className="space-y-4">
+      {banner && <Banner type={banner.type} message={banner.msg} onDismiss={() => setBanner(null)} />}
+      <div className="flex justify-end">
+        <button className={btnPrimary} onClick={openCreate}>
+          <Plus className="w-4 h-4" /> Request Swap
+        </button>
+      </div>
+
+      {showCreate && (
+        <div className="bg-white rounded-xl border border-surface-border p-4 space-y-3">
+          <p className="font-medium text-dark text-sm">Select a shift to swap</p>
+          {myShifts.length === 0 ? (
+            <p className="text-sm text-dark-secondary">No upcoming shifts to swap.</p>
+          ) : (
+            <select
+              value={selectedShiftId}
+              onChange={e => setSelectedShiftId(e.target.value)}
+              className="w-full border border-surface-border rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">— Choose a shift —</option>
+              {myShifts.map(s => (
+                <option key={s.id} value={s.id}>
+                  {new Date(s.start_at + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                  {" · "}{fmtWallTime(s.start_at)} – {fmtWallTime(s.end_at)}
+                  {s.role ? ` · ${s.role}` : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => setShowCreate(false)} className={btnSecondary}>Cancel</button>
+            <button
+              onClick={handleSubmit}
+              disabled={!selectedShiftId || submitting}
+              className={btnPrimary}
+            >
+              {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
+              Submit Request
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="w-5 h-5 animate-spin text-sprout-purple" />
+        </div>
+      ) : swaps.length === 0 ? (
+        <div className="text-center py-12 text-dark-secondary text-sm">No swap requests yet</div>
+      ) : (
+        <div className="space-y-2">
+          {swaps.map(sw => {
+            const meta = STATUS_LABEL[sw.status] ?? { label: sw.status, cls: "bg-gray-100 text-gray-500" };
+            return (
+              <div key={sw.id} className="bg-white rounded-xl border border-surface-border p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-dark text-sm">Shift swap request</p>
+                    {sw.shift && (
+                      <p className="text-xs text-dark-secondary mt-0.5">
+                        {new Date(sw.shift.start_at).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                        {" · "}{fmtWallTime(sw.shift.start_at)} – {fmtWallTime(sw.shift.end_at)}
+                      </p>
+                    )}
+                    <p className="text-xs text-dark-secondary mt-0.5">
+                      {new Date(sw.created_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                  <span className={clsx("text-xs font-medium px-2 py-0.5 rounded-full shrink-0", meta.cls)}>
+                    {meta.label}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Staff: Leave ──────────────────────────────────────────────────────────────
 
 function StaffLeave() {
@@ -2885,10 +3097,12 @@ export default function ShiftsPage() {
   ];
 
   const STAFF_TABS: { id: StaffTab; label: string; icon: React.ElementType }[] = [
-    { id: "schedule",     label: "My Schedule",  icon: Calendar      },
-    { id: "clockin",      label: "Clock In/Out", icon: Clock         },
-    { id: "timesheet",    label: "My Timesheet", icon: BarChart3     },
-    { id: "leave",        label: "Leave",        icon: Coffee        },
+    { id: "schedule",    label: "My Schedule",  icon: Calendar      },
+    { id: "open_shifts", label: "Open Shifts",  icon: CalendarCheck },
+    { id: "swaps",       label: "Shift Swap",   icon: ArrowRightLeft},
+    { id: "clockin",     label: "Clock In/Out", icon: Clock         },
+    { id: "timesheet",   label: "My Timesheet", icon: BarChart3     },
+    { id: "leave",       label: "Leave",        icon: Coffee        },
     ...(staffAvailabilityEnabled
       ? [{ id: "availability" as StaffTab, label: "Availability", icon: CalendarClock }]
       : []),
@@ -3023,6 +3237,8 @@ export default function ShiftsPage() {
           ) : (
             <>
               {staffTab === "schedule"     && <StaffSchedule userId={userId} />}
+              {staffTab === "open_shifts"  && <StaffOpenShifts />}
+              {staffTab === "swaps"        && <StaffSwaps userId={userId} />}
               {staffTab === "clockin"      && <StaffClockIn locationId={locationId} />}
               {staffTab === "timesheet"    && <StaffTimesheet />}
               {staffTab === "leave"        && <StaffLeave />}

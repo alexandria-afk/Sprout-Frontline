@@ -1082,9 +1082,12 @@ async def sidekick_chat(
         raise HTTPException(status_code=400, detail="messages cannot be empty")
 
     client = _get_client()
-    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    meta = current_user.get("app_metadata") or {}
+    org_id = meta.get("organisation_id")
     user_id = current_user.get("sub")
-    sidekick_system = get_industry_context(org_id) + SIDEKICK_SYSTEM
+    user_language = meta.get("language", "en")
+    lang_instruction = "\n\nRespond in Thai." if user_language == "th" else ""
+    sidekick_system = get_industry_context(org_id) + SIDEKICK_SYSTEM + lang_instruction
 
     sdk_messages = [{"role": m.role, "content": m.content} for m in body.messages]
 

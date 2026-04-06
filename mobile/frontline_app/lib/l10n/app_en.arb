@@ -1,0 +1,174 @@
+{
+  "@@locale": "en",
+
+  "navDashboard": "Dashboard",
+  "@navDashboard": { "description": "Dashboard nav label" },
+
+  "navTasks": "Tasks",
+  "@navTasks": { "description": "Tasks nav label" },
+
+  "navIssues": "Issues",
+  "@navIssues": { "description": "Issues nav label" },
+
+  "navForms": "Forms",
+  "@navForms": { "description": "Forms nav label" },
+
+  "navShifts": "Shifts",
+  "@navShifts": { "description": "Shifts nav label" },
+
+  "navAnnouncements": "Announcements",
+  "@navAnnouncements": { "description": "Announcements nav label" },
+
+  "navTraining": "Training",
+  "@navTraining": { "description": "Training nav label" },
+
+  "navTeam": "Team",
+  "@navTeam": { "description": "Team nav label" },
+
+  "navApprovals": "Approvals",
+  "@navApprovals": { "description": "Approvals nav label" },
+
+  "navAudits": "Audits",
+  "@navAudits": { "description": "Audits nav label" },
+
+  "navBadges": "Badges",
+  "@navBadges": { "description": "Badges nav label" },
+
+  "navNotifications": "To-Do",
+  "@navNotifications": { "description": "Notifications/To-Do nav label" },
+
+  "navMore": "More",
+  "@navMore": { "description": "More nav label" },
+
+  "navSettings": "Settings",
+  "@navSettings": { "description": "Settings nav label" },
+
+  "btnSubmit": "Submit",
+  "@btnSubmit": { "description": "Submit button" },
+
+  "btnCancel": "Cancel",
+  "@btnCancel": { "description": "Cancel button" },
+
+  "btnSave": "Save",
+  "@btnSave": { "description": "Save button" },
+
+  "btnSaveChanges": "Save Changes",
+  "@btnSaveChanges": { "description": "Save changes button" },
+
+  "btnApprove": "Approve",
+  "@btnApprove": { "description": "Approve button" },
+
+  "btnReject": "Reject",
+  "@btnReject": { "description": "Reject button" },
+
+  "btnClockIn": "Clock In",
+  "@btnClockIn": { "description": "Clock in button" },
+
+  "btnClockOut": "Clock Out",
+  "@btnClockOut": { "description": "Clock out button" },
+
+  "btnViewAll": "View All",
+  "@btnViewAll": { "description": "View all button" },
+
+  "btnClaim": "Claim",
+  "@btnClaim": { "description": "Claim open shift button" },
+
+  "btnRequestLeave": "Request Leave",
+  "@btnRequestLeave": { "description": "Request leave button" },
+
+  "btnRequestSwap": "Request Swap",
+  "@btnRequestSwap": { "description": "Request shift swap button" },
+
+  "statusPending": "Pending",
+  "@statusPending": { "description": "Pending status" },
+
+  "statusInProgress": "In Progress",
+  "@statusInProgress": { "description": "In progress status" },
+
+  "statusCompleted": "Completed",
+  "@statusCompleted": { "description": "Completed status" },
+
+  "statusOverdue": "Overdue",
+  "@statusOverdue": { "description": "Overdue status" },
+
+  "statusOpen": "Open",
+  "@statusOpen": { "description": "Open status" },
+
+  "statusResolved": "Resolved",
+  "@statusResolved": { "description": "Resolved status" },
+
+  "statusDraft": "Draft",
+  "@statusDraft": { "description": "Draft status" },
+
+  "statusApproved": "Approved",
+  "@statusApproved": { "description": "Approved status" },
+
+  "statusRejected": "Rejected",
+  "@statusRejected": { "description": "Rejected status" },
+
+  "priorityCritical": "Critical",
+  "@priorityCritical": { "description": "Critical priority" },
+
+  "priorityHigh": "High",
+  "@priorityHigh": { "description": "High priority" },
+
+  "priorityMedium": "Medium",
+  "@priorityMedium": { "description": "Medium priority" },
+
+  "priorityLow": "Low",
+  "@priorityLow": { "description": "Low priority" },
+
+  "dashboardMyToDoList": "My To-Do List",
+  "@dashboardMyToDoList": { "description": "My to-do list section header" },
+
+  "dashboardMyShiftToday": "My Shift Today",
+  "@dashboardMyShiftToday": { "description": "My shift today section header" },
+
+  "dashboardTeamAttendance": "Team Attendance",
+  "@dashboardTeamAttendance": { "description": "Team attendance section header" },
+
+  "dashboardAllCaughtUp": "All caught up!",
+  "@dashboardAllCaughtUp": { "description": "No to-do items message" },
+
+  "dashboardNoShiftToday": "No shift today",
+  "@dashboardNoShiftToday": { "description": "No shift today message" },
+
+  "dashboardViewAll": "View all",
+  "@dashboardViewAll": { "description": "View all link" },
+
+  "shiftsOpenShifts": "Open Shifts",
+  "@shiftsOpenShifts": { "description": "Open shifts tab label" },
+
+  "shiftsShiftSwap": "Shift Swap",
+  "@shiftsShiftSwap": { "description": "Shift swap tab label" },
+
+  "shiftsNoOpenShifts": "No open shifts available right now",
+  "@shiftsNoOpenShifts": { "description": "Empty state for open shifts" },
+
+  "shiftsShiftClaimed": "Shift claimed! Awaiting manager approval.",
+  "@shiftsShiftClaimed": { "description": "Shift claimed success message" },
+
+  "commonLoading": "Loading...",
+  "@commonLoading": { "description": "Loading indicator label" },
+
+  "commonNoItemsFound": "No items found",
+  "@commonNoItemsFound": { "description": "Empty state message" },
+
+  "commonViewAll": "View all",
+  "@commonViewAll": { "description": "View all text" },
+
+  "languageLabel": "Language",
+  "@languageLabel": { "description": "Language setting label" },
+
+  "languageEnglish": "English",
+  "@languageEnglish": { "description": "English language option" },
+
+  "languageThai": "ไทย (Thai)",
+  "@languageThai": { "description": "Thai language option" },
+
+  "settingsTitle": "Settings",
+  "@settingsTitle": { "description": "Settings screen title" },
+
+  "settingsLanguage": "Language",
+  "@settingsLanguage": { "description": "Language settings section" }
+}

@@ -970,7 +970,7 @@ async def daily_snapshot(
 
 # ── Insights system prompt ────────────────────────────────────────────────────
 
-def _build_insights_system_prompt(org_id: str, location_count: int, role_level: str) -> str:
+def _build_insights_system_prompt(org_id: str, location_count: int, role_level: str, language: str = "en") -> str:
     industry = get_industry_context(org_id)
     role_desc = {
         "admin": "all locations and cross-location comparisons",
@@ -1005,7 +1005,8 @@ def _build_insights_system_prompt(org_id: str, location_count: int, role_level: 
         '      "recommendation": "→ Concrete actionable next step"\n'
         '    }\n'
         '  ]\n'
-        '}'
+        '}\n\n'
+        f"Respond in {'Thai' if language == 'th' else 'English'}."
     )
 
 
@@ -1102,6 +1103,7 @@ async def dashboard_insights(
     role = meta.get("role", "staff")
     user_id = current_user.get("sub")
     user_location_id = meta.get("location_id")
+    user_language = meta.get("language", "en")
 
     if not org_id:
         raise HTTPException(status_code=400, detail="No organisation_id in token.")
@@ -1128,7 +1130,7 @@ async def dashboard_insights(
     filtered = _filter_snapshot_by_role(snapshot, role_level, user_location_id)
 
     location_count = (filtered.get("org") or {}).get("location_count", 1)
-    system_prompt = _build_insights_system_prompt(org_id, location_count, role_level)
+    system_prompt = _build_insights_system_prompt(org_id, location_count, role_level, language=user_language)
 
     # Compact the snapshot for the Claude message (trim noise)
     user_message = f"Today's operational data:\n{json.dumps(filtered, separators=(',', ':'))}"

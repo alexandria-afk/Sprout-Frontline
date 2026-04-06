@@ -13,6 +13,7 @@ class HiveService {
   static const String formsCacheBox = 'forms_cache';
   static const String shiftsCacheBox = 'shifts_cache';
   static const String insightsCacheBox = 'insights_cache';
+  static const String preferencesBox = 'preferences';
 
   /// Call once from main() before runApp().
   static Future<void> init() async {
@@ -24,6 +25,7 @@ class HiveService {
     await Hive.openBox<Map>(formsCacheBox);
     await Hive.openBox<Map>(shiftsCacheBox);
     await Hive.openBox<Map>(insightsCacheBox);
+    await Hive.openBox<String>(preferencesBox);
   }
 
   static Box<Map> get pendingSubmissions =>
@@ -40,6 +42,9 @@ class HiveService {
 
   static Box<Map> get insightsCache =>
       Hive.box<Map>(insightsCacheBox);
+
+  static Box<String> get preferences =>
+      Hive.box<String>(preferencesBox);
 
   /// Clear all user-scoped caches on sign-out to prevent data leaking
   /// between accounts.

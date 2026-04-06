@@ -20,6 +20,7 @@ export interface UpdateUserPayload {
   phone_number?: string;
   is_active?: boolean;
   reports_to?: string | null;
+  language?: string;
 }
 
 export interface BulkImportResult {

@@ -6,26 +6,29 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, ClipboardList, Megaphone, LogOut, GitBranch,
   BarChart2, AlertTriangle, Settings, Trophy, GraduationCap,
-  CalendarClock, CheckSquare, Bell,
+  CalendarClock, CheckSquare, Bell, Languages,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { createClient } from "@/services/supabase/client";
 import { getDashboardSummary } from "@/services/dashboard";
 import { getUnreadCount } from "@/services/notifications";
+import { useTranslation } from "@/lib/i18n";
+import { updateUser } from "@/services/users";
 
 // ── Nav items — ordered per spec, role-gated per architecture.md ──────────────
+// labelKey maps to keys in messages/en.json and messages/th.json
 const NAV_ITEMS = [
-  { href: "/dashboard",                          label: "Dashboard",          icon: LayoutDashboard, roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/insights",                 label: "Insights",           icon: BarChart2,       roles: ["super_admin","admin","manager"] },
-  { href: "/dashboard/issues?tab=tasks",         label: "Tasks",              icon: CheckSquare,     roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/issues?tab=issues",        label: "Issues & Incidents", icon: AlertTriangle,   roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/forms?tab=my_assignments", label: "Forms & Audit",      icon: ClipboardList,   roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/shifts",                   label: "Shifts",             icon: CalendarClock,   roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/workflows",                label: "Workflows",          icon: GitBranch,       roles: ["super_admin","admin","manager"] },
-  { href: "/dashboard/announcements",            label: "Announcements",      icon: Megaphone,       roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/training",                 label: "Training",           icon: GraduationCap,   roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/safety",                   label: "Leaderboard",        icon: Trophy,          roles: ["super_admin","admin","manager","staff"] },
-  { href: "/dashboard/settings",                 label: "Settings",           icon: Settings,        roles: ["super_admin","admin"] },
+  { href: "/dashboard",                          labelKey: "nav.dashboard",    icon: LayoutDashboard, roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/insights",                 labelKey: "nav.insights",     icon: BarChart2,       roles: ["super_admin","admin","manager"] },
+  { href: "/dashboard/issues?tab=tasks",         labelKey: "nav.tasks",        icon: CheckSquare,     roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/issues?tab=issues",        labelKey: "nav.issues",       icon: AlertTriangle,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/forms?tab=my_assignments", labelKey: "nav.forms",        icon: ClipboardList,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/shifts",                   labelKey: "nav.shifts",       icon: CalendarClock,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/workflows",                labelKey: "nav.workflows",    icon: GitBranch,       roles: ["super_admin","admin","manager"] },
+  { href: "/dashboard/announcements",            labelKey: "nav.announcements",icon: Megaphone,       roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/training",                 labelKey: "nav.training",     icon: GraduationCap,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/safety",                   labelKey: "nav.leaderboard",  icon: Trophy,          roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/settings",                 labelKey: "nav.settings",     icon: Settings,        roles: ["super_admin","admin"] },
 ];
 
 const Logo = ({ size = "md" }: { size?: "sm" | "md" }) => (
@@ -49,12 +52,21 @@ const Logo = ({ size = "md" }: { size?: "sm" | "md" }) => (
 
 const MANAGER_ROLES = ["super_admin", "admin", "manager"];
 
-export function Sidebar({ role = "staff" }: { role?: string }) {
+export function Sidebar({ role = "staff", userId }: { role?: string; userId?: string }) {
   const pathname     = usePathname();
   const searchParams = useSearchParams();
   const router       = useRouter();
+  const { t, locale, setLocale } = useTranslation();
 
   const visibleItems = NAV_ITEMS.filter((item) => item.roles.includes(role));
+
+  async function handleToggleLanguage() {
+    const next = locale === "en" ? "th" : "en";
+    setLocale(next);
+    if (userId) {
+      try { await updateUser(userId, { language: next }); } catch {}
+    }
+  }
 
   const [pendingCount,      setPendingCount]      = useState(0);
   const [unreadNotifCount,  setUnreadNotifCount]  = useState(0);
@@ -124,7 +136,7 @@ export function Sidebar({ role = "staff" }: { role?: string }) {
           <Logo size="md" />
         </div>
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {visibleItems.map(({ href, label, icon: Icon }) => (
+          {visibleItems.map(({ href, labelKey, icon: Icon }) => (
             <Link
               key={href}
               href={href}
@@ -136,7 +148,7 @@ export function Sidebar({ role = "staff" }: { role?: string }) {
               )}
             >
               <Icon size={18} />
-              <span className="flex-1">{label}</span>
+              <span className="flex-1">{t(labelKey)}</span>
 
               {/* Unread inbox badge on Dashboard */}
               {hrefPath(href) === "/dashboard" && unreadNotifCount > 0 && (
@@ -154,13 +166,24 @@ export function Sidebar({ role = "staff" }: { role?: string }) {
             </Link>
           ))}
         </nav>
-        <div className="px-3 py-4 border-t border-white/10">
+        <div className="px-3 py-4 border-t border-white/10 space-y-1">
+          {/* Language toggle */}
+          <button
+            onClick={handleToggleLanguage}
+            title={t("language.label")}
+            className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium text-white/70 hover:bg-white/10 hover:text-white transition-colors"
+          >
+            <Languages size={18} />
+            <span className="flex-1 text-left">
+              {locale === "en" ? "ไทย" : "English"}
+            </span>
+          </button>
           <button
             onClick={handleSignOut}
             className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium text-white/70 hover:bg-white/10 hover:text-white transition-colors"
           >
             <LogOut size={18} />
-            Sign out
+            {t("button.signOut")}
           </button>
         </div>
       </aside>
@@ -168,19 +191,28 @@ export function Sidebar({ role = "staff" }: { role?: string }) {
       {/* ── Mobile top header ────────────────────────────────── */}
       <header className="md:hidden fixed top-0 inset-x-0 z-40 h-14 bg-sprout-navy flex items-center justify-between px-4 border-b border-white/10">
         <Logo size="sm" />
-        <button
-          onClick={handleSignOut}
-          className="flex items-center gap-1.5 text-white/60 hover:text-white transition-colors text-xs font-medium"
-        >
-          <LogOut size={15} />
-          Sign out
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleToggleLanguage}
+            className="flex items-center gap-1 text-white/60 hover:text-white transition-colors text-xs font-medium"
+          >
+            <Languages size={14} />
+            {locale === "en" ? "ไทย" : "EN"}
+          </button>
+          <button
+            onClick={handleSignOut}
+            className="flex items-center gap-1.5 text-white/60 hover:text-white transition-colors text-xs font-medium"
+          >
+            <LogOut size={15} />
+            {t("button.signOut")}
+          </button>
+        </div>
       </header>
 
       {/* ── Mobile bottom tab bar ────────────────────────────── */}
       <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-sprout-navy border-t border-white/10 safe-area-bottom">
         <div className="flex overflow-x-auto scrollbar-none">
-          {visibleItems.map(({ href, label, icon: Icon }) => (
+          {visibleItems.map(({ href, labelKey, icon: Icon }) => (
             <Link
               key={href}
               href={href}
@@ -202,7 +234,7 @@ export function Sidebar({ role = "staff" }: { role?: string }) {
                   </span>
                 )}
               </div>
-              <span className="text-[10px] font-medium leading-none whitespace-nowrap">{label}</span>
+              <span className="text-[10px] font-medium leading-none whitespace-nowrap">{t(labelKey)}</span>
             </Link>
           ))}
         </div>

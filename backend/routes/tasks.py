@@ -128,8 +128,6 @@ async def list_tasks(
 
     role = (current_user.get("app_metadata") or {}).get("role", "staff")
     manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
-    if role == "manager" and not location_id and manager_location_id:
-        location_id = manager_location_id
 
     # Resolve team member IDs for manager view
     team_user_ids: Optional[list] = None
@@ -137,6 +135,19 @@ async def list_tasks(
         db = get_supabase()
         dr = db.table("profiles").select("id").eq("reports_to", user_id).eq("is_deleted", False).execute()
         team_user_ids = [r["id"] for r in (dr.data or [])] + [user_id]
+    elif role == "manager" and manager_location_id and not assigned_to and not location_id:
+        # Auto-scope: show tasks assigned to any staff at manager's location.
+        # Scope by assignee location (not tasks.location_id) because tasks often
+        # have null location_id even when assigned to staff at a specific location.
+        db = get_supabase()
+        loc_resp = (
+            db.table("profiles")
+            .select("id")
+            .eq("location_id", str(manager_location_id))
+            .eq("is_deleted", False)
+            .execute()
+        )
+        team_user_ids = [r["id"] for r in (loc_resp.data or [])]
 
     # For staff: only tasks assigned to them
     if my_tasks and not assigned_to:
