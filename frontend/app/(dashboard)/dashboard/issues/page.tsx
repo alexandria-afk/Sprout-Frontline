@@ -1466,11 +1466,11 @@ function IssueDetailModal({
 
           {/* Location & Context */}
           <div className="px-5 py-4">
-            <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide mb-3">Details</p>
+            <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide mb-3">{t("issues.details")}</p>
             <div className="grid grid-cols-2 gap-x-6 gap-y-3">
               {issue.locations?.name && (
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-xs text-dark-secondary">Location</span>
+                  <span className="text-xs text-dark-secondary">{t("issues.location")}</span>
                   <div className="flex items-center gap-1.5 text-sm text-dark">
                     <MapPin className="w-3.5 h-3.5 text-dark-secondary shrink-0" />
                     <span>{issue.locations.name}</span>
@@ -1479,13 +1479,13 @@ function IssueDetailModal({
               )}
               {issue.location_description && (
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-xs text-dark-secondary">Where Exactly</span>
+                  <span className="text-xs text-dark-secondary">{t("issues.whereExactly")}</span>
                   <p className="text-sm text-dark">{issue.location_description}</p>
                 </div>
               )}
               {(issue.asset_id || unlistedEquipment) && (
                 <div className="flex flex-col gap-0.5">
-                  <span className="text-xs text-dark-secondary">Equipment</span>
+                  <span className="text-xs text-dark-secondary">{t("issues.equipment")}</span>
                   <div className="flex items-center gap-1.5 text-sm text-dark">
                     <Wrench className="w-3.5 h-3.5 text-dark-secondary shrink-0" />
                     <span className="truncate">{unlistedEquipment ?? issue.asset_id}</span>
@@ -1493,7 +1493,7 @@ function IssueDetailModal({
                 </div>
               )}
               <div className="flex flex-col gap-0.5">
-                <span className="text-xs text-dark-secondary">Anyone Hurt / Safety Risk</span>
+                <span className="text-xs text-dark-secondary">{t("issues.safetyRisk")}</span>
                 {hasSafetyRisk ? (
                   <div className="flex items-center gap-1.5 text-sm font-medium text-amber-600">
                     <ShieldAlert className="w-3.5 h-3.5 shrink-0" /> Yes — Safety risk
@@ -1507,7 +1507,7 @@ function IssueDetailModal({
 
           {/* Photo attachments — always rendered so state is visible */}
           <div className="px-5 py-4">
-            <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide mb-3">Photo</p>
+            <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide mb-3">{t("issues.photo")}</p>
             {loadingFull ? (
               <div className="flex gap-2">
                 <div className="w-24 h-24 rounded-xl bg-gray-100 animate-pulse" />
@@ -1548,7 +1548,7 @@ function IssueDetailModal({
           {/* ── Manager controls ── */}
           {isManager && (
             <div className="px-5 py-4 flex flex-col gap-4 bg-surface-page/40">
-              <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide">Manage Issue</p>
+              <p className="text-xs font-medium text-dark-secondary uppercase tracking-wide">{t("issues.manageIssue")}</p>
 
               {/* Priority override */}
               <div className="flex flex-col gap-1.5">
@@ -3029,10 +3029,10 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
   );
 
   const STATUS_FILTER_PILLS: { key: "all" | IssueStatus; label: string }[] = [
-    { key: "open",        label: "Open"        },
-    { key: "in_progress", label: "In Progress" },
-    { key: "resolved",    label: "Resolved"    },
-    { key: "all",         label: "All"         },
+    { key: "open",        label: t("status.open")        },
+    { key: "in_progress", label: t("status.inProgress")  },
+    { key: "resolved",    label: t("status.resolved")    },
+    { key: "all",         label: t("common.all")         },
   ];
 
   return (
@@ -3045,7 +3045,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
           className="flex items-center gap-2 bg-sprout-purple text-white rounded-lg px-4 py-2 text-sm font-medium hover:bg-sprout-purple/90"
         >
           <Plus className="w-4 h-4" />
-          Report a Problem
+          {t("issues.reportAProblem")}
         </button>
       </div>
 
@@ -4028,10 +4028,11 @@ function StaffTasksView({ openId }: { openId?: string | null }) {
 
 // Tasks Tab
 function TasksTab({ isManager, role, openId }: { isManager: boolean; role: string; openId?: string | null }) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-dark-secondary">
-        {isManager ? "Assign and track tasks across your team" : "Your assigned tasks"}
+        {isManager ? t("tasks.subtitleManager") : t("tasks.subtitleStaff")}
       </p>
       {isManager ? <ManagerBoard isManager={isManager} role={role} openId={openId} /> : <StaffTasksView openId={openId} />}
     </div>
@@ -4082,7 +4083,7 @@ function IssuesHubPageInner() {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-dark">{t("issues.pageTitle")}</h1>
-            <p className="text-sm text-dark-secondary">{isManager ? "Track issues, tasks, and incident reports across your organisation" : "Report problems and track your assigned tasks"}</p>
+            <p className="text-sm text-dark-secondary">{isManager ? t("issues.pageSubtitleManager") : t("issues.pageSubtitleStaff")}</p>
           </div>
         </div>
 

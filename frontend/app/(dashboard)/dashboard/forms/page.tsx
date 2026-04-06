@@ -58,6 +58,7 @@ import { AssignPeoplePanel } from "@/components/shared/AssignPeoplePanel";
 import { createClient } from "@/services/supabase/client";
 import type { FormTemplate, FormType, FormFieldType, FormField, FormSection, Profile } from "@/types";
 import { friendlyError } from "@/lib/errors";
+import { useTranslation } from "@/lib/i18n";
 
 // ── Field type options ─────────────────────────────────────────────────────────
 const FIELD_TYPES: { value: FormFieldType; label: string; auditOnly?: boolean }[] = [
@@ -99,11 +100,12 @@ function SkeletonCard() {
 
 // ── Type badge ────────────────────────────────────────────────────────────────
 function TypeBadge({ type }: { type: FormType }) {
+  const { t } = useTranslation();
   const label =
-    type === "checklist" ? "Checklist"
-    : type === "audit" ? "Audit"
-    : type === "pull_out" ? "Pull-Out"
-    : "Form";
+    type === "checklist" ? t("forms.typeChecklist")
+    : type === "audit" ? t("forms.typeAudit")
+    : type === "pull_out" ? t("forms.typePullOut")
+    : t("forms.typeForm");
   const color =
     type === "checklist" ? "bg-sprout-green"
     : type === "audit" ? "bg-amber-500"
@@ -1415,7 +1417,8 @@ function SubmissionDetailModal({
   submissionId: string;
   onClose: () => void;
   onReviewed: () => void;
-}) {
+) {
+  const { t } = useTranslation();
   const [detail, setDetail] = useState<FormSubmissionDetail | null>(null);
   const [template, setTemplate] = useState<import("@/types").FormTemplate | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1507,12 +1510,12 @@ function SubmissionDetailModal({
                       passed ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"
                     )}>
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-dark">Audit Score</span>
+                        <span className="text-sm font-semibold text-dark">{t("forms.auditScore")}</span>
                         <span className={clsx(
                           "px-2.5 py-1 rounded-full text-xs font-bold",
                           passed ? "bg-sprout-green text-white" : "bg-red-500 text-white"
                         )}>
-                          {passed ? "PASSED" : "FAILED"}
+                          {passed ? t("forms.passed") : t("forms.failed")}
                         </span>
                       </div>
                       <div className="flex items-end gap-2">
@@ -1901,6 +1904,7 @@ function groupByDate(items: FormSubmissionListItem[]): { label: string; items: F
 }
 
 function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | null }) {
+  const { t } = useTranslation();
   const [items, setItems] = useState<FormSubmissionListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -1963,7 +1967,7 @@ function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | nu
 
   // Filter the template dropdown by type when type filter is active
   const filteredTemplateOptions = typeFilter
-    ? templateOptions.filter((t) => t.type === typeFilter)
+    ? templateOptions.filter((tmpl) => tmpl.type === typeFilter)
     : templateOptions;
 
   const searchedItems = submissionSearch
@@ -1975,19 +1979,19 @@ function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | nu
   const groups = groupByDate(searchedItems);
 
   const statusOptions = [
-    { value: "", label: "All" },
-    { value: "submitted", label: "Pending" },
-    { value: "approved", label: "Approved" },
-    { value: "rejected", label: "Rejected" },
-    { value: "draft", label: "Drafts" },
+    { value: "", label: t("forms.filterAll") },
+    { value: "submitted", label: t("forms.filterPending") },
+    { value: "approved", label: t("forms.filterApproved") },
+    { value: "rejected", label: t("forms.filterRejected") },
+    { value: "draft", label: t("forms.filterDrafts") },
   ];
 
   const typeOptions = [
-    { value: "", label: "All types" },
-    { value: "checklist", label: "Checklist" },
-    { value: "form", label: "Form" },
-    { value: "audit", label: "Audit" },
-    { value: "pull_out", label: "Pull-Out" },
+    { value: "", label: t("forms.filterAllTypes") },
+    { value: "checklist", label: t("forms.typeChecklist") },
+    { value: "form", label: t("forms.typeForm") },
+    { value: "audit", label: t("forms.typeAudit") },
+    { value: "pull_out", label: t("forms.typePullOut") },
   ];
 
   return (
@@ -2199,6 +2203,7 @@ function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | nu
 
 // ── Staff: My Assignments View ─────────────────────────────────────────────────
 function MyAssignmentsView() {
+  const { t } = useTranslation();
   const router = useRouter();
   const [assignments, setAssignments] = useState<FormAssignment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2227,9 +2232,9 @@ function MyAssignmentsView() {
       {!loading && (
         <div className="grid grid-cols-3 gap-3">
           {([
-            { label: "Assigned",  value: assignments.length,  onClick: () => setTab("todo"),      icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple", active: false        },
-            { label: "To Do",     value: todoList.length,     onClick: () => setTab("todo"),      icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500",    active: tab === "todo"       },
-            { label: "Completed", value: completedList.length, onClick: () => setTab("completed"), icon: CheckCircle2,  bg: "bg-sprout-green/10",  color: "text-sprout-green", active: tab === "completed"  },
+            { label: t("forms.tabAssigned"),  value: assignments.length,   onClick: () => setTab("todo"),      icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple", active: false               },
+            { label: t("forms.tabToDo"),      value: todoList.length,      onClick: () => setTab("todo"),      icon: Clock,         bg: "bg-amber-50",         color: "text-amber-500",    active: tab === "todo"       },
+            { label: t("forms.tabCompleted"), value: completedList.length, onClick: () => setTab("completed"), icon: CheckCircle2,  bg: "bg-sprout-green/10",  color: "text-sprout-green", active: tab === "completed"  },
           ]).map(({ label, value, onClick, icon: Icon, bg, color, active }) => (
             <button
               key={label}
@@ -2713,6 +2718,7 @@ function NewTemplateModal({
   onSelectAi: () => void;
   onSelectStarter: (prefill: TemplateFormValues) => void;
 }) {
+  const { t } = useTranslation();
   const [mode, setMode] = useState<"select" | "template">("select");
   const [starters, setStarters] = useState<FormStarterItem[]>(FORM_STARTERS);
 
@@ -2796,7 +2802,7 @@ function NewTemplateModal({
                   <Sparkles className="w-5 h-5 text-sprout-purple" />
                 </div>
                 <div>
-                  <p className="font-semibold text-xs bg-gradient-to-r from-violet-600 to-purple-500 bg-clip-text text-transparent">Generate with Sidekick</p>
+                  <p className="font-semibold text-xs bg-gradient-to-r from-violet-600 to-purple-500 bg-clip-text text-transparent">{t("forms.generateWithSidekick")}</p>
                   <p className="text-[11px] text-dark/50 mt-0.5 leading-snug">Describe it, Sidekick builds the fields</p>
                 </div>
               </button>
@@ -2804,7 +2810,7 @@ function NewTemplateModal({
                 className="flex flex-col items-center text-center gap-3 p-4 rounded-2xl border-2 border-surface-border hover:border-sprout-purple hover:shadow-sm transition-all">
                 <div className="w-11 h-11 rounded-xl bg-green-50 flex items-center justify-center text-2xl">➕</div>
                 <div>
-                  <p className="font-semibold text-dark text-xs">Start Blank</p>
+                  <p className="font-semibold text-dark text-xs">{t("forms.startBlank")}</p>
                   <p className="text-[11px] text-dark/50 mt-0.5 leading-snug">Build every field yourself</p>
                 </div>
               </button>

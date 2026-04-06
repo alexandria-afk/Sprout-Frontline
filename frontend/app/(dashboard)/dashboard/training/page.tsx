@@ -17,6 +17,7 @@ import {
 } from "@/services/lms";
 import { EnrollStaffModal } from "./courses/_components/EnrollStaffModal";
 import clsx from "clsx";
+import { useTranslation } from "@/lib/i18n";
 
 // Status styling
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
@@ -35,6 +36,7 @@ const GAP_SEVERITY: Record<string, { bg: string; text: string; border: string; i
 
 // ── Staff: My Training ────────────────────────────────────────────────────────
 function MyTraining({ name, userRole }: { name: string; userRole: string }) {
+  const { t } = useTranslation();
   const router = useRouter();
   const [enrollments, setEnrollments] = useState<CourseEnrollment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -122,9 +124,9 @@ function MyTraining({ name, userRole }: { name: string; userRole: string }) {
     <div className="flex flex-col gap-4 md:gap-6">
       {/* Hero */}
       <div className="bg-white rounded-xl border border-surface-border px-6 py-5">
-        <p className="text-xl font-bold text-dark">My Training 🎓</p>
+        <p className="text-xl font-bold text-dark">{t("training.staffTitle")} 🎓</p>
         <p className="text-sm text-dark-secondary mt-1">
-          {loading ? "Loading your courses…" : enrollments.length === 0
+          {loading ? t("common.loading") : enrollments.length === 0
             ? "No courses assigned yet. Check back soon!"
             : `You have ${enrollments.length} course${enrollments.length !== 1 ? "s" : ""} — ${passed.length} completed.`}
         </p>
@@ -134,9 +136,9 @@ function MyTraining({ name, userRole }: { name: string; userRole: string }) {
       {!loading && (
         <div className="grid grid-cols-3 gap-3">
           {[
-            { label: "In Progress", value: inProgress.length, icon: Clock,         bg: "bg-blue-50",          color: "text-blue-600" },
-            { label: "Not Started", value: notStarted.length, icon: BookOpen,      bg: "bg-gray-100",         color: "text-gray-600" },
-            { label: "Completed",   value: passed.length,     icon: CheckCircle2,  bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+            { label: t("training.statInProgress"), value: inProgress.length, icon: Clock,         bg: "bg-blue-50",          color: "text-blue-600" },
+            { label: t("training.statNotStarted"), value: notStarted.length, icon: BookOpen,      bg: "bg-gray-100",         color: "text-gray-600" },
+            { label: t("training.statCompleted"),  value: passed.length,     icon: CheckCircle2,  bg: "bg-sprout-green/10",  color: "text-sprout-green" },
           ].map(({ label, value, icon: Icon, bg, color }) => (
             <div key={label} className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2">
               <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
@@ -228,25 +230,25 @@ function MyTraining({ name, userRole }: { name: string; userRole: string }) {
         <div className="flex flex-col gap-3">
           {inProgress.length > 0 && (
             <>
-              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1">Continue Learning</p>
+              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1">{t("training.continueLearning")}</p>
               {inProgress.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
             </>
           )}
           {notStarted.length > 0 && (
             <>
-              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">Assigned</p>
+              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">{t("training.assigned")}</p>
               {notStarted.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
             </>
           )}
           {passed.length > 0 && (
             <>
-              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">Completed</p>
+              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">{t("training.statCompleted")}</p>
               {passed.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
             </>
           )}
           {failed.length > 0 && (
             <>
-              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">Needs Retry</p>
+              <p className="text-xs font-semibold text-dark-secondary uppercase tracking-wide px-1 mt-2">{t("training.needsRetry")}</p>
               {failed.map(e => <CourseCard key={e.id} enrollment={e} onClick={() => router.push(`/dashboard/training/learn/${e.id}`)} />)}
             </>
           )}
@@ -370,6 +372,7 @@ function CourseCard({ enrollment, onClick }: { enrollment: CourseEnrollment; onC
 
 // ── Admin/Manager: Training Overview (full course management) ─────────────────
 function TrainingOverview() {
+  const { t } = useTranslation();
   const router = useRouter();
 
   // Analytics
@@ -485,8 +488,8 @@ function TrainingOverview() {
             <GraduationCap className="w-5 h-5 text-sprout-green" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-dark">Training</h1>
-            <p className="text-sm text-dark-secondary">Manage courses and track team progress</p>
+            <h1 className="text-2xl font-bold text-dark">{t("training.pageTitle")}</h1>
+            <p className="text-sm text-dark-secondary">{t("training.pageSubtitle")}</p>
           </div>
         </div>
         <button
@@ -505,10 +508,10 @@ function TrainingOverview() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            { label: "Total Enrollments", value: analytics?.total_enrollments ?? 0,   icon: BookOpen,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Completion Rate",   value: `${analytics?.completion_rate ?? 0}%`, icon: CheckCircle2, bg: "bg-sprout-green/10",  color: "text-sprout-green" },
-            { label: "In Progress",       value: analytics?.in_progress ?? 0,          icon: Clock,        bg: "bg-blue-50",          color: "text-blue-600" },
-            { label: "Failed",            value: analytics?.failed ?? 0,               icon: AlertCircle,  bg: "bg-red-50",           color: "text-red-500" },
+            { label: t("training.statTotalEnrollments"), value: analytics?.total_enrollments ?? 0,     icon: BookOpen,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: t("training.statCompletionRate"),   value: `${analytics?.completion_rate ?? 0}%`, icon: CheckCircle2, bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+            { label: t("training.statInProgress"),       value: analytics?.in_progress ?? 0,           icon: Clock,        bg: "bg-blue-50",          color: "text-blue-600" },
+            { label: t("training.statFailed"),           value: analytics?.failed ?? 0,                icon: AlertCircle,  bg: "bg-red-50",           color: "text-red-500" },
           ].map(({ label, value, icon: Icon, bg, color }) => (
             <div key={label} className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2">
               <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>

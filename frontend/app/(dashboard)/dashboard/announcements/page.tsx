@@ -13,6 +13,7 @@ import { listLocations, type Location } from "@/services/users";
 import type { Announcement } from "@/types";
 import { AnnouncementCard, isVideo, proxied } from "@/components/announcements/AnnouncementCard";
 import { friendlyError } from "@/lib/errors";
+import { useTranslation } from "@/lib/i18n";
 
 // ── Shared ──────────────────────────────────────────────────────────────────
 const inputCls = "border border-surface-border rounded-lg px-3 py-2 text-sm text-dark focus:outline-none focus:ring-2 focus:ring-sprout-purple/40 w-full";
@@ -371,6 +372,7 @@ function CreateAnnouncementModal({ onClose, onSuccess }: { onClose: () => void; 
 
 // ── Main Page ───────────────────────────────────────────────────────────────
 export default function AnnouncementsPage() {
+  const { t } = useTranslation();
   const { announcements, total, loading, error, fetchAnnouncements, addAnnouncement, removeAnnouncement } =
     useAnnouncementStore();
   const [showCreate, setShowCreate] = useState(false);
@@ -407,8 +409,8 @@ export default function AnnouncementsPage() {
               <Megaphone className="w-5 h-5 text-sprout-purple" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-dark">Announcements</h1>
-              <p className="text-sm text-dark-secondary">{total} total</p>
+              <h1 className="text-2xl font-bold text-dark">{t("announcements.pageTitle")}</h1>
+              <p className="text-sm text-dark-secondary">{total} {t("announcements.total")}</p>
             </div>
           </div>
           {!isStaff && (
@@ -431,14 +433,14 @@ export default function AnnouncementsPage() {
           const targeted = announcements.filter(a => (a.target_roles?.length ?? 0) > 0 || (a.target_location_ids?.length ?? 0) > 0).length;
 
           const staffCards = [
-            { label: "Total",                value: total,    icon: Megaphone,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Need Acknowledgement", value: unacked,  icon: CheckCircle2,  bg: "bg-amber-50",         color: "text-amber-500"    },
+            { label: t("announcements.statTotal"),   value: total,    icon: Megaphone,    bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: t("announcements.statNeedAck"), value: unacked,  icon: CheckCircle2, bg: "bg-amber-50",         color: "text-amber-500"    },
           ];
           const managerCards = [
-            { label: "Total",               value: total,     icon: Megaphone,     bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Require Ack",         value: needsAck,  icon: Bell,          bg: "bg-amber-50",         color: "text-amber-500"    },
-            { label: "Targeted",            value: targeted,  icon: Users,         bg: "bg-blue-50",          color: "text-blue-600"     },
-            { label: "With Media",          value: withMedia, icon: Film,          bg: "bg-sprout-green/10",  color: "text-sprout-green" },
+            { label: t("announcements.statTotal"),      value: total,     icon: Megaphone, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: t("announcements.statRequireAck"), value: needsAck,  icon: Bell,      bg: "bg-amber-50",         color: "text-amber-500"    },
+            { label: t("announcements.statTargeted"),   value: targeted,  icon: Users,     bg: "bg-blue-50",          color: "text-blue-600"     },
+            { label: t("announcements.statWithMedia"),  value: withMedia, icon: Film,      bg: "bg-sprout-green/10",  color: "text-sprout-green" },
           ];
           const cards = isStaff ? staffCards : managerCards;
           return (

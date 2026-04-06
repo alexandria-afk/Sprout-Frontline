@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { Trophy, Info, ChevronRight } from "lucide-react";
+import { useTranslation } from "@/lib/i18n";
 import { createClient } from "@/services/supabase/client";
 import { friendlyError } from "@/lib/errors";
 import {
@@ -450,6 +451,7 @@ function MyBadgesTab({
 type Tab = "rankings" | "my_badges";
 
 export default function SafetyPage() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<Tab>("rankings");
   const [leaderboards, setLeaderboards] = useState<LeaderboardConfig[]>([]);
   const [myBadges, setMyBadges] = useState<BadgeAward[]>([]);
@@ -487,8 +489,8 @@ export default function SafetyPage() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const tabs: { key: Tab; label: string }[] = [
-    { key: "rankings", label: "Rankings" },
-    { key: "my_badges", label: "My Badges" },
+    { key: "rankings",  label: t("leaderboard.tabRankings")  },
+    { key: "my_badges", label: t("leaderboard.tabMyBadges")  },
   ];
 
   return (
@@ -500,8 +502,8 @@ export default function SafetyPage() {
             <Trophy className="w-5 h-5 text-sprout-purple" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-dark leading-tight">Leaderboard</h1>
-            <p className="text-sm text-dark-secondary">Rankings across your organisation</p>
+            <h1 className="text-2xl font-bold text-dark leading-tight">{t("leaderboard.pageTitle")}</h1>
+            <p className="text-sm text-dark-secondary">{t("leaderboard.pageSubtitle")}</p>
           </div>
         </div>
         {myPoints != null && (

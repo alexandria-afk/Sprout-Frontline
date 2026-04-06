@@ -102,6 +102,16 @@
   },
   "issues": {
     "pageTitle": "งานและปัญหา",
+    "pageSubtitleManager": "ติดตามปัญหา งาน และรายงานเหตุการณ์ในองค์กร",
+    "pageSubtitleStaff": "รายงานปัญหาและติดตามงานที่ได้รับมอบหมาย",
+    "reportAProblem": "รายงานปัญหา",
+    "details": "รายละเอียด",
+    "location": "สถานที่",
+    "whereExactly": "ตำแหน่งที่แน่ชัด",
+    "equipment": "อุปกรณ์",
+    "safetyRisk": "มีผู้บาดเจ็บ / ความเสี่ยงด้านความปลอดภัย",
+    "photo": "รูปภาพ",
+    "manageIssue": "จัดการปัญหา",
     "tabs": {
       "tasks": "งาน",
       "issues": "ปัญหา",
@@ -120,6 +130,20 @@
     }
   },
   "shifts": {
+    "pageTitle": "กะและการเข้างาน",
+    "pageSubtitleManager": "จัดการตาราง การเข้างาน และการลา",
+    "pageSubtitleStaff": "ตารางงาน การบันทึกเวลา และการลาของคุณ",
+    "statTodaysShifts": "กะวันนี้",
+    "statOpenShifts": "กะเปิด",
+    "statPendingLeave": "การลาที่รอดำเนินการ",
+    "statTeamHours": "ชั่วโมงทีมสัปดาห์นี้",
+    "statMyShifts": "กะของฉันสัปดาห์นี้",
+    "statHoursThisWeek": "ชั่วโมงสัปดาห์นี้",
+    "statApprovedLeave": "การลาที่อนุมัติแล้ว",
+    "statPublished": "เผยแพร่แล้ว",
+    "statAwaitingStaff": "รอพนักงาน",
+    "statNeedsReview": "ต้องตรวจสอบ",
+    "statDaysApproved": "วันที่อนุมัติแล้ว",
     "mySchedule": "ตารางของฉัน",
     "openShifts": "กะเปิด",
     "shiftSwap": "สลับกะ",
@@ -190,5 +214,58 @@
     "english": "English",
     "thai": "ไทย (Thai)",
     "switchTo": "เปลี่ยนเป็น"
+  },
+  "tasks": {
+    "subtitleManager": "มอบหมายและติดตามงานของทีม",
+    "subtitleStaff": "งานที่ได้รับมอบหมายของคุณ"
+  },
+  "forms": {
+    "typeChecklist": "รายการตรวจสอบ",
+    "generateWithSidekick": "สร้างด้วย Sidekick",
+    "startBlank": "เริ่มจากว่างเปล่า",
+    "typeAudit": "การตรวจสอบ",
+    "typePullOut": "การถอน",
+    "typeForm": "แบบฟอร์ม",
+    "filterAll": "ทั้งหมด",
+    "filterPending": "รอดำเนินการ",
+    "filterApproved": "อนุมัติแล้ว",
+    "filterRejected": "ปฏิเสธแล้ว",
+    "filterDrafts": "ร่าง",
+    "filterAllTypes": "ทุกประเภท",
+    "tabAssigned": "ที่ได้รับมอบหมาย",
+    "tabToDo": "ที่ต้องทำ",
+    "tabCompleted": "เสร็จสิ้น",
+    "auditScore": "คะแนนการตรวจสอบ",
+    "passed": "ผ่าน",
+    "failed": "ไม่ผ่าน"
+  },
+  "announcements": {
+    "pageTitle": "ประกาศ",
+    "total": "ทั้งหมด",
+    "statTotal": "ทั้งหมด",
+    "statNeedAck": "ต้องรับทราบ",
+    "statRequireAck": "ต้องรับทราบ",
+    "statTargeted": "กำหนดเป้าหมาย",
+    "statWithMedia": "มีสื่อ"
+  },
+  "training": {
+    "pageTitle": "การฝึกอบรม",
+    "pageSubtitle": "จัดการคอร์สและติดตามความคืบหน้าของทีม",
+    "staffTitle": "การฝึกอบรมของฉัน",
+    "statInProgress": "กำลังดำเนินการ",
+    "statNotStarted": "ยังไม่เริ่ม",
+    "statCompleted": "เสร็จสิ้น",
+    "statTotalEnrollments": "การลงทะเบียนทั้งหมด",
+    "statCompletionRate": "อัตราการสำเร็จ",
+    "statFailed": "ไม่ผ่าน",
+    "continueLearning": "เรียนต่อ",
+    "assigned": "ที่ได้รับมอบหมาย",
+    "needsRetry": "ต้องลองใหม่"
+  },
+  "leaderboard": {
+    "pageTitle": "กระดานอันดับ",
+    "pageSubtitle": "การจัดอันดับในองค์กรของคุณ",
+    "tabRankings": "การจัดอันดับ",
+    "tabMyBadges": "ป้ายของฉัน"
   }
 }

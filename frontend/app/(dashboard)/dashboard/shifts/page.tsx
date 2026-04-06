@@ -3129,9 +3129,9 @@ export default function ShiftsPage() {
           <CalendarClock className="w-5 h-5 text-sprout-purple" />
         </div>
         <div>
-          <h1 className="text-xl font-bold text-dark">Shifts & Attendance</h1>
+          <h1 className="text-xl font-bold text-dark">{t("shifts.pageTitle")}</h1>
           <p className="text-sm text-dark-secondary">
-            {isManager ? "Manage schedules, attendance, and leave" : "Your schedule, time tracking, and leave"}
+            {isManager ? t("shifts.pageSubtitleManager") : t("shifts.pageSubtitleStaff")}
           </p>
         </div>
       </div>
@@ -3141,31 +3141,31 @@ export default function ShiftsPage() {
         {isManager ? (
           <>
             <StatCard
-              label="Today's Shifts"
+              label={t("shifts.statTodaysShifts")}
               value={todayShifts}
               icon={Calendar}
               iconBg="bg-blue-50"
               iconColor="text-blue-600"
-              sub="Published"
+              sub={t("shifts.statPublished")}
             />
             <StatCard
-              label="Open Shifts"
+              label={t("shifts.statOpenShifts")}
               value={openShiftsCount}
               icon={User}
               iconBg={openShiftsCount > 0 ? "bg-amber-50" : "bg-gray-100"}
               iconColor={openShiftsCount > 0 ? "text-amber-600" : "text-gray-400"}
-              sub="Awaiting staff"
+              sub={t("shifts.statAwaitingStaff")}
             />
             <StatCard
-              label="Pending Leave"
+              label={t("shifts.statPendingLeave")}
               value={pendingLeaveCount}
               icon={Coffee}
               iconBg={pendingLeaveCount > 0 ? "bg-orange-50" : "bg-gray-100"}
               iconColor={pendingLeaveCount > 0 ? "text-orange-600" : "text-gray-400"}
-              sub="Needs review"
+              sub={t("shifts.statNeedsReview")}
             />
             <StatCard
-              label="Team Hours This Week"
+              label={t("shifts.statTeamHours")}
               value={hoursThisWeek !== null ? `${hoursThisWeek}h` : "—"}
               icon={Clock}
               iconBg="bg-green-50"
@@ -3175,33 +3175,33 @@ export default function ShiftsPage() {
         ) : (
           <>
             <StatCard
-              label="My Shifts This Week"
+              label={t("shifts.statMyShifts")}
               value={myShiftsCount}
               icon={Calendar}
               iconBg="bg-blue-50"
               iconColor="text-blue-600"
             />
             <StatCard
-              label="Hours This Week"
+              label={t("shifts.statHoursThisWeek")}
               value={hoursThisWeek !== null ? `${hoursThisWeek}h` : "—"}
               icon={Clock}
               iconBg="bg-green-50"
               iconColor="text-green-600"
             />
             <StatCard
-              label="Pending Leave"
+              label={t("shifts.statPendingLeave")}
               value={pendingLeaveCount}
               icon={Coffee}
               iconBg={pendingLeaveCount > 0 ? "bg-amber-50" : "bg-gray-100"}
               iconColor={pendingLeaveCount > 0 ? "text-amber-600" : "text-gray-400"}
             />
             <StatCard
-              label="Approved Leave"
+              label={t("shifts.statApprovedLeave")}
               value={approvedLeaveCount}
               icon={FileText}
               iconBg={approvedLeaveCount > 0 ? "bg-teal-50" : "bg-gray-100"}
               iconColor={approvedLeaveCount > 0 ? "text-teal-600" : "text-gray-400"}
-              sub="Days approved"
+              sub={t("shifts.statDaysApproved")}
             />
           </>
         )}

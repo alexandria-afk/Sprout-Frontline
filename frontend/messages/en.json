@@ -102,6 +102,16 @@
   },
   "issues": {
     "pageTitle": "Tasks & Issues",
+    "pageSubtitleManager": "Track issues, tasks, and incident reports across your organisation",
+    "pageSubtitleStaff": "Report problems and track your assigned tasks",
+    "reportAProblem": "Report a Problem",
+    "details": "Details",
+    "location": "Location",
+    "whereExactly": "Where Exactly",
+    "equipment": "Equipment",
+    "safetyRisk": "Anyone Hurt / Safety Risk",
+    "photo": "Photo",
+    "manageIssue": "Manage Issue",
     "tabs": {
       "tasks": "Tasks",
       "issues": "Issues",
@@ -120,6 +130,20 @@
     }
   },
   "shifts": {
+    "pageTitle": "Shifts & Attendance",
+    "pageSubtitleManager": "Manage schedules, attendance, and leave",
+    "pageSubtitleStaff": "Your schedule, time tracking, and leave",
+    "statTodaysShifts": "Today's Shifts",
+    "statOpenShifts": "Open Shifts",
+    "statPendingLeave": "Pending Leave",
+    "statTeamHours": "Team Hours This Week",
+    "statMyShifts": "My Shifts This Week",
+    "statHoursThisWeek": "Hours This Week",
+    "statApprovedLeave": "Approved Leave",
+    "statPublished": "Published",
+    "statAwaitingStaff": "Awaiting staff",
+    "statNeedsReview": "Needs review",
+    "statDaysApproved": "Days approved",
     "mySchedule": "My Schedule",
     "openShifts": "Open Shifts",
     "shiftSwap": "Shift Swap",
@@ -190,5 +214,58 @@
     "english": "English",
     "thai": "ไทย (Thai)",
     "switchTo": "Switch to"
+  },
+  "tasks": {
+    "subtitleManager": "Assign and track tasks across your team",
+    "subtitleStaff": "Your assigned tasks"
+  },
+  "forms": {
+    "typeChecklist": "Checklist",
+    "generateWithSidekick": "Generate with Sidekick",
+    "startBlank": "Start Blank",
+    "typeAudit": "Audit",
+    "typePullOut": "Pull-Out",
+    "typeForm": "Form",
+    "filterAll": "All",
+    "filterPending": "Pending",
+    "filterApproved": "Approved",
+    "filterRejected": "Rejected",
+    "filterDrafts": "Drafts",
+    "filterAllTypes": "All types",
+    "tabAssigned": "Assigned",
+    "tabToDo": "To Do",
+    "tabCompleted": "Completed",
+    "auditScore": "Audit Score",
+    "passed": "PASSED",
+    "failed": "FAILED"
+  },
+  "announcements": {
+    "pageTitle": "Announcements",
+    "total": "total",
+    "statTotal": "Total",
+    "statNeedAck": "Need Acknowledgement",
+    "statRequireAck": "Require Ack",
+    "statTargeted": "Targeted",
+    "statWithMedia": "With Media"
+  },
+  "training": {
+    "pageTitle": "Training",
+    "pageSubtitle": "Manage courses and track team progress",
+    "staffTitle": "My Training",
+    "statInProgress": "In Progress",
+    "statNotStarted": "Not Started",
+    "statCompleted": "Completed",
+    "statTotalEnrollments": "Total Enrollments",
+    "statCompletionRate": "Completion Rate",
+    "statFailed": "Failed",
+    "continueLearning": "Continue Learning",
+    "assigned": "Assigned",
+    "needsRetry": "Needs Retry"
+  },
+  "leaderboard": {
+    "pageTitle": "Leaderboard",
+    "pageSubtitle": "Rankings across your organisation",
+    "tabRankings": "Rankings",
+    "tabMyBadges": "My Badges"
   }
 }

@@ -89,10 +89,7 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
   }, []);
 
   async function handleSignOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    router.push("/login");
-    router.refresh();
+    window.location.href = "/api/auth/signout";
   }
 
   const hrefPath = (href: string) => href.split("?")[0];
