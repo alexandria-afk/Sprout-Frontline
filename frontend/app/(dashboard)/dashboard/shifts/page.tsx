@@ -36,6 +36,7 @@ import type {
   ShiftStatus, AttendanceStatus,
 } from "@/types";
 import type { Profile } from "@/types";
+import { useTranslation } from "@/lib/i18n";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -50,20 +51,20 @@ const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DAY_NAMES_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const LEAVE_TYPES = ["annual", "sick", "emergency", "unpaid", "other"] as const;
 
-const SHIFT_STATUS_CONFIG: Record<ShiftStatus, { label: string; bg: string; text: string; dot: string }> = {
-  draft:      { label: "Draft",     bg: "bg-gray-100",    text: "text-gray-600",   dot: "bg-gray-400"    },
-  published:  { label: "Published", bg: "bg-green-100",   text: "text-green-700",  dot: "bg-green-500"   },
-  open:       { label: "Open",      bg: "bg-blue-100",    text: "text-blue-700",   dot: "bg-blue-500"    },
-  claimed:    { label: "Claimed",   bg: "bg-amber-100",   text: "text-amber-700",  dot: "bg-amber-500"   },
-  cancelled:  { label: "Cancelled", bg: "bg-red-100",     text: "text-red-600",    dot: "bg-red-400"     },
+const SHIFT_STATUS_CONFIG: Record<ShiftStatus, { labelKey: string; bg: string; text: string; dot: string }> = {
+  draft:      { labelKey: "status.draft",          bg: "bg-gray-100",    text: "text-gray-600",   dot: "bg-gray-400"    },
+  published:  { labelKey: "status.published",      bg: "bg-green-100",   text: "text-green-700",  dot: "bg-green-500"   },
+  open:       { labelKey: "status.open",           bg: "bg-blue-100",    text: "text-blue-700",   dot: "bg-blue-500"    },
+  claimed:    { labelKey: "shifts.status.claimed", bg: "bg-amber-100",   text: "text-amber-700",  dot: "bg-amber-500"   },
+  cancelled:  { labelKey: "status.cancelled",      bg: "bg-red-100",     text: "text-red-600",    dot: "bg-red-400"     },
 };
 
-const ATTENDANCE_STATUS_CONFIG: Record<AttendanceStatus, { label: string; bg: string; text: string }> = {
-  present:          { label: "Present",        bg: "bg-green-100",  text: "text-green-700"  },
-  late:             { label: "Late",           bg: "bg-amber-100",  text: "text-amber-700"  },
-  early_departure:  { label: "Early Departure",bg: "bg-orange-100", text: "text-orange-700" },
-  absent:           { label: "Absent",         bg: "bg-red-100",    text: "text-red-600"    },
-  unverified:       { label: "Unverified",     bg: "bg-gray-100",   text: "text-gray-600"   },
+const ATTENDANCE_STATUS_CONFIG: Record<AttendanceStatus, { labelKey: string; bg: string; text: string }> = {
+  present:          { labelKey: "attendance.present",            bg: "bg-green-100",  text: "text-green-700"  },
+  late:             { labelKey: "shifts.status.late",            bg: "bg-amber-100",  text: "text-amber-700"  },
+  early_departure:  { labelKey: "shifts.status.earlyDeparture",  bg: "bg-orange-100", text: "text-orange-700" },
+  absent:           { labelKey: "attendance.absent",             bg: "bg-red-100",    text: "text-red-600"    },
+  unverified:       { labelKey: "shifts.status.unverified",      bg: "bg-gray-100",   text: "text-gray-600"   },
 };
 
 const inputCls = "border border-surface-border rounded-lg px-3 py-2 text-sm text-dark focus:outline-none focus:ring-2 focus:ring-sprout-purple/40 w-full bg-white";
@@ -147,6 +148,7 @@ function Banner({ type, message, onDismiss }: { type: "success" | "error"; messa
 // ── Status Badge ──────────────────────────────────────────────────────────────
 
 function ShiftBadge({ status, isOpenShift, testId }: { status: ShiftStatus; isOpenShift?: boolean; testId?: string }) {
+  const { t } = useTranslation();
   const effectiveStatus: ShiftStatus = isOpenShift && status !== "cancelled" && status !== "draft" ? "open" : status;
   const cfg = SHIFT_STATUS_CONFIG[effectiveStatus];
   return (
@@ -154,16 +156,17 @@ function ShiftBadge({ status, isOpenShift, testId }: { status: ShiftStatus; isOp
       data-testid={testId}
       className={clsx("text-xs font-medium px-2 py-0.5 rounded-full", cfg.bg, cfg.text)}
     >
-      {cfg.label}
+      {t(cfg.labelKey)}
     </span>
   );
 }
 
 function AttBadge({ status }: { status: AttendanceStatus }) {
+  const { t } = useTranslation();
   const cfg = ATTENDANCE_STATUS_CONFIG[status];
   return (
     <span className={clsx("text-xs font-medium px-2 py-0.5 rounded-full", cfg.bg, cfg.text)}>
-      {cfg.label}
+      {t(cfg.labelKey)}
     </span>
   );
 }
@@ -2688,6 +2691,7 @@ function StaffOpenShifts() {
 // ── Staff: Shift Swap ─────────────────────────────────────────────────────────
 
 function StaffSwaps({ userId }: { userId: string }) {
+  const { t } = useTranslation();
   const [swaps, setSwaps] = useState<ShiftSwapRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
@@ -2724,12 +2728,12 @@ function StaffSwaps({ userId }: { userId: string }) {
     } finally { setSubmitting(false); }
   }
 
-  const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
-    pending_peer:    { label: "Awaiting peer",     cls: "bg-amber-100 text-amber-700" },
-    pending_manager: { label: "Awaiting approval", cls: "bg-amber-100 text-amber-700" },
-    approved:        { label: "Approved",           cls: "bg-green-100 text-green-700" },
-    rejected:        { label: "Declined",           cls: "bg-red-100 text-red-600"    },
-    cancelled:       { label: "Cancelled",          cls: "bg-gray-100 text-gray-500"  },
+  const STATUS_LABEL: Record<string, { labelKey: string; cls: string }> = {
+    pending_peer:    { labelKey: "shifts.status.awaitingPeer",     cls: "bg-amber-100 text-amber-700" },
+    pending_manager: { labelKey: "shifts.status.awaitingApproval", cls: "bg-amber-100 text-amber-700" },
+    approved:        { labelKey: "status.approved",                 cls: "bg-green-100 text-green-700" },
+    rejected:        { labelKey: "shifts.status.declined",          cls: "bg-red-100 text-red-600"    },
+    cancelled:       { labelKey: "status.cancelled",                cls: "bg-gray-100 text-gray-500"  },
   };
 
   return (
@@ -2802,7 +2806,7 @@ function StaffSwaps({ userId }: { userId: string }) {
                     </p>
                   </div>
                   <span className={clsx("text-xs font-medium px-2 py-0.5 rounded-full shrink-0", meta.cls)}>
-                    {meta.label}
+                    {t(meta.labelKey)}
                   </span>
                 </div>
               </div>
@@ -2995,6 +2999,7 @@ function StaffAvailabilityTab() {
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function ShiftsPage() {
+  const { t } = useTranslation();
   const [role, setRole] = useState<string>("staff");
   const [userId, setUserId] = useState<string>("");
   const [locationId, setLocationId] = useState<string>("");
@@ -3088,23 +3093,23 @@ export default function ShiftsPage() {
   }, []);
 
   const MANAGER_TABS: { id: ManagerTab; label: string; icon: React.ElementType }[] = [
-    { id: "roster",     label: "Roster",     icon: Calendar      },
-    { id: "open",       label: "Open Shifts",icon: BarChart3      },
-    { id: "swaps",      label: "Swaps",      icon: ArrowRightLeft },
-    { id: "timesheets", label: "Timesheets", icon: Clock          },
-    { id: "leave",      label: "Leave",      icon: Coffee         },
-    { id: "templates",  label: "Templates",  icon: ClipboardList  },
+    { id: "roster",     label: t("shifts.roster"),     icon: Calendar      },
+    { id: "open",       label: t("shifts.openShifts"), icon: BarChart3      },
+    { id: "swaps",      label: t("shifts.swaps"),      icon: ArrowRightLeft },
+    { id: "timesheets", label: t("shifts.timesheets"), icon: Clock          },
+    { id: "leave",      label: t("shifts.leave"),      icon: Coffee         },
+    { id: "templates",  label: t("shifts.templates"),  icon: ClipboardList  },
   ];
 
   const STAFF_TABS: { id: StaffTab; label: string; icon: React.ElementType }[] = [
-    { id: "schedule",    label: "My Schedule",  icon: Calendar      },
-    { id: "open_shifts", label: "Open Shifts",  icon: CalendarCheck },
-    { id: "swaps",       label: "Shift Swap",   icon: ArrowRightLeft},
-    { id: "clockin",     label: "Clock In/Out", icon: Clock         },
-    { id: "timesheet",   label: "My Timesheet", icon: BarChart3     },
-    { id: "leave",       label: "Leave",        icon: Coffee        },
+    { id: "schedule",    label: t("shifts.mySchedule"),  icon: Calendar      },
+    { id: "open_shifts", label: t("shifts.openShifts"),  icon: CalendarCheck },
+    { id: "swaps",       label: t("shifts.shiftSwap"),   icon: ArrowRightLeft},
+    { id: "clockin",     label: t("shifts.clockInOut"),  icon: Clock         },
+    { id: "timesheet",   label: t("shifts.myTimesheet"), icon: BarChart3     },
+    { id: "leave",       label: t("shifts.leave"),       icon: Coffee        },
     ...(staffAvailabilityEnabled
-      ? [{ id: "availability" as StaffTab, label: "Availability", icon: CalendarClock }]
+      ? [{ id: "availability" as StaffTab, label: t("shifts.availability"), icon: CalendarClock }]
       : []),
   ];
 

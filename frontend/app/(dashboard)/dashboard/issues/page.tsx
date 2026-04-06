@@ -46,6 +46,7 @@ import type {
   TaskSummary,
 } from "@/types";
 import { friendlyError } from "@/lib/errors";
+import { useTranslation } from "@/lib/i18n";
 
 // ── Constants & style helpers ─────────────────────────────────────────────────
 
@@ -78,44 +79,44 @@ function formatDateTime(iso: string) {
 
 // ── Issues constants ──────────────────────────────────────────────────────────
 
-const KANBAN_COLUMNS: { key: IssueStatus; label: string; icon: React.ElementType; iconColor: string }[] = [
-  { key: "open",            label: "Open",            icon: Circle,        iconColor: "text-amber-500"   },
-  { key: "in_progress",     label: "In Progress",     icon: Clock,         iconColor: "text-blue-600"    },
-  { key: "pending_vendor",  label: "Pending Vendor",  icon: Wrench,        iconColor: "text-amber-600"   },
-  { key: "resolved",        label: "Resolved",        icon: CheckCircle2,  iconColor: "text-sprout-green"},
-  { key: "verified_closed", label: "Verified Closed", icon: XCircle,       iconColor: "text-gray-400"    },
+const KANBAN_COLUMNS: { key: IssueStatus; labelKey: string; icon: React.ElementType; iconColor: string }[] = [
+  { key: "open",            labelKey: "status.open",                  icon: Circle,        iconColor: "text-amber-500"   },
+  { key: "in_progress",     labelKey: "status.inProgress",            icon: Clock,         iconColor: "text-blue-600"    },
+  { key: "pending_vendor",  labelKey: "issues.kanban.pendingVendor",  icon: Wrench,        iconColor: "text-amber-600"   },
+  { key: "resolved",        labelKey: "status.resolved",              icon: CheckCircle2,  iconColor: "text-sprout-green"},
+  { key: "verified_closed", labelKey: "issues.kanban.verifiedClosed", icon: XCircle,       iconColor: "text-gray-400"    },
 ];
 
-const ISSUE_PRIORITY_CONFIG: Record<IssuePriority, { label: string; color: string; Icon: React.ElementType }> = {
-  low:      { label: "Low",      color: "bg-gray-100 text-gray-500",   Icon: Flag        },
-  medium:   { label: "Medium",   color: "bg-blue-100 text-blue-600",   Icon: Flag        },
-  high:     { label: "High",     color: "bg-amber-100 text-amber-700", Icon: Flag        },
-  critical: { label: "Critical", color: "bg-red-100 text-red-600",     Icon: ShieldAlert },
+const ISSUE_PRIORITY_CONFIG: Record<IssuePriority, { labelKey: string; color: string; Icon: React.ElementType }> = {
+  low:      { labelKey: "priority.low",      color: "bg-gray-100 text-gray-500",   Icon: Flag        },
+  medium:   { labelKey: "priority.medium",   color: "bg-blue-100 text-blue-600",   Icon: Flag        },
+  high:     { labelKey: "priority.high",     color: "bg-amber-100 text-amber-700", Icon: Flag        },
+  critical: { labelKey: "priority.critical", color: "bg-red-100 text-red-600",     Icon: ShieldAlert },
 };
 
-const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
-  open:             "Open",
-  in_progress:      "In Progress",
-  pending_vendor:   "Pending Vendor",
-  resolved:         "Resolved",
-  verified_closed:  "Verified Closed",
+const ISSUE_STATUS_LABEL_KEYS: Record<IssueStatus, string> = {
+  open:             "status.open",
+  in_progress:      "status.inProgress",
+  pending_vendor:   "issues.kanban.pendingVendor",
+  resolved:         "status.resolved",
+  verified_closed:  "issues.kanban.verifiedClosed",
 };
 
 // ── Tasks constants ───────────────────────────────────────────────────────────
 
-const TASK_PRIORITY_CONFIG: Record<TaskPriority, { label: string; color: string; icon: React.ElementType }> = {
-  low:      { label: "Low",      color: "bg-gray-100 text-gray-500",            icon: Flag        },
-  medium:   { label: "Medium",   color: "bg-blue-100 text-blue-600",            icon: Flag        },
-  high:     { label: "High",     color: "bg-amber-100 text-amber-700",          icon: Flag        },
-  critical: { label: "Critical", color: "bg-red-100 text-red-600",              icon: ShieldAlert },
+const TASK_PRIORITY_CONFIG: Record<TaskPriority, { labelKey: string; color: string; icon: React.ElementType }> = {
+  low:      { labelKey: "priority.low",      color: "bg-gray-100 text-gray-500",            icon: Flag        },
+  medium:   { labelKey: "priority.medium",   color: "bg-blue-100 text-blue-600",            icon: Flag        },
+  high:     { labelKey: "priority.high",     color: "bg-amber-100 text-amber-700",          icon: Flag        },
+  critical: { labelKey: "priority.critical", color: "bg-red-100 text-red-600",              icon: ShieldAlert },
 };
 
-const TASK_STATUS_CONFIG: Record<string, { label: string; color: string; icon: React.ElementType }> = {
-  pending:     { label: "Pending",     color: "bg-gray-100 text-gray-600",            icon: Clock        },
-  in_progress: { label: "In Progress", color: "bg-blue-100 text-blue-700",            icon: RefreshCw    },
-  completed:   { label: "Completed",   color: "bg-sprout-green/10 text-sprout-green", icon: CheckCircle2 },
-  overdue:     { label: "Overdue",     color: "bg-red-100 text-red-600",              icon: AlertTriangle},
-  cancelled:   { label: "Cancelled",   color: "bg-gray-100 text-gray-400",            icon: XCircle      },
+const TASK_STATUS_CONFIG: Record<string, { labelKey: string; color: string; icon: React.ElementType }> = {
+  pending:     { labelKey: "status.pending",    color: "bg-gray-100 text-gray-600",            icon: Clock        },
+  in_progress: { labelKey: "status.inProgress", color: "bg-blue-100 text-blue-700",            icon: RefreshCw    },
+  completed:   { labelKey: "status.completed",  color: "bg-sprout-green/10 text-sprout-green", icon: CheckCircle2 },
+  overdue:     { labelKey: "status.overdue",    color: "bg-red-100 text-red-600",              icon: AlertTriangle},
+  cancelled:   { labelKey: "status.cancelled",  color: "bg-gray-100 text-gray-400",            icon: XCircle      },
 };
 
 const MANAGER_COLS: TaskStatus[] = ["pending", "in_progress", "completed", "cancelled"];
@@ -314,12 +315,13 @@ async function addIncidentComment(id: string, body: string): Promise<IncidentCom
 // ── Shared badge components ───────────────────────────────────────────────────
 
 function IssuePriorityBadge({ priority }: { priority: IssuePriority }) {
+  const { t } = useTranslation();
   const cfg = ISSUE_PRIORITY_CONFIG[priority] ?? ISSUE_PRIORITY_CONFIG.medium;
   const Icon = cfg.Icon;
   return (
     <span className={clsx("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold", cfg.color)}>
       <Icon className="w-3 h-3" />
-      {cfg.label}
+      {t(cfg.labelKey)}
     </span>
   );
 }
@@ -333,31 +335,34 @@ const ISSUE_STATUS_BADGE_COLOR: Record<IssueStatus, string> = {
 };
 
 function IssueStatusBadge({ status }: { status: IssueStatus }) {
+  const { t } = useTranslation();
   return (
     <span className={clsx("inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold", ISSUE_STATUS_BADGE_COLOR[status] ?? "bg-gray-100 text-gray-500")}>
-      {ISSUE_STATUS_LABELS[status] ?? status}
+      {t(ISSUE_STATUS_LABEL_KEYS[status] ?? status)}
     </span>
   );
 }
 
 function TaskPriorityBadge({ priority }: { priority: TaskPriority }) {
+  const { t } = useTranslation();
   const cfg = TASK_PRIORITY_CONFIG[priority] ?? TASK_PRIORITY_CONFIG.medium;
   const Icon = cfg.icon;
   return (
     <span className={clsx("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold", cfg.color)}>
       <Icon className="w-3 h-3" />
-      {cfg.label}
+      {t(cfg.labelKey)}
     </span>
   );
 }
 
 function TaskStatusBadge({ status }: { status: string }) {
+  const { t } = useTranslation();
   const cfg = TASK_STATUS_CONFIG[status] ?? TASK_STATUS_CONFIG.pending;
   const Icon = cfg.icon;
   return (
     <span className={clsx("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold", cfg.color)}>
       <Icon className="w-3 h-3" />
-      {cfg.label}
+      {t(cfg.labelKey)}
     </span>
   );
 }
@@ -1235,6 +1240,7 @@ function IssueDetailModal({
   onUpdated: (updated: Issue) => void;
   isManager: boolean;
 }) {
+  const { t } = useTranslation();
   const [issue, setIssue]                   = useState<Issue>(initialIssue);
   const [commentBody, setCommentBody]       = useState("");
   const [submittingComment, setSubmittingComment] = useState(false);
@@ -1652,7 +1658,7 @@ function IssueDetailModal({
                           isDisabled && "opacity-40 cursor-not-allowed"
                         )}
                       >
-                        {statusChanging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : col.label}
+                        {statusChanging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t(col.labelKey)}
                       </button>
                     );
                   })}
@@ -1721,7 +1727,7 @@ function IssueDetailModal({
                         statusChanging && "opacity-50 cursor-not-allowed"
                       )}
                     >
-                      {statusChanging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : col.label}
+                      {statusChanging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t(col.labelKey)}
                     </button>
                   );
                 })}
@@ -2921,6 +2927,7 @@ function ReportIssueModal({
 
 // Issues Tab
 function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: string; openId?: string | null }) {
+  const { t } = useTranslation();
   const searchParams = useSearchParams();
   const maintenancePrefill = searchParams.get("maintenance") === "1";
   const [maintenanceOnly, setMaintenanceOnly] = useState(maintenancePrefill);
@@ -3140,7 +3147,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
             <div key={col.key} className="flex flex-col gap-3 min-w-[240px] w-[240px] shrink-0">
               <div className="flex items-center gap-2">
                 <col.icon className={clsx("w-4 h-4", col.iconColor)} />
-                <span className="text-sm font-semibold text-dark">{col.label}</span>
+                <span className="text-sm font-semibold text-dark">{t(col.labelKey)}</span>
                 <span className="ml-auto text-xs text-dark-secondary bg-surface-page border border-surface-border rounded-full px-2 py-0.5">0</span>
               </div>
               {Array.from({ length: 3 }).map((_, i) => (
@@ -3222,7 +3229,7 @@ function IssuesTab({ isManager, role, openId }: { isManager: boolean; role: stri
                 <div key={col.key} className="flex flex-col gap-3 min-w-[240px] w-[240px] shrink-0">
                   <div className="flex items-center gap-2">
                     <col.icon className={clsx("w-4 h-4", col.iconColor)} />
-                    <span className="text-sm font-semibold text-dark">{col.label}</span>
+                    <span className="text-sm font-semibold text-dark">{t(col.labelKey)}</span>
                     {!isDroppable && (
                       <span className="text-[10px] text-gray-400 italic">(manager)</span>
                     )}
@@ -3302,6 +3309,7 @@ function TaskDetailModal({
   onRead?: (taskId: string) => void;
   isManager: boolean;
 }) {
+  const { t } = useTranslation();
   const [task, setTask]               = useState<Task | null>(null);
   const [loading, setLoading]         = useState(true);
   const [error, setError]             = useState("");
@@ -3432,7 +3440,7 @@ function TaskDetailModal({
                           statusUpdating && "opacity-50 cursor-not-allowed"
                         )}
                       >
-                        <Icon className="w-3.5 h-3.5" /> {cfg.label}
+                        <Icon className="w-3.5 h-3.5" /> {t(cfg.labelKey)}
                       </button>
                     );
                   })}
@@ -3652,6 +3660,7 @@ function KanbanBoard({
   toolbar?: React.ReactNode;
   justCreatedId?: string | null;
 }) {
+  const { t } = useTranslation();
   const handleDragEnd = useCallback(
     async (result: DropResult) => {
       const { draggableId: taskId, source, destination } = result;
@@ -3709,7 +3718,7 @@ function KanbanBoard({
                     "text-blue-600":     status === "in_progress",
                     "text-sprout-green": status === "completed",
                   })} />
-                  <span className="text-sm font-semibold text-dark">{cfg.label}</span>
+                  <span className="text-sm font-semibold text-dark">{t(cfg.labelKey)}</span>
                   {!isDroppable && (
                     <span className="text-[10px] text-gray-400 italic">(auto)</span>
                   )}
@@ -3733,7 +3742,7 @@ function KanbanBoard({
                       {items.length === 0 && !snapshot.isDraggingOver ? (
                         <div className="bg-surface-page border border-dashed border-surface-border rounded-xl p-4 text-center">
                           <p className="text-xs text-gray-400">
-                            {isDroppable ? `Drop tasks here` : `No ${cfg.label.toLowerCase()} tasks`}
+                            {isDroppable ? `Drop tasks here` : `No ${t(cfg.labelKey).toLowerCase()} tasks`}
                           </p>
                         </div>
                       ) : (
@@ -3770,6 +3779,7 @@ function KanbanBoard({
 
 // Manager Board
 function ManagerBoard({ isManager, role, openId }: { isManager: boolean; role: string; openId?: string | null }) {
+  const { t } = useTranslation();
   const [tasks, setTasks]                 = useState<Task[]>([]);
   const [loading, setLoading]             = useState(true);
   const [error, setError]                 = useState("");
@@ -3807,7 +3817,7 @@ function ManagerBoard({ isManager, role, openId }: { isManager: boolean; role: s
   }, [openId, loading]);
 
   const displayedTasks = taskSearch
-    ? tasks.filter((t) => t.title.toLowerCase().includes(taskSearch.toLowerCase()))
+    ? tasks.filter((task) => task.title.toLowerCase().includes(taskSearch.toLowerCase()))
     : tasks;
 
   const visibleCols = (statusFilter
@@ -3815,13 +3825,13 @@ function ManagerBoard({ isManager, role, openId }: { isManager: boolean; role: s
     : MANAGER_COLS) as TaskStatus[];
 
   const TASK_STATUS_CHIPS = [
-    ...MANAGER_COLS.map((s) => ({ value: s, label: TASK_STATUS_CONFIG[s].label })),
-    { value: "", label: "All" },
+    ...MANAGER_COLS.map((s) => ({ value: s, label: t(TASK_STATUS_CONFIG[s].labelKey) })),
+    { value: "", label: t("common.all") },
   ];
 
   const TASK_PRIORITY_CHIPS = [
-    ...["low", "medium", "high", "critical"].map((p) => ({ value: p, label: TASK_PRIORITY_CONFIG[p as TaskPriority].label })),
-    { value: "", label: "All" },
+    ...["low", "medium", "high", "critical"].map((p) => ({ value: p, label: t(TASK_PRIORITY_CONFIG[p as TaskPriority].labelKey) })),
+    { value: "", label: t("common.all") },
   ];
 
   const toolbar = (
@@ -4031,6 +4041,7 @@ function TasksTab({ isManager, role, openId }: { isManager: boolean; role: strin
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 function IssuesHubPageInner() {
+  const { t } = useTranslation();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get("tab") as "incidents" | "issues" | "tasks" | null;
   const idParam = searchParams.get("id");
@@ -4070,7 +4081,7 @@ function IssuesHubPageInner() {
             <ClipboardList className="w-5 h-5 text-sprout-purple" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-dark">Tasks &amp; Issues</h1>
+            <h1 className="text-2xl font-bold text-dark">{t("issues.pageTitle")}</h1>
             <p className="text-sm text-dark-secondary">{isManager ? "Track issues, tasks, and incident reports across your organisation" : "Report problems and track your assigned tasks"}</p>
           </div>
         </div>
@@ -4079,15 +4090,15 @@ function IssuesHubPageInner() {
         {role !== null && (() => {
           type TabKey = "incidents" | "issues" | "tasks";
           const managerCards: { label: string; value: number | string; icon: React.ElementType; bg: string; color: string; tab: TabKey }[] = [
-            { label: "Open Issues",   value: openIssues,                    tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
-            { label: "In Progress",   value: inProgressIssues,              tab: "issues", icon: RefreshCw,     bg: "bg-blue-50",          color: "text-blue-600"     },
-            { label: "Total Tasks",   value: taskSum?.total ?? "—",          tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: t("issues.stats.openIssues"),   value: openIssues,                    tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: t("issues.stats.inProgress"),   value: inProgressIssues,              tab: "issues", icon: RefreshCw,     bg: "bg-blue-50",          color: "text-blue-600"     },
+            { label: t("issues.stats.totalTasks"),   value: taskSum?.total ?? "—",          tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: t("issues.stats.overdueTasks"), value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
           ];
           const staffCards: typeof managerCards = [
-            { label: "Open Issues", value: openIssues,                      tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
-            { label: "Tasks",       value: taskSum?.total ?? "—",            tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: "Overdue Tasks", value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: t("issues.stats.openIssues"),   value: openIssues,                      tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+            { label: t("issues.stats.tasks"),         value: taskSum?.total ?? "—",            tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+            { label: t("issues.stats.overdueTasks"), value: taskSum?.overdue_count ?? "—",    tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
           ];
           const cards = isManager ? managerCards : staffCards;
           return (
@@ -4115,15 +4126,15 @@ function IssuesHubPageInner() {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           type TabIcon = React.ElementType<{ className?: string }> | undefined;
           const allTabs: { key: TabKey; label: string; icon: TabIcon }[] = [
-            { key: "tasks",     label: "Tasks",            icon: ClipboardList },
-            { key: "issues",    label: "Issues",           icon: undefined     },
-            { key: "incidents", label: "Incident Reports", icon: ShieldAlert   },
+            { key: "tasks",     label: t("issues.tabs.tasks"),           icon: ClipboardList },
+            { key: "issues",    label: t("issues.tabs.issues"),          icon: undefined     },
+            { key: "incidents", label: t("issues.tabs.incidentReports"), icon: ShieldAlert   },
           ];
           // Tasks view has only one tab — render no tab bar
           const isTasksView = !tabParam || tabParam === "tasks";
           if (isTasksView) return null;
           // Issues & Incidents view: show both issues and incidents tabs
-          const visibleTabs = allTabs.filter((t) => t.key !== "tasks");
+          const visibleTabs = allTabs.filter((tab) => tab.key !== "tasks");
           return (
             <div className="flex border-b border-surface-border">
               {visibleTabs.map(({ key, label, icon: Icon }) => (

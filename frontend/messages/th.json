@@ -77,6 +77,25 @@
     "noAnnouncements": "ไม่มีประกาศใหม่",
     "viewAll": "ดูทั้งหมด"
   },
+  "issues": {
+    "pageTitle": "งานและปัญหา",
+    "tabs": {
+      "tasks": "งาน",
+      "issues": "ปัญหา",
+      "incidentReports": "รายงานเหตุการณ์"
+    },
+    "stats": {
+      "openIssues": "ปัญหาที่เปิดอยู่",
+      "inProgress": "กำลังดำเนินการ",
+      "totalTasks": "งานทั้งหมด",
+      "overdueTasks": "งานเลยกำหนด",
+      "tasks": "งาน"
+    },
+    "kanban": {
+      "pendingVendor": "รอผู้ขาย",
+      "verifiedClosed": "ปิดแล้ว"
+    }
+  },
   "shifts": {
     "mySchedule": "ตารางของฉัน",
     "openShifts": "กะเปิด",
@@ -85,12 +104,25 @@
     "myTimesheet": "ใบบันทึกเวลาของฉัน",
     "leave": "ลาหยุด",
     "availability": "ความพร้อม",
+    "roster": "ตารางงาน",
+    "swaps": "สลับกะ",
+    "timesheets": "บันทึกเวลา",
+    "templates": "เทมเพลต",
     "noOpenShifts": "ไม่มีกะเปิดในขณะนี้",
     "noSwapRequests": "ยังไม่มีคำขอสลับกะ",
     "shiftClaimed": "รับกะแล้ว! รอการอนุมัติจากผู้จัดการ",
     "swapSubmitted": "ส่งคำขอสลับกะแล้ว! รอการอนุมัติจากผู้จัดการ",
     "selectShiftToSwap": "เลือกกะที่ต้องการสลับ",
-    "noUpcomingShifts": "ไม่มีกะที่จะสลับ"
+    "noUpcomingShifts": "ไม่มีกะที่จะสลับ",
+    "status": {
+      "claimed": "รับแล้ว",
+      "late": "สาย",
+      "earlyDeparture": "ออกก่อนเวลา",
+      "unverified": "ยังไม่ยืนยัน",
+      "awaitingPeer": "รอเพื่อนร่วมงาน",
+      "awaitingApproval": "รออนุมัติ",
+      "declined": "ปฏิเสธ"
+    }
   },
   "attendance": {
     "clockedIn": "เข้างานแล้ว",

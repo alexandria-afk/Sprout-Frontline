@@ -77,6 +77,25 @@
     "noAnnouncements": "No new announcements",
     "viewAll": "View all"
   },
+  "issues": {
+    "pageTitle": "Tasks & Issues",
+    "tabs": {
+      "tasks": "Tasks",
+      "issues": "Issues",
+      "incidentReports": "Incident Reports"
+    },
+    "stats": {
+      "openIssues": "Open Issues",
+      "inProgress": "In Progress",
+      "totalTasks": "Total Tasks",
+      "overdueTasks": "Overdue Tasks",
+      "tasks": "Tasks"
+    },
+    "kanban": {
+      "pendingVendor": "Pending Vendor",
+      "verifiedClosed": "Verified Closed"
+    }
+  },
   "shifts": {
     "mySchedule": "My Schedule",
     "openShifts": "Open Shifts",
@@ -85,12 +104,25 @@
     "myTimesheet": "My Timesheet",
     "leave": "Leave",
     "availability": "Availability",
+    "roster": "Roster",
+    "swaps": "Swaps",
+    "timesheets": "Timesheets",
+    "templates": "Templates",
     "noOpenShifts": "No open shifts available right now",
     "noSwapRequests": "No swap requests yet",
     "shiftClaimed": "Shift claimed! Awaiting manager approval.",
     "swapSubmitted": "Swap request submitted! Awaiting manager approval.",
     "selectShiftToSwap": "Select a shift to swap",
-    "noUpcomingShifts": "No upcoming shifts to swap."
+    "noUpcomingShifts": "No upcoming shifts to swap.",
+    "status": {
+      "claimed": "Claimed",
+      "late": "Late",
+      "earlyDeparture": "Early Departure",
+      "unverified": "Unverified",
+      "awaitingPeer": "Awaiting peer",
+      "awaitingApproval": "Awaiting approval",
+      "declined": "Declined"
+    }
   },
   "attendance": {
     "clockedIn": "Clocked in",
