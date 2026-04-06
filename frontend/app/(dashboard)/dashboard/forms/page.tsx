@@ -1417,7 +1417,7 @@ function SubmissionDetailModal({
   submissionId: string;
   onClose: () => void;
   onReviewed: () => void;
-) {
+}) {
   const { t } = useTranslation();
   const [detail, setDetail] = useState<FormSubmissionDetail | null>(null);
   const [template, setTemplate] = useState<import("@/types").FormTemplate | null>(null);
