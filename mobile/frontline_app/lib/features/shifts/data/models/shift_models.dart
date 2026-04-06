@@ -120,3 +120,144 @@ class ShiftClaim {
     );
   }
 }
+
+/// A single break record within an attendance session.
+class BreakRecord {
+  final String id;
+  final String breakStartAt;
+  final String? breakEndAt;
+  final int? durationMinutes;
+  final String breakType; // meal, rest, other
+
+  const BreakRecord({
+    required this.id,
+    required this.breakStartAt,
+    this.breakEndAt,
+    this.durationMinutes,
+    required this.breakType,
+  });
+
+  factory BreakRecord.fromJson(Map<String, dynamic> json) {
+    return BreakRecord(
+      id: (json['id'] as String?) ?? '',
+      breakStartAt: (json['break_start_at'] as String?) ?? '',
+      breakEndAt: json['break_end_at'] as String?,
+      durationMinutes: json['duration_minutes'] as int?,
+      breakType: (json['break_type'] as String?) ?? 'rest',
+    );
+  }
+}
+
+/// Aggregated break status for an attendance session.
+class BreakStatus {
+  final bool onBreak;
+  final BreakRecord? activeBreak;
+  final List<BreakRecord> breaks;
+  final int totalBreakMinutes;
+
+  const BreakStatus({
+    required this.onBreak,
+    this.activeBreak,
+    required this.breaks,
+    required this.totalBreakMinutes,
+  });
+
+  factory BreakStatus.fromJson(Map<String, dynamic> json) {
+    final activeRaw = json['active_break'];
+    final breaksRaw = json['breaks'] as List? ?? [];
+    return BreakStatus(
+      onBreak: (json['on_break'] as bool?) ?? false,
+      activeBreak: activeRaw != null && activeRaw is Map
+          ? BreakRecord.fromJson(Map<String, dynamic>.from(activeRaw))
+          : null,
+      breaks: breaksRaw
+          .map((e) => BreakRecord.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(),
+      totalBreakMinutes: (json['total_break_minutes'] as int?) ?? 0,
+    );
+  }
+}
+
+/// A shift-swap request between two users.
+class ShiftSwapRequest {
+  final String id;
+  final String status; // pending_peer, pending_manager, approved, rejected, cancelled
+  final String? shiftStartAt;
+  final String? shiftEndAt;
+  final String? locationName;
+  final String? requestedById;
+  final String? requesterName;
+  final String? targetUserId;
+  final String? targetUserName;
+  final String createdAt;
+
+  const ShiftSwapRequest({
+    required this.id,
+    required this.status,
+    this.shiftStartAt,
+    this.shiftEndAt,
+    this.locationName,
+    this.requestedById,
+    this.requesterName,
+    this.targetUserId,
+    this.targetUserName,
+    required this.createdAt,
+  });
+
+  factory ShiftSwapRequest.fromJson(Map<String, dynamic> json) {
+    final shift = json['shifts'] is Map ? json['shifts'] as Map : null;
+    final loc = shift != null && shift['locations'] is Map
+        ? shift['locations'] as Map
+        : null;
+    final requester =
+        json['profiles'] is Map ? json['profiles'] as Map : null;
+    final target = json['target_profile'] is Map
+        ? json['target_profile'] as Map
+        : (json['target_user'] is Map ? json['target_user'] as Map : null);
+    return ShiftSwapRequest(
+      id: (json['id'] as String?) ?? '',
+      status: (json['status'] as String?) ?? 'pending_peer',
+      shiftStartAt: shift?['start_at'] as String?,
+      shiftEndAt: shift?['end_at'] as String?,
+      locationName: loc?['name'] as String?,
+      requestedById: requester?['id'] as String? ?? json['requested_by'] as String?,
+      requesterName: requester?['full_name'] as String?,
+      targetUserId: target?['id'] as String? ?? json['target_user_id'] as String?,
+      targetUserName: target?['full_name'] as String?,
+      createdAt: (json['created_at'] as String?) ?? '',
+    );
+  }
+}
+
+/// A leave / time-off request.
+class LeaveRequest {
+  final String id;
+  final String leaveType; // annual, sick, emergency, unpaid, other
+  final String startDate;
+  final String endDate;
+  final String? reason;
+  final String status; // pending, approved, rejected
+  final String createdAt;
+
+  const LeaveRequest({
+    required this.id,
+    required this.leaveType,
+    required this.startDate,
+    required this.endDate,
+    this.reason,
+    required this.status,
+    required this.createdAt,
+  });
+
+  factory LeaveRequest.fromJson(Map<String, dynamic> json) {
+    return LeaveRequest(
+      id: (json['id'] as String?) ?? '',
+      leaveType: (json['leave_type'] as String?) ?? 'other',
+      startDate: (json['start_date'] as String?) ?? '',
+      endDate: (json['end_date'] as String?) ?? '',
+      reason: json['reason'] as String?,
+      status: (json['status'] as String?) ?? 'pending',
+      createdAt: (json['created_at'] as String?) ?? '',
+    );
+  }
+}

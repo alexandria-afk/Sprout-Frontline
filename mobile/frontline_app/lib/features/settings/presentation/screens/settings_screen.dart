@@ -48,6 +48,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         backgroundColor: const Color(0xFF1E2A4A), // sprout-navy
         foregroundColor: Colors.white,
         elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
       ),
       backgroundColor: const Color(0xFFF5F5F5),
       body: ListView(

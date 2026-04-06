@@ -408,7 +408,7 @@ class _AppShell extends ConsumerWidget {
               label: 'Language / ภาษา',
               onTap: () {
                 Navigator.pop(context);
-                context.go('/settings');
+                context.push('/settings');
               },
             ),
             const SizedBox(height: 8),

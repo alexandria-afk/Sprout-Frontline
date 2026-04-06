@@ -1,13 +1,13 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 
 /// The current user's role from Supabase JWT app_metadata.
+/// Re-evaluates whenever the auth session changes (login/logout).
 /// Returns 'staff' by default if no role is set.
 final userRoleProvider = Provider<String>((ref) {
-  final session = Supabase.instance.client.auth.currentSession;
+  final session = ref.watch(authSessionProvider).valueOrNull;
   if (session == null) return 'staff';
-  final user = session.user;
-  final appMeta = user.appMetadata;
+  final appMeta = session.user.appMetadata;
   return (appMeta['role'] as String?) ?? 'staff';
 });
 

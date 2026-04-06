@@ -96,3 +96,47 @@ class ActiveAttendanceNotifier extends AsyncNotifier<AttendanceRecord?> {
     });
   }
 }
+
+// ── Swap Requests ────────────────────────────────────────────────────────────
+
+final swapRequestsProvider =
+    AsyncNotifierProvider<SwapRequestsNotifier, List<ShiftSwapRequest>>(
+  SwapRequestsNotifier.new,
+);
+
+class SwapRequestsNotifier extends AsyncNotifier<List<ShiftSwapRequest>> {
+  @override
+  Future<List<ShiftSwapRequest>> build() => _load();
+
+  Future<List<ShiftSwapRequest>> _load() async {
+    final repo = ref.read(shiftsRepositoryProvider);
+    return repo.getSwapRequests();
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(_load);
+  }
+}
+
+// ── Leave Requests ───────────────────────────────────────────────────────────
+
+final leaveRequestsProvider =
+    AsyncNotifierProvider<LeaveRequestsNotifier, List<LeaveRequest>>(
+  LeaveRequestsNotifier.new,
+);
+
+class LeaveRequestsNotifier extends AsyncNotifier<List<LeaveRequest>> {
+  @override
+  Future<List<LeaveRequest>> build() => _load();
+
+  Future<List<LeaveRequest>> _load() async {
+    final repo = ref.read(shiftsRepositoryProvider);
+    return repo.getLeaveRequests();
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(_load);
+  }
+}

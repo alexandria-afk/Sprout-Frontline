@@ -1151,11 +1151,117 @@ class _ShiftSection extends ConsumerStatefulWidget {
 
 class _ShiftSectionState extends ConsumerState<_ShiftSection> {
   bool _isLoading = false;
+  BreakStatus? _breakStatus;
+  bool _breakStatusLoaded = false;
+
+  Future<void> _loadBreakStatus(String attendanceId) async {
+    try {
+      final repo = ref.read(shiftsRepositoryProvider);
+      final status = await repo.getBreakStatus(attendanceId: attendanceId);
+      if (mounted) setState(() => _breakStatus = status);
+    } catch (_) {
+      // Silently ignore — break status is non-critical.
+    }
+  }
+
+  void _showBreakSheet(BuildContext context, String attendanceId) {
+    showModalBottomSheet<String>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: _C.textTertiary,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('Start Break',
+                style: TextStyle(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600,
+                    color: _C.textPrimary)),
+            const SizedBox(height: 8),
+            _BreakOption(
+              icon: Icons.restaurant,
+              label: 'Meal',
+              onTap: () => Navigator.pop(ctx, 'meal'),
+            ),
+            _BreakOption(
+              icon: Icons.coffee,
+              label: 'Rest',
+              onTap: () => Navigator.pop(ctx, 'rest'),
+            ),
+            _BreakOption(
+              icon: Icons.more_horiz,
+              label: 'Other',
+              onTap: () => Navigator.pop(ctx, 'other'),
+            ),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    ).then((breakType) {
+      if (breakType != null) _startBreak(attendanceId, breakType);
+    });
+  }
+
+  Future<void> _startBreak(String attendanceId, String breakType) async {
+    setState(() => _isLoading = true);
+    try {
+      final repo = ref.read(shiftsRepositoryProvider);
+      await repo.startBreak(attendanceId: attendanceId, breakType: breakType);
+      await _loadBreakStatus(attendanceId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Start break failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _endBreak(String attendanceId) async {
+    setState(() => _isLoading = true);
+    try {
+      final repo = ref.read(shiftsRepositoryProvider);
+      await repo.endBreak(attendanceId: attendanceId);
+      await _loadBreakStatus(attendanceId);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('End break failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final activeAttendance = ref.watch(activeAttendanceProvider).valueOrNull;
+    final isClockedIn = activeAttendance != null;
+
+    // Load break status once when clocked in.
+    if (isClockedIn && !_breakStatusLoaded) {
+      _breakStatusLoaded = true;
+      _loadBreakStatus(activeAttendance.id);
+    } else if (!isClockedIn && _breakStatusLoaded) {
+      _breakStatusLoaded = false;
+      _breakStatus = null;
+    }
 
     // Find active shift (clocked in or currently in progress) or next upcoming.
     final upcoming = widget.shifts.where((s) {
@@ -1187,7 +1293,6 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
     // Attendance times are real UTC — DO convert to local.
     final start = DateTime.tryParse(shift.startAt);
     final end = DateTime.tryParse(shift.endAt);
-    final isClockedIn = activeAttendance != null;
     final isActive = start != null && end != null &&
         now.toUtc().isAfter(start) && now.toUtc().isBefore(end);
 
@@ -1281,18 +1386,21 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
               isLoading: _isLoading,
               onTap: () => _clockIn(shift),
             ),
-          if (isClockedIn)
+          if (isClockedIn) ...[
             Row(
               children: [
                 Expanded(
-                  child: _SecondaryButton(
-                    label: 'Start Break',
-                    onTap: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Break tracking coming soon')),
-                      );
-                    },
-                  ),
+                  child: _breakStatus?.onBreak == true
+                      ? _DestructiveButton(
+                          label: 'End Break',
+                          isLoading: _isLoading,
+                          onTap: () => _endBreak(activeAttendance.id),
+                        )
+                      : _SecondaryButton(
+                          label: 'Start Break',
+                          onTap: () =>
+                              _showBreakSheet(context, activeAttendance.id),
+                        ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -1304,6 +1412,28 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
                 ),
               ],
             ),
+            if (_breakStatus?.onBreak == true &&
+                _breakStatus?.activeBreak != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Builder(builder: (_) {
+                  final startStr =
+                      _breakStatus!.activeBreak!.breakStartAt;
+                  final startDt = DateTime.tryParse(startStr);
+                  final elapsed = startDt != null
+                      ? DateTime.now().difference(startDt.toLocal()).inMinutes
+                      : 0;
+                  return Text(
+                    'On break \u00b7 $elapsed min',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: _C.high,
+                    ),
+                  );
+                }),
+              ),
+          ],
         ],
       ),
     );
@@ -1367,6 +1497,30 @@ class _ShiftSectionState extends ConsumerState<_ShiftSection> {
     return Geolocator.getCurrentPosition(
       locationSettings:
           const LocationSettings(accuracy: LocationAccuracy.high),
+    );
+  }
+}
+
+// ── Break option row (used in break type bottom sheet) ──────────────────────
+
+class _BreakOption extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _BreakOption({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(icon, color: _C.sproutGreen),
+      title: Text(label,
+          style: const TextStyle(fontSize: 16, color: _C.textPrimary)),
+      onTap: onTap,
     );
   }
 }
