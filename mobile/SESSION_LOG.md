@@ -1,137 +1,129 @@
-# Session Log — Mobile Dashboard Build & QA
-
-**Dates:** 2026-04-01 through 2026-04-05  
-**Scope:** Flutter mobile app — dashboard home screen rebuild, QA, gap closure  
-**Commits:** `84d7392`, `511a206`, plus uncommitted fixes from 04-05 session
+# Session Log — Mobile App Build
 
 ---
 
-## What We Built
+## Session 1: 2026-04-01 through 2026-04-05
 
-### 1. Dashboard Home Screen — Full Rebuild
-Rewrote `dashboard_screen.dart` from scratch with role-aware layout:
+**Scope:** Dashboard home screen rebuild, QA, gap closure  
+**Commits:** `84d7392`, `511a206`, `184aa96`
 
-**Staff view (top to bottom):**
-- Greeting header
-- 4 stat cards: Overdue Items, Open Tasks, Courses to Complete, Shifts This Week
-- My Shift (next upcoming, with Clock In / Start Break / Clock Out buttons + GPS)
-- My To-Do List (from `GET /api/v1/inbox` — tasks, forms, workflows, courses, announcements, issues)
-- Leaderboard (top 5 + current user's row if outside top 5)
-- Latest Announcements (3 most recent with preview)
+### What We Built
 
-**Manager/Admin view adds:**
-- Different stat cards: Checklist Completion % (today), Audit Compliance % (30-day rolling), Training Completion %, Shifts Today
-- AI Insight cards (stacked, swipe-to-dismiss, count badge)
-- Team Attendance card (3 animated progress rings: Present/On Time/Utilization %)
-  - Manager: "MY TEAM TODAY" + not-clocked-in list
-  - Admin: "ATTENDANCE TODAY" + per-location table
+1. **Dashboard Home Screen — Full Rebuild** with role-aware layout
+   - Staff: greeting, 4 personal stat cards, My Shift (clock in/out + GPS), My To-Do List, Leaderboard, Announcements
+   - Manager/Admin: different stat cards (Checklist %, Audit %, Training %, Shifts Today), AI Insight cards (stacked, swipe-to-dismiss), Team Attendance card (3 animated rings)
 
-### 2. AI Insights Feature (new)
-- `features/ai_insights/` — model, repository, provider
-- Calls `GET /api/v1/ai/dashboard-insights` with 60s timeout (Claude AI call)
-- Hive cache scoped by user ID with daily expiry
-- Dismiss tracking persisted in Hive, scoped by user ID, cleared daily
-- Stacked card UI: front card visible, 1-2 peek cards behind, "1/3" badge, swipe right to dismiss
-- Hidden for staff per CLAUDE.md role rules
+2. **AI Insights Feature** — model, repo, provider, Hive cache scoped by user ID, daily expiry, dismiss tracking
 
-### 3. Notifications Feature (new)
-- `features/notifications/` — model, repository, provider
-- Dashboard card: "MY TO-DO LIST" powered by `GET /api/v1/inbox` (status-based, not event-based)
-- Full list screen at `/notifications` with All/Unread filter tabs, swipe-to-dismiss, mark-all-read
-- Unread count badge on Home tab in bottom nav
-- Icons/colors match web exactly (task=green checkbox, form=amber clipboard, etc.)
+3. **Notifications Feature** — model, repo, provider, full list screen at /notifications, unread badge on Home tab
 
-### 4. Team Attendance Card (new)
-- 3 circular progress rings with animated fill (0.6s ease-out)
-- Color thresholds: green/yellow/red per spec
-- Manager view: rings + not-clocked-in staff list
-- Admin view: rings + per-location table rows (tappable)
-- Models: `AttendanceData`, `LocationAttendance`, `MissingStaff`
+4. **Team Attendance Card** — 3 animated progress rings, manager/admin views, per-location table
 
-### 5. Sidekick AI Chat — Wired Up
-- Dashboard Sidekick: full chat with `POST /api/v1/ai/chat`, message bubbles, typing indicator, suggestion chips, reset
-- Global Sidekick (FAB on all screens): same implementation in `app_router.dart`
+5. **Sidekick AI Chat** — wired to POST /api/v1/ai/chat on dashboard + global FAB
 
-### 6. QA — 30 Issues Found, 24 Fixed
-- 50 API acceptance tests (all pass, 4 roles x 9 endpoints + edge cases)
-- Full code review across 14 files
-- See `mobile/QA_TEST_CASES.md` for complete tracker
+6. **QA: 30 issues found, 24 fixed** — .cast crashes, ATS, timezone bugs, role enforcement, cache scoping, accessibility
+
+### Key Decisions
+- Shift times = wall-clock (fake UTC), attendance times = real UTC → two formatting approaches
+- Dashboard summary fetched with date filters matching web (today for checklist, 30-day for audit)
+- Hive caches cleared on sign-out to prevent cross-user data leaks
+- To-Do List powered by GET /api/v1/inbox (status-based) not notifications (event-based)
 
 ---
 
-## Key Decisions & Rationale
+## Session 2: 2026-04-05 through 2026-04-06
 
-| Decision | Rationale |
-|---|---|
-| Shift times displayed without `.toLocal()` | Backend stores shifts as "fake UTC" — `13:00+00:00` means 1 PM local. Attendance timestamps ARE real UTC and DO get `.toLocal()`. Two different formatting approaches needed. |
-| Dashboard summary fetched with `?from=today&to=today` | Web does this. Without date filter, mobile was showing all-time completion rate (76%) vs today's rate (0%). |
-| Audit compliance uses separate 30-day rolling call | Web makes two `/dashboard/summary` calls: one for today (checklist), one for 30 days (audit). Mobile now matches. |
-| Hive caches cleared on sign-out | Prevented data leaking between user accounts. Staff was seeing admin's cached shifts and insights. |
-| AI insights cache keyed by user ID | Manager and admin get different AI-generated insights (location-scoped vs org-wide). Cache must not cross-contaminate. |
-| To-Do List powered by `GET /api/v1/inbox` (not notifications) | Per handoff note: to-do list is status-based ("what still needs doing") vs notifications which are event-based ("what happened"). Two distinct concepts. |
-| `.cast<Map<String,dynamic>>()` replaced everywhere | Dio returns `Map<dynamic, dynamic>`. The `.cast` call throws `TypeError` at runtime. Replaced with `Map<String, dynamic>.from(e as Map)` across 9+ files. |
-| `NSAllowsArbitraryLoads` removed, `NSExceptionDomains` for localhost added | Global ATS disable would cause App Store rejection. Per-domain exception for localhost is dev-safe and prod-safe. |
-| Stat cards differ by role | Staff sees personal metrics (overdue, open tasks). Manager/admin sees operational KPIs (checklist %, audit %, training %, shifts today) matching web. |
-| Insight cards stacked (not listed vertically) | User requested cards "stacked behind each other" with count badge, matching a notification-card pattern. Swipe reveals next card. |
+**Scope:** Web-mobile parity, bug fixes, feature gaps  
+**Commits:** `d09df33`
 
----
+### What We Built
 
-## Open Issues (6 remaining)
+1. **Break Management** (was placeholder)
+   - Bottom sheet with 3 break types: Meal, Rest, Other
+   - On-break state: "End Break" button + orange elapsed timer
+   - Auto-loads break status when clocked in
+   - Calls POST /api/v1/shifts/attendance/break/start and /end
 
-| ID | Issue | Priority |
-|----|-------|----------|
-| H-9 | `userRoleProvider` reads stale JWT — role changes don't reflect until re-login | Deferred per user request |
-| M-2 | No tap feedback (InkWell) on interactive elements | UX polish — needs Material wrapping |
-| M-3 | Hive boxes typed as raw `Map<dynamic, dynamic>` | Phase 1 shortcut, needs TypeAdapters |
-| M-4 | Pull-to-refresh fires 7+ parallel calls, no debounce | Low risk, cosmetic |
-| A-1 | Backend response shapes inconsistent (bare `[]` vs `{items:[]}`) | Backend fix |
-| A-2 | Pagination field naming (`total_count` vs `total`) | Backend fix |
+2. **Leave Requests** (new)
+   - "Leave" tab in shifts screen (all roles)
+   - Request form: leave type dropdown (annual/sick/emergency/unpaid/other), start/end date pickers, optional reason
+   - List with status badges (pending/approved/rejected)
+   - Calls POST /api/v1/shifts/leave
 
----
+3. **Shift Swap Requests** (new)
+   - "Swaps" tab in shifts screen (all roles)
+   - Create swap by selecting upcoming shift
+   - Cancel support
 
-## Open Gaps (from GAP_ANALYSIS.md)
+4. **Shift Swap Colleague Response** (new)
+   - Incoming swap detection (current user is target + pending_peer)
+   - Accept/Decline buttons on incoming swap cards
+   - Calls PUT /api/v1/shifts/swaps/{id}/colleague-response
+   - Success feedback via snackbar
 
-| Feature | Spec | Priority |
-|---------|------|----------|
-| Push notifications (FCM) | NOTIFICATION_SPEC.md Part 2 | Medium |
-| Push notification settings screen | NOTIFICATION_SPEC.md Part 9 | Medium |
-| Dark theme toggle | MOBILE_DESIGN.md | Low |
-| Card press scale 0.98 animation | MOBILE_DESIGN.md | Low |
+5. **Role Provider Fix** (critical bug)
+   - `userRoleProvider` now watches `authSessionProvider` instead of reading stale Supabase session
+   - Fixed: staff seeing manager stat cards, AI insights, and team attendance after switching accounts
+   - This was the root cause of multiple reported issues
 
----
+6. **Dashboard Stat Cards — Role-Aware**
+   - Staff: Overdue Items, Open Tasks, Courses to Complete, Shifts This Week
+   - Manager/Admin: Checklist Completion % (today), Audit Compliance % (30-day rolling), Training Completion %, Shifts Today
+   - Separate API calls matching web: today filter for checklist, 30-day for audit, /lms/analytics/completion for training
 
-## Files Changed (this session)
+7. **AI Insight Cards — Stacked UI**
+   - Cards stacked behind each other (not vertical list)
+   - 1-2 peek cards behind front card at 50% opacity
+   - Count badge "1/3" in upper right
+   - Swipe right dismisses front card, reveals next
+   - Material icons (Icons.error, Icons.warning_amber, Icons.info_outline) replace broken emoji rendering
 
-**New features (created):**
-- `features/ai_insights/` (3 files: model, repo, provider)
-- `features/notifications/` (5 files: model, inbox_models, repo, provider, screen)
-- `mobile/QA_TEST_CASES.md`, `QA_API_TEST_RESULTS.md`, `QA_CODE_REVIEW.md`, `GAP_ANALYSIS.md`
+8. **Attendance Ring Typography**
+   - Number: 20px bold, % symbol: 12px semibold secondary
 
-**Major rewrites:**
-- `dashboard/presentation/screens/dashboard_screen.dart` — complete rebuild (~1800 lines)
-- `core/router/app_router.dart` — notifications route, unread badge, global Sidekick wired
+9. **To-Do List Icons** — matched web exactly (task=green checkbox, form=amber clipboard, course=blue cap, issue=orange triangle)
 
-**Bug fixes across:**
-- 9 repository files (`.cast` crash fix)
-- 5 model files (`.cast` crash fix)
-- `ios/Runner/Info.plist` (ATS, location permission)
-- `core/offline/hive_service.dart` (shifts cache box, clearUserCaches)
-- `features/auth/providers/auth_provider.dart` (clear caches on sign-out)
-- `features/shifts/providers/shifts_provider.dart` (AsyncNotifier for attendance, dedicated cache, daily expiry)
-- `features/dashboard/data/repositories/dashboard_repository.dart` (today filter, audit 30-day, training, shifts-today)
-- `features/dashboard/providers/dashboard_provider.dart` (audit, training, shifts-today providers)
-- `features/dashboard/data/models/dashboard_summary.dart` (attendance models, tasksPending clamp)
+10. **Settings Back Button** — context.push instead of context.go, explicit back arrow
 
----
+11. **App Rename** — "Frontline" → "Frontliner" on login screen
 
-## Next Logical Steps
+### Bug Fixes
+| Bug | Root Cause | Fix |
+|-----|-----------|-----|
+| Staff seeing manager cards + AI insights | `userRoleProvider` cached first session's role forever | Watch `authSessionProvider` for re-evaluation |
+| Checklist Completion 76% (should be 0%) | Dashboard summary called without date filter | Added `?from=today&to=today` matching web |
+| Audit Compliance using today's data | Single summary call for both metrics | Separate 30-day rolling call for audit |
+| Shift time showing wrong (9 PM vs 1 PM) | `.toLocal()` on wall-clock UTC times | Don't convert shift times to local |
+| Insight cards showing same for all roles | Hive cache key not scoped by user | Cache key includes user ID |
+| "Start Break" was a snackbar placeholder | Not implemented | Full break flow with type selection |
+| Settings screen trapped user (no back button) | `context.go` replaced nav stack | `context.push` + explicit back arrow |
+| Broken emoji icons on insight cards | iOS rendering issues with 🔴 ⚠️ ℹ️ | Replaced with Material Icons |
 
-1. **Commit the 04-05 session changes** — there are uncommitted fixes (role-aware stat cards, stacked insight cards, cache scoping, shift time fix, to-do list wiring, attendance ring font, ATS localhost exception, inbox_models routing updates, notifications_screen kind meta updates)
+### Web-Mobile Parity Status (Staff)
 
-2. **Push notifications (FCM)** — add `firebase_messaging` package, FCM token registration on login (`PUT /fcm-token`), handle incoming push messages, deep-link to source entity
+| Feature | Status |
+|---------|--------|
+| Stat cards | Parity |
+| My Shift + clock in/out | Parity |
+| Break management (meal/rest/other) | Parity |
+| My To-Do List | Parity |
+| Leaderboard | Parity |
+| Announcements | Parity (3 items vs 6 on web) |
+| Tasks list + detail | Parity |
+| Issues list + detail + AI classify | Parity (list view vs kanban — by design) |
+| Forms + fill + conditional logic | Parity |
+| Training + course player | Parity |
+| Shifts (my/open/swaps/leave) | Parity |
+| Swap colleague response | Parity |
+| Badges + leaderboard | Parity |
+| Sidekick AI chat | Parity |
+| Availability management | **Gap** (web has it, mobile doesn't) |
 
-3. **Push notification settings screen** — 3 Hive-backed toggles (task assignments, form assignments, scheduled reminders) accessible from More menu
-
-4. **Verify mobile home screen card wiring** — the dashboard inbox card uses `todoItemsProvider` now, but should verify it shows the correct items for each role by testing all 4 accounts
-
-5. **M-2: Tap feedback** — wrap all `GestureDetector` instances with `Material` + `InkWell` for ripple effect across the dashboard
+### Open Items
+- Availability management screen (staff can set available days/times)
+- Push notifications (FCM integration)
+- Push notification settings screen (3 toggles)
+- Dark theme toggle
+- M-2: InkWell tap feedback on interactive elements
+- M-3: Hive boxes typed as raw Map (needs TypeAdapters)
+- A-1/A-2: Backend response shape inconsistencies
