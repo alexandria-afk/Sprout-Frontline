@@ -3,6 +3,80 @@ _Ongoing handoff notes for each work session. Most recent session at the top._
 
 ---
 
+## Session: 2026-04-06
+
+### What We Did
+
+**1. Extended Thai i18n to all remaining pages**
+
+The previous session had wired Thai translations for nav items and the dashboard page only. This session extended full translation coverage to every major page.
+
+| Page | What Was Translated |
+|---|---|
+| **Tasks** | Subtitle (manager: "Assign and track tasks across your team" / staff: "Your assigned tasks") |
+| **Issues & Incidents** | Page subtitle, filter pills (Open/In Progress/Resolved/All), "Report a Problem" button, detail modal field labels (Details, Location, Where Exactly, Equipment, Safety Risk, Photo, Manage Issue) |
+| **Shifts** | Page title ("Shifts & Attendance"), subtitle, all stat cards + sub-labels (Today's Shifts, Open Shifts, Pending Leave, Team Hours, My Shifts, Hours This Week, Approved Leave) |
+| **Announcements** | Page title, total count, all stat cards — staff (Total, Need Acknowledgement) and manager (Total, Require Ack, Targeted, With Media) |
+| **Training** | Page title & subtitle (admin view), "My Training" heading (staff view), all 4 stat cards, section headers (Continue Learning, Assigned, Completed, Needs Retry) |
+| **Leaderboard** (`/dashboard/safety`) | Page title, subtitle, tab labels (Rankings, My Badges) |
+| **Forms** | TypeBadge labels (Checklist/Audit/Pull-Out/Form), filter pills (All/Pending/Approved/Rejected/Drafts + type options), staff tab cards (Assigned/To Do/Completed), Audit Score / PASSED / FAILED in detail modal, Generate with Sidekick / Start Blank buttons |
+
+New keys added to both `frontend/messages/en.json` and `frontend/messages/th.json` under `tasks`, `forms`, `announcements`, `training`, `leaderboard`, and extended `issues` and `shifts` sections.
+
+**2. Fixed sign-out being broken (app stuck)**
+
+Root cause: `supabase.auth.signOut()` is a client-side call — it clears local state but not the HTTP-only session cookies set server-side. The middleware still saw a valid session cookie and redirected users back to `/dashboard` immediately after sign-out.
+
+- Created `frontend/app/api/auth/signout/route.ts` — a GET route that calls `supabase.auth.signOut()` server-side, which properly clears the auth cookies, then redirects to `/login`.
+- Updated `frontend/components/layout/Sidebar.tsx` `handleSignOut` to navigate to `/api/auth/signout` instead of calling the client-side SDK.
+
+**3. Fixed dashboard chunk load error**
+
+Corrupted webpack cache (`ENOENT: no such file or directory, rename *.pack.gz_`) caused `ChunkLoadError: Loading chunk app/(dashboard)/dashboard/page failed`. Cleared `.next/cache/webpack` and restarted the dev server.
+
+**4. Fixed syntax error in forms page**
+
+When adding `useTranslation` to `SubmissionDetailModal`, accidentally removed the closing `}` from the props destructuring (`}) {` → `) {`), causing a build-breaking `Expected ident` syntax error. Fixed immediately after the build failure.
+
+---
+
+### Key Decisions
+
+| Decision | Rationale |
+|---|---|
+| Server-side sign-out route | Client `supabase.auth.signOut()` cannot clear HTTP-only cookies — must go through the server to properly end the session |
+| `useTranslation` added per-component (not globally hoisted) | Hooks must be called inside React components; module-level config objects use `labelKey` pattern instead |
+| Filter pill labels built inside components (not module-level) | Labels need `t()` at render time; building arrays inside the component body ensures correct locale on re-render |
+
+---
+
+### Commits This Session
+
+| Hash | Message |
+|---|---|
+| `a5b81c9` | feat(i18n): extend Thai translations to page headers, tabs, and kanban columns |
+| `c098621` | feat(i18n): translate dashboard page titles, greeting, stat cards, and card headers |
+| `c1f153c` | feat(i18n): extend Thai translations to tasks, issues, forms, shifts, announcements, training, and leaderboard pages |
+| `cc29837` | fix(forms): restore missing closing brace in SubmissionDetailModal props type |
+
+---
+
+### Open Questions / Blockers
+
+- **Mobile translations**: Flutter app still uses hardcoded English strings — Thai translation is only implemented on the web frontend. Mobile ARB files are not yet wired to match.
+- **Forms "start" buttons description text**: Sub-labels like "Describe it, Sidekick builds the fields" and "Build every field yourself" are still hardcoded English. Only the button titles were translated this session.
+- **Leaderboard page**: The nav item links to `/dashboard/safety` — there is no `/dashboard/leaderboard` route. If a dedicated leaderboard page is ever created, the sidebar href will need updating.
+
+---
+
+### Next Logical Step
+
+1. Verify Thai translations end-to-end in browser (all pages, both staff and manager roles)
+2. Extend mobile ARB translations to match web coverage
+3. Add Thai translations for remaining hardcoded strings in forms (descriptions, placeholders, validation messages)
+
+---
+
 ## Session: 2026-04-05 (continued × 2)
 
 ### What We Fixed
