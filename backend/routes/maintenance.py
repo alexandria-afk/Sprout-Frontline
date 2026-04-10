@@ -2,15 +2,15 @@
 Maintenance API — /api/v1/maintenance
 Maintenance ticket CRUD.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_admin, require_manager_or_above, paginate
-from services.supabase_client import get_supabase
+from dependencies import get_current_user, require_admin, require_manager_or_above, paginate, get_db
+from services.db import row, rows, execute, execute_returning
 
 router = APIRouter()
 
@@ -47,31 +47,30 @@ class UpdateTicketCostRequest(BaseModel):
 async def create_ticket(
     body: CreateTicketRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
-    data = {
-        "organisation_id": org_id,
-        "created_by": user_id,
-        "title": body.title,
-        "priority": body.priority,
-        "status": "open",
-    }
-    if body.description is not None:
-        data["description"] = body.description
-    if body.asset_id is not None:
-        data["asset_id"] = body.asset_id
-    if body.location_id is not None:
-        data["location_id"] = body.location_id
-    if body.issue_id is not None:
-        data["issue_id"] = body.issue_id
+    fields = ["organisation_id", "created_by", "title", "priority", "status"]
+    values: list = [org_id, user_id, body.title, body.priority, "open"]
 
-    resp = db.table("maintenance_tickets").insert(data).execute()
-    if not resp.data:
+    for field in ["description", "asset_id", "location_id", "issue_id"]:
+        val = getattr(body, field, None)
+        if val is not None:
+            fields.append(field)
+            values.append(val)
+
+    col_list = ", ".join(fields)
+    placeholder_list = ", ".join(["%s"] * len(fields))
+    result = execute_returning(
+        conn,
+        f"INSERT INTO maintenance_tickets ({col_list}) VALUES ({placeholder_list}) RETURNING *",
+        tuple(values),
+    )
+    if not result:
         raise HTTPException(status_code=500, detail="Failed to create maintenance ticket")
-    return resp.data[0]
+    return dict(result)
 
 
 @router.get("/")
@@ -84,64 +83,98 @@ async def list_tickets(
     vendor_id: Optional[str] = Query(None),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
-
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 
-    query = (
-        db.table("maintenance_tickets")
-        .select(
-            "*, assets(name, asset_type), locations(name), vendors(name), "
-            "profiles!assigned_to(full_name), profiles!created_by(full_name)",
-            count="exact",
-        )
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-    )
+    conditions = ["mt.organisation_id = %s", "mt.is_deleted = FALSE"]
+    params: list = [org_id]
 
     if asset_id:
-        query = query.eq("asset_id", asset_id)
+        conditions.append("mt.asset_id = %s")
+        params.append(asset_id)
     if status:
-        query = query.eq("status", status)
+        conditions.append("mt.status = %s")
+        params.append(status)
     if priority:
-        query = query.eq("priority", priority)
+        conditions.append("mt.priority = %s")
+        params.append(priority)
     if assigned_to:
-        query = query.eq("assigned_to", assigned_to)
+        conditions.append("mt.assigned_to = %s")
+        params.append(assigned_to)
     if vendor_id:
-        query = query.eq("vendor_id", vendor_id)
+        conditions.append("mt.vendor_id = %s")
+        params.append(vendor_id)
     if location_id:
-        query = query.eq("location_id", location_id)
+        conditions.append("mt.location_id = %s")
+        params.append(location_id)
 
-    resp = query.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+    where = " AND ".join(conditions)
 
-    return {"data": resp.data or [], "total": resp.count or 0}
+    # Count query
+    count_row = row(conn, f"SELECT COUNT(*) AS total FROM maintenance_tickets mt WHERE {where}", tuple(params))
+    total = count_row["total"] if count_row else 0
+
+    params.extend([page_size, offset])
+    data = rows(
+        conn,
+        f"""
+        SELECT
+            mt.*,
+            json_build_object('name', a.name, 'asset_type', a.asset_type) AS assets,
+            json_build_object('name', l.name) AS locations,
+            json_build_object('name', v.name) AS vendors,
+            json_build_object('full_name', pa.full_name) AS assigned_profile,
+            json_build_object('full_name', pc.full_name) AS creator_profile
+        FROM maintenance_tickets mt
+        LEFT JOIN assets a ON a.id = mt.asset_id
+        LEFT JOIN locations l ON l.id = mt.location_id
+        LEFT JOIN vendors v ON v.id = mt.vendor_id
+        LEFT JOIN profiles pa ON pa.id = mt.assigned_to
+        LEFT JOIN profiles pc ON pc.id = mt.created_by
+        WHERE {where}
+        ORDER BY mt.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params),
+    )
+
+    return {"data": data, "total": total}
 
 
 @router.get("/{ticket_id}")
 async def get_ticket(
     ticket_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("maintenance_tickets")
-        .select(
-            "*, assets(name, asset_type, serial_number), locations(name), vendors(name, contact_name), "
-            "profiles!assigned_to(full_name), profiles!created_by(full_name)"
-        )
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    result = row(
+        conn,
+        """
+        SELECT
+            mt.*,
+            json_build_object('name', a.name, 'asset_type', a.asset_type, 'serial_number', a.serial_number) AS assets,
+            json_build_object('name', l.name) AS locations,
+            json_build_object('name', v.name, 'contact_name', v.contact_name) AS vendors,
+            json_build_object('full_name', pa.full_name) AS assigned_profile,
+            json_build_object('full_name', pc.full_name) AS creator_profile
+        FROM maintenance_tickets mt
+        LEFT JOIN assets a ON a.id = mt.asset_id
+        LEFT JOIN locations l ON l.id = mt.location_id
+        LEFT JOIN vendors v ON v.id = mt.vendor_id
+        LEFT JOIN profiles pa ON pa.id = mt.assigned_to
+        LEFT JOIN profiles pc ON pc.id = mt.created_by
+        WHERE mt.id = %s AND mt.organisation_id = %s AND mt.is_deleted = FALSE
+        """,
+        (str(ticket_id), org_id),
     )
-    if not resp.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Maintenance ticket not found")
-    return resp.data[0]
+    return dict(result)
 
 
 @router.put("/{ticket_id}/status")
@@ -149,71 +182,63 @@ async def update_ticket_status(
     ticket_id: UUID,
     body: UpdateTicketStatusRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
-    current_resp = (
-        db.table("maintenance_tickets")
-        .select("id, status, asset_id, assigned_to, cost")
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    ticket = row(
+        conn,
+        "SELECT id, status, asset_id, assigned_to, cost FROM maintenance_tickets WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(ticket_id), org_id),
     )
-    if not current_resp.data:
+    if not ticket:
         raise HTTPException(status_code=404, detail="Maintenance ticket not found")
 
-    ticket = current_resp.data[0]
-    previous_status = ticket["status"]
+    now_iso = datetime.now(timezone.utc).isoformat()
+    set_parts = ["status = %s", "updated_at = %s"]
+    set_values: list = [body.status, now_iso]
 
-    updates = {
-        "status": body.status,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
     if body.note:
-        updates["resolution_note"] = body.note
+        set_parts.append("resolution_note = %s")
+        set_values.append(body.note)
 
     # If resolving, record resolved time and update cost if provided
     if body.status == "resolved":
-        updates["resolved_at"] = datetime.utcnow().isoformat()
-        resolution_cost = body.cost if body.cost is not None else (ticket.get("cost") or 0)
+        set_parts.append("resolved_at = %s")
+        set_values.append(now_iso)
+
+        resolution_cost = body.cost if body.cost is not None else float(ticket.get("cost") or 0)
         if body.cost is not None:
-            updates["cost"] = body.cost
+            set_parts.append("cost = %s")
+            set_values.append(body.cost)
 
         # Atomically update asset: last_maintenance_at and total_repair_cost
         asset_id = ticket.get("asset_id")
         if asset_id:
             try:
-                asset_resp = (
-                    db.table("assets")
-                    .select("id, total_repair_cost")
-                    .eq("id", asset_id)
-                    .execute()
-                )
-                if asset_resp.data:
-                    current_total = float(asset_resp.data[0].get("total_repair_cost") or 0)
+                asset = row(conn, "SELECT id, total_repair_cost FROM assets WHERE id = %s", (asset_id,))
+                if asset:
+                    current_total = float(asset.get("total_repair_cost") or 0)
                     new_total = current_total + float(resolution_cost)
-                    db.table("assets").update({
-                        "last_maintenance_at": datetime.utcnow().isoformat(),
-                        "total_repair_cost": new_total,
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }).eq("id", asset_id).execute()
+                    execute(
+                        conn,
+                        "UPDATE assets SET last_maintenance_at = %s, total_repair_cost = %s, updated_at = %s WHERE id = %s",
+                        (now_iso, new_total, now_iso, asset_id),
+                    )
             except Exception:
                 pass
 
-    resp = (
-        db.table("maintenance_tickets")
-        .update(updates)
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .execute()
+    set_clause = ", ".join(set_parts)
+    set_values.extend([str(ticket_id), org_id])
+    result = execute_returning(
+        conn,
+        f"UPDATE maintenance_tickets SET {set_clause} WHERE id = %s AND organisation_id = %s RETURNING *",
+        tuple(set_values),
     )
-    if not resp.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Ticket not found")
-
-    return resp.data[0]
+    return dict(result)
 
 
 @router.put("/{ticket_id}/assign")
@@ -221,40 +246,41 @@ async def assign_ticket(
     ticket_id: UUID,
     body: AssignTicketRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    ticket = (
-        db.table("maintenance_tickets")
-        .select("id")
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    ticket = row(
+        conn,
+        "SELECT id FROM maintenance_tickets WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(ticket_id), org_id),
     )
-    if not ticket.data:
+    if not ticket:
         raise HTTPException(status_code=404, detail="Maintenance ticket not found")
 
-    updates: dict = {"updated_at": datetime.utcnow().isoformat()}
-    if body.assigned_to is not None:
-        updates["assigned_to"] = body.assigned_to
-    if body.vendor_id is not None:
-        updates["vendor_id"] = body.vendor_id
+    set_parts = ["updated_at = %s"]
+    set_values: list = [datetime.now(timezone.utc).isoformat()]
 
-    if len(updates) == 1:
+    if body.assigned_to is not None:
+        set_parts.append("assigned_to = %s")
+        set_values.append(body.assigned_to)
+    if body.vendor_id is not None:
+        set_parts.append("vendor_id = %s")
+        set_values.append(body.vendor_id)
+
+    if len(set_parts) == 1:
         raise HTTPException(status_code=400, detail="Provide assigned_to or vendor_id")
 
-    resp = (
-        db.table("maintenance_tickets")
-        .update(updates)
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .execute()
+    set_clause = ", ".join(set_parts)
+    set_values.extend([str(ticket_id), org_id])
+    result = execute_returning(
+        conn,
+        f"UPDATE maintenance_tickets SET {set_clause} WHERE id = %s AND organisation_id = %s RETURNING *",
+        tuple(set_values),
     )
-    if not resp.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    return resp.data[0]
+    return dict(result)
 
 
 @router.put("/{ticket_id}/cost")
@@ -262,28 +288,23 @@ async def update_ticket_cost(
     ticket_id: UUID,
     body: UpdateTicketCostRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    ticket = (
-        db.table("maintenance_tickets")
-        .select("id")
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    ticket = row(
+        conn,
+        "SELECT id FROM maintenance_tickets WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(ticket_id), org_id),
     )
-    if not ticket.data:
+    if not ticket:
         raise HTTPException(status_code=404, detail="Maintenance ticket not found")
 
-    resp = (
-        db.table("maintenance_tickets")
-        .update({"cost": body.cost, "updated_at": datetime.utcnow().isoformat()})
-        .eq("id", str(ticket_id))
-        .eq("organisation_id", org_id)
-        .execute()
+    result = execute_returning(
+        conn,
+        "UPDATE maintenance_tickets SET cost = %s, updated_at = %s WHERE id = %s AND organisation_id = %s RETURNING *",
+        (body.cost, datetime.now(timezone.utc).isoformat(), str(ticket_id), org_id),
     )
-    if not resp.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    return resp.data[0]
+    return dict(result)

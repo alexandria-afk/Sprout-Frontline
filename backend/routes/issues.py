@@ -3,6 +3,7 @@ Issues API — /api/v1/issues
 Issue CRUD + status updates + comments + attachments + export.
 """
 import io
+import json
 import random
 import string
 from datetime import datetime, timedelta
@@ -12,8 +13,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_admin, require_manager_or_above, paginate
-from services.supabase_client import get_supabase
+from dependencies import get_current_user, require_admin, require_manager_or_above, paginate, get_db
+from services.db import row, rows, execute, execute_returning
 
 router = APIRouter()
 
@@ -67,45 +68,38 @@ async def evaluate_escalation_rules(
     issue_id: str,
     trigger_type: str,
     org_id: str,
-    supabase,
+    conn,
     trigger_status: Optional[str] = None,
 ):
     """Evaluate escalation rules for an issue and send FCM notifications as needed."""
     try:
-        # Fetch the issue to get category_id and priority
-        issue_resp = (
-            supabase.table("issues")
-            .select("id, category_id, priority, assigned_to, title")
-            .eq("id", issue_id)
-            .execute()
+        issue = row(
+            conn,
+            "SELECT id, category_id, priority, assigned_to, title FROM issues WHERE id = %s",
+            (issue_id,),
         )
-        if not issue_resp.data:
+        if not issue:
             return
-        issue = issue_resp.data[0]
         category_id = issue.get("category_id")
         if not category_id:
             return
 
-        # Fetch matching escalation rules
-        rules_query = (
-            supabase.table("issue_escalation_rules")
-            .select("*")
-            .eq("category_id", category_id)
-            .eq("is_deleted", False)
-            .eq("trigger_type", trigger_type)
+        sql = (
+            "SELECT * FROM issue_escalation_rules "
+            "WHERE category_id = %s AND is_deleted = FALSE AND trigger_type = %s"
         )
+        params: list = [category_id, trigger_type]
         if trigger_type == "status_change" and trigger_status:
-            rules_query = rules_query.eq("trigger_status", trigger_status)
+            sql += " AND trigger_status = %s"
+            params.append(trigger_status)
         if trigger_type == "priority_critical":
             if issue.get("priority") != "critical":
                 return
 
-        rules_resp = rules_query.execute()
-        rules = rules_resp.data or []
+        rules = rows(conn, sql, tuple(params))
         if not rules:
             return
 
-        # For each rule, collect FCM tokens of recipients
         for rule in rules:
             recipient_ids = []
 
@@ -113,22 +107,18 @@ async def evaluate_escalation_rules(
                 recipient_ids.append(rule["escalate_to_user_id"])
 
             if rule.get("escalate_to_role"):
-                role_resp = (
-                    supabase.table("profiles")
-                    .select("id")
-                    .eq("organisation_id", org_id)
-                    .eq("role", rule["escalate_to_role"])
-                    .eq("is_deleted", False)
-                    .execute()
+                role_profiles = rows(
+                    conn,
+                    "SELECT id FROM profiles WHERE organisation_id = %s AND role = %s AND is_deleted = FALSE",
+                    (org_id, rule["escalate_to_role"]),
                 )
-                for p in (role_resp.data or []):
+                for p in role_profiles:
                     recipient_ids.append(p["id"])
 
             if not recipient_ids:
                 continue
 
             if rule.get("notify_via_fcm"):
-                # Send via centralized notification service
                 try:
                     import asyncio as _asyncio
                     from services import notification_service as _ns
@@ -161,103 +151,103 @@ def _random_suffix(length: int = 8) -> str:
 async def create_issue(
     body: CreateIssueRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
     # Resolve location_id: use provided value, else fall back to user's profile location
     location_id = body.location_id
     if not location_id:
         try:
-            profile_resp = db.table("profiles").select("location_id").eq("id", user_id).single().execute()
-            location_id = (profile_resp.data or {}).get("location_id")
+            profile = row(conn, "SELECT location_id FROM profiles WHERE id = %s", (user_id,))
+            location_id = (profile or {}).get("location_id")
         except Exception:
             pass
 
     if not location_id:
         raise HTTPException(status_code=422, detail="No location found. Please assign a location to your profile or provide one explicitly.")
 
-    data = {
-        "organisation_id": org_id,
-        "reported_by": user_id,
-        "location_id": location_id,
-        "title": body.title,
-        "category_id": body.category_id,
-        "priority": body.priority,
-        "status": "open",
-    }
-    if body.description is not None:
-        data["description"] = body.description
-    if body.location_description is not None:
-        data["location_description"] = body.location_description
-    if body.asset_id is not None:
-        data["asset_id"] = body.asset_id
-    if body.assigned_to is not None:
-        data["assigned_to"] = body.assigned_to
-
-    resp = db.table("issues").insert(data).execute()
-    if not resp.data:
+    issue = execute_returning(
+        conn,
+        """
+        INSERT INTO issues
+            (organisation_id, reported_by, location_id, title, category_id, priority, status,
+             description, location_description, asset_id, assigned_to)
+        VALUES (%s, %s, %s, %s, %s, %s, 'open', %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            org_id, user_id, location_id, body.title, body.category_id, body.priority,
+            body.description, body.location_description, body.asset_id, body.assigned_to,
+        ),
+    )
+    if not issue:
         raise HTTPException(status_code=500, detail="Failed to create issue")
-    issue_id = resp.data[0]["id"]
+    issue_id = issue["id"]
 
     # Re-fetch with joins so the response includes category, location, and reporter
-    fetch_resp = (
-        db.table("issues")
-        .select("*, profiles!reported_by(full_name), issue_categories(name, color), locations(name)")
-        .eq("id", issue_id)
-        .single()
-        .execute()
-    )
-    issue = fetch_resp.data if fetch_resp.data else resp.data[0]
+    issue = row(
+        conn,
+        """
+        SELECT i.*,
+               p.full_name AS reporter_full_name,
+               ic.name     AS category_name,
+               ic.color    AS category_color,
+               l.name      AS location_name
+        FROM issues i
+        LEFT JOIN profiles p ON p.id = i.reported_by
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        LEFT JOIN locations l ON l.id = i.location_id
+        WHERE i.id = %s
+        """,
+        (issue_id,),
+    ) or issue
 
     # Insert custom responses
     if body.custom_responses:
-        custom_rows = [
-            {
-                "issue_id": issue_id,
-                "custom_field_id": cr.custom_field_id,
-                "value": cr.value,
-            }
-            for cr in body.custom_responses
-        ]
-        db.table("issue_custom_responses").insert(custom_rows).execute()
+        for cr in body.custom_responses:
+            execute(
+                conn,
+                "INSERT INTO issue_custom_responses (issue_id, custom_field_id, value) VALUES (%s, %s, %s)",
+                (issue_id, cr.custom_field_id, cr.value),
+            )
 
     # Check recurrence: count similar issues at same location+category in last 30 days
     try:
         thirty_days_ago = (datetime.utcnow() - timedelta(days=30)).isoformat()
-        recurrence_query = (
-            db.table("issues")
-            .select("id", count="exact")
-            .eq("organisation_id", org_id)
-            .eq("category_id", body.category_id)
-            .eq("is_deleted", False)
-            .neq("id", issue_id)
-            .gte("created_at", thirty_days_ago)
+        rec_sql = (
+            "SELECT COUNT(*) AS cnt FROM issues "
+            "WHERE organisation_id = %s AND category_id = %s AND is_deleted = FALSE "
+            "AND id != %s AND created_at >= %s"
         )
+        rec_params: list = [org_id, body.category_id, issue_id, thirty_days_ago]
         if body.location_id:
-            recurrence_query = recurrence_query.eq("location_id", body.location_id)
+            rec_sql += " AND location_id = %s"
+            rec_params.append(body.location_id)
         elif body.location_description:
-            recurrence_query = recurrence_query.eq("location_description", body.location_description)
+            rec_sql += " AND location_description = %s"
+            rec_params.append(body.location_description)
 
-        recurrence_resp = recurrence_query.execute()
-        similar_count = recurrence_resp.count or 0
+        rec_row = row(conn, rec_sql, tuple(rec_params))
+        similar_count = (rec_row or {}).get("cnt", 0)
 
         if similar_count >= 2:
-            db.table("issues").update({
-                "recurrence_count": similar_count,
-                "updated_at": datetime.utcnow().isoformat(),
-            }).eq("id", issue_id).execute()
+            execute(
+                conn,
+                "UPDATE issues SET recurrence_count = %s, updated_at = NOW() WHERE id = %s",
+                (similar_count, issue_id),
+            )
             issue["recurrence_count"] = similar_count
     except Exception:
         pass
 
     # Evaluate on_create escalation rules
-    await evaluate_escalation_rules(issue_id, "on_create", org_id, db)
+    await evaluate_escalation_rules(issue_id, "on_create", org_id, conn)
 
     # Evaluate priority_critical escalation rules if applicable
     if body.priority == "critical":
-        await evaluate_escalation_rules(issue_id, "priority_critical", org_id, db)
+        await evaluate_escalation_rules(issue_id, "priority_critical", org_id, conn)
 
     # Auto-trigger any issue_created workflows
     try:
@@ -275,14 +265,13 @@ async def create_issue(
         logging.getLogger(__name__).warning(f"Workflow trigger failed for issue {issue_id}: {_wf_exc}")
 
     # Notify the assigned user if set on creation
-    if body.assigned_to and data.get("assigned_to"):
+    if body.assigned_to:
         try:
             import asyncio as _asyncio
             from services import notification_service as _ns
-            issue_id_str = issue_id
             priority_str = body.priority or "medium"
-            loc_resp = db.table("locations").select("name").eq("id", location_id).maybe_single().execute()
-            loc_name = (loc_resp.data or {}).get("name", "")
+            loc = row(conn, "SELECT name FROM locations WHERE id = %s", (location_id,))
+            loc_name = (loc or {}).get("name", "")
             _asyncio.create_task(_ns.notify(
                 org_id=org_id,
                 recipient_user_id=str(body.assigned_to),
@@ -290,7 +279,7 @@ async def create_issue(
                 title=f"Issue assigned: {body.title}",
                 body=f"{priority_str} \u00b7 {loc_name}".strip(" \u00b7"),
                 entity_type="issue",
-                entity_id=issue_id_str,
+                entity_id=str(issue_id),
             ))
         except Exception:
             pass
@@ -299,21 +288,21 @@ async def create_issue(
     if body.is_safety_risk:
         try:
             _severity_map = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
-            _incident_data: dict = {
-                "org_id": org_id,
-                "reported_by": user_id,
-                "title": body.title,
-                "description": body.description,
-                "severity": _severity_map.get(body.priority, "medium"),
-                "status": "reported",
-                "incident_date": datetime.utcnow().isoformat(),
-                "related_issue_id": issue_id,
-            }
-            if location_id:
-                _incident_data["location_id"] = location_id
-            if body.location_description:
-                _incident_data["location_description"] = body.location_description
-            db.table("incidents").insert(_incident_data).execute()
+            execute(
+                conn,
+                """
+                INSERT INTO incidents
+                    (org_id, reported_by, title, description, severity, status,
+                     incident_date, related_issue_id, location_id, location_description)
+                VALUES (%s, %s, %s, %s, %s, 'reported', %s, %s, %s, %s)
+                """,
+                (
+                    org_id, user_id, body.title, body.description,
+                    _severity_map.get(body.priority, "medium"),
+                    datetime.utcnow().isoformat(), issue_id,
+                    location_id, body.location_description,
+                ),
+            )
         except Exception as _inc_exc:
             import logging
             logging.getLogger(__name__).warning(f"Incident auto-spawn failed for issue {issue_id}: {_inc_exc}")
@@ -337,10 +326,10 @@ async def list_issues(
     my_team: Optional[bool] = Query(None),
     is_maintenance: Optional[bool] = Query(None),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
     role = (current_user.get("app_metadata") or {}).get("role", "staff")
     manager_location_id = (current_user.get("app_metadata") or {}).get("location_id")
@@ -350,99 +339,179 @@ async def list_issues(
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 
-    query = (
-        db.table("issues")
-        .select(
-            "*, profiles!reported_by(full_name), issue_categories(name, color, sla_hours, is_maintenance), locations(name)",
-            count="exact",
-        )
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-    )
+    conditions = [
+        "i.organisation_id = %s",
+        "i.is_deleted = FALSE",
+    ]
+    params: list = [org_id]
 
-    # Staff view: only issues they reported OR are assigned to
     if my_issues:
-        query = query.or_(f"reported_by.eq.{user_id},assigned_to.eq.{user_id}")
+        conditions.append(f"(i.reported_by = %s OR i.assigned_to = %s)")
+        params.extend([user_id, user_id])
 
-    # Manager view: issues reported by or assigned to anyone who reports to them
     if my_team:
-        direct_reports = (
-            db.table("profiles")
-            .select("id")
-            .eq("reports_to", user_id)
-            .eq("is_deleted", False)
-            .execute()
+        direct_report_rows = rows(
+            conn,
+            "SELECT id FROM profiles WHERE reports_to = %s AND is_deleted = FALSE",
+            (user_id,),
         )
-        report_ids = [r["id"] for r in (direct_reports.data or [])]
-        # Include the manager's own issues too
+        report_ids = [r["id"] for r in direct_report_rows]
         all_ids = list(set(report_ids + [user_id]))
-        id_list = ",".join(f"reported_by.eq.{uid}" for uid in all_ids)
-        assign_list = ",".join(f"assigned_to.eq.{uid}" for uid in all_ids)
-        query = query.or_(f"{id_list},{assign_list}")
+        placeholders = ", ".join(["%s"] * len(all_ids))
+        conditions.append(
+            f"(i.reported_by IN ({placeholders}) OR i.assigned_to IN ({placeholders}))"
+        )
+        params.extend(all_ids)
+        params.extend(all_ids)
 
     if status:
-        query = query.eq("status", status)
+        conditions.append("i.status = %s")
+        params.append(status)
     if priority:
-        query = query.eq("priority", priority)
+        conditions.append("i.priority = %s")
+        params.append(priority)
     if category_id:
-        query = query.eq("category_id", category_id)
+        conditions.append("i.category_id = %s")
+        params.append(category_id)
     if location_id:
-        query = query.eq("location_id", location_id)
+        conditions.append("i.location_id = %s")
+        params.append(location_id)
     if assigned_to:
-        query = query.eq("assigned_to", assigned_to)
+        conditions.append("i.assigned_to = %s")
+        params.append(assigned_to)
     if recurring is True:
-        query = query.gte("recurrence_count", 2)
+        conditions.append("i.recurrence_count >= 2")
     if is_maintenance is True:
-        maint_cats = db.table("issue_categories").select("id").eq("organisation_id", org_id).eq("is_maintenance", True).eq("is_deleted", False).execute()
-        maint_ids = [r["id"] for r in (maint_cats.data or [])]
-        if maint_ids:
-            query = query.in_("category_id", maint_ids)
-        else:
-            # No maintenance categories exist — return empty
+        maint_cats = rows(
+            conn,
+            "SELECT id FROM issue_categories WHERE organisation_id = %s AND is_maintenance = TRUE AND is_deleted = FALSE",
+            (org_id,),
+        )
+        maint_ids = [r["id"] for r in maint_cats]
+        if not maint_ids:
             return {"data": [], "total": 0}
+        placeholders = ", ".join(["%s"] * len(maint_ids))
+        conditions.append(f"i.category_id IN ({placeholders})")
+        params.extend(maint_ids)
     if from_dt:
-        query = query.gte("created_at", from_dt.isoformat())
+        conditions.append("i.created_at >= %s")
+        params.append(from_dt.isoformat())
     if to_dt:
-        query = query.lte("created_at", to_dt.isoformat())
+        conditions.append("i.created_at <= %s")
+        params.append(to_dt.isoformat())
 
-    resp = query.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+    where_clause = " AND ".join(conditions)
 
-    return {"data": resp.data or [], "total": resp.count or 0}
+    count_row = row(
+        conn,
+        f"SELECT COUNT(*) AS total FROM issues i WHERE {where_clause}",
+        tuple(params),
+    )
+    total = (count_row or {}).get("total", 0)
+
+    data = rows(
+        conn,
+        f"""
+        SELECT i.*,
+               p.full_name  AS reporter_full_name,
+               ic.name      AS category_name,
+               ic.color     AS category_color,
+               ic.sla_hours AS category_sla_hours,
+               ic.is_maintenance AS category_is_maintenance,
+               l.name       AS location_name
+        FROM issues i
+        LEFT JOIN profiles p ON p.id = i.reported_by
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        LEFT JOIN locations l ON l.id = i.location_id
+        WHERE {where_clause}
+        ORDER BY i.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params) + (page_size, offset),
+    )
+
+    return {"data": data, "total": total}
 
 
 @router.get("/{issue_id}")
 async def get_issue(
     issue_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("issues")
-        .select(
-            "*, profiles!reported_by(full_name), issue_categories(name, color, sla_hours, is_maintenance), "
-            "locations(name), "
-            "issue_attachments!left(id, file_url, file_type, uploaded_by, created_at, is_deleted, profiles!uploaded_by(full_name)), "
-            "issue_comments!left(id, body, is_vendor_visible, user_id, created_at, is_deleted, profiles!user_id(full_name)), "
-            "issue_status_history!left(id, previous_status, new_status, comment, changed_by, changed_at, profiles!changed_by(full_name)), "
-            "issue_custom_responses!left(id, custom_field_id, value, issue_custom_fields(label, field_type))"
-        )
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    issue = row(
+        conn,
+        """
+        SELECT i.*,
+               p.full_name       AS reporter_full_name,
+               ic.name           AS category_name,
+               ic.color          AS category_color,
+               ic.sla_hours      AS category_sla_hours,
+               ic.is_maintenance AS category_is_maintenance,
+               l.name            AS location_name
+        FROM issues i
+        LEFT JOIN profiles p ON p.id = i.reported_by
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        LEFT JOIN locations l ON l.id = i.location_id
+        WHERE i.id = %s AND i.organisation_id = %s AND i.is_deleted = FALSE
+        """,
+        (str(issue_id), org_id),
     )
-    if not resp.data:
+    if not issue:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    issue = resp.data[0]
-    issue["issue_attachments"] = [
-        a for a in (issue.get("issue_attachments") or []) if not a.get("is_deleted")
-    ]
-    issue["issue_comments"] = [
-        c for c in (issue.get("issue_comments") or []) if not c.get("is_deleted")
-    ]
+    issue = dict(issue)
+
+    attachments = rows(
+        conn,
+        """
+        SELECT a.*, p.full_name AS uploader_full_name
+        FROM issue_attachments a
+        LEFT JOIN profiles p ON p.id = a.uploaded_by
+        WHERE a.issue_id = %s AND a.is_deleted = FALSE
+        """,
+        (str(issue_id),),
+    )
+    issue["issue_attachments"] = attachments
+
+    comments = rows(
+        conn,
+        """
+        SELECT c.*, p.full_name AS commenter_full_name
+        FROM issue_comments c
+        LEFT JOIN profiles p ON p.id = c.user_id
+        WHERE c.issue_id = %s AND c.is_deleted = FALSE
+        """,
+        (str(issue_id),),
+    )
+    issue["issue_comments"] = comments
+
+    status_history = rows(
+        conn,
+        """
+        SELECT h.*, p.full_name AS changer_full_name
+        FROM issue_status_history h
+        LEFT JOIN profiles p ON p.id = h.changed_by
+        WHERE h.issue_id = %s
+        """,
+        (str(issue_id),),
+    )
+    issue["issue_status_history"] = status_history
+
+    custom_responses = rows(
+        conn,
+        """
+        SELECT r.*, f.label AS field_label, f.field_type AS field_type
+        FROM issue_custom_responses r
+        LEFT JOIN issue_custom_fields f ON f.id = r.custom_field_id
+        WHERE r.issue_id = %s
+        """,
+        (str(issue_id),),
+    )
+    issue["issue_custom_responses"] = custom_responses
+
     return issue
 
 
@@ -451,27 +520,22 @@ async def update_issue(
     issue_id: UUID,
     body: UpdateIssueRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     role = (current_user.get("app_metadata") or {}).get("role", "")
-    db = get_supabase()
 
-    # Fetch current issue to check permissions
-    current_resp = (
-        db.table("issues")
-        .select("id, reported_by, assigned_to")
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    current_issue = row(
+        conn,
+        "SELECT id, reported_by, assigned_to FROM issues WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(issue_id), org_id),
     )
-    if not current_resp.data:
+    if not current_issue:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    issue = current_resp.data[0]
-    is_reporter = issue.get("reported_by") == user_id
-    is_assignee = issue.get("assigned_to") == user_id
+    is_reporter = current_issue.get("reported_by") == user_id
+    is_assignee = current_issue.get("assigned_to") == user_id
     is_manager_plus = role in ("manager", "admin", "super_admin")
 
     if not (is_reporter or is_assignee or is_manager_plus):
@@ -480,18 +544,18 @@ async def update_issue(
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="Nothing to update")
-    updates["updated_at"] = datetime.utcnow().isoformat()
 
-    resp = (
-        db.table("issues")
-        .update(updates)
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .execute()
+    set_parts = ", ".join(f"{k} = %s" for k in updates)
+    values = list(updates.values()) + [str(issue_id), org_id]
+
+    updated = execute_returning(
+        conn,
+        f"UPDATE issues SET {set_parts}, updated_at = NOW() WHERE id = %s AND organisation_id = %s RETURNING *",
+        tuple(values),
     )
-    if not resp.data:
+    if not updated:
         raise HTTPException(status_code=404, detail="Issue not found")
-    return resp.data[0]
+    return updated
 
 
 @router.put("/{issue_id}/status")
@@ -499,67 +563,59 @@ async def update_issue_status(
     issue_id: UUID,
     body: UpdateIssueStatusRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     role = (current_user.get("app_metadata") or {}).get("role", "")
-    db = get_supabase()
 
     # Only managers and above can set verified_closed
     if body.status == "verified_closed" and role not in ("manager", "admin", "super_admin"):
         raise HTTPException(status_code=403, detail="Only managers and above can verify-close an issue")
 
-    current_resp = (
-        db.table("issues")
-        .select("id, status, assigned_to")
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    current_issue = row(
+        conn,
+        "SELECT id, status, assigned_to FROM issues WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(issue_id), org_id),
     )
-    if not current_resp.data:
+    if not current_issue:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    issue = current_resp.data[0]
-    previous_status = issue["status"]
+    previous_status = current_issue["status"]
 
-    updates = {
-        "status": body.status,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
     if body.status == "resolved":
-        updates["resolved_at"] = datetime.utcnow().isoformat()
-
-    resp = (
-        db.table("issues")
-        .update(updates)
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .execute()
-    )
-    if not resp.data:
+        updated = execute_returning(
+            conn,
+            "UPDATE issues SET status = %s, resolved_at = NOW(), updated_at = NOW() WHERE id = %s AND organisation_id = %s RETURNING *",
+            (body.status, str(issue_id), org_id),
+        )
+    else:
+        updated = execute_returning(
+            conn,
+            "UPDATE issues SET status = %s, updated_at = NOW() WHERE id = %s AND organisation_id = %s RETURNING *",
+            (body.status, str(issue_id), org_id),
+        )
+    if not updated:
         raise HTTPException(status_code=404, detail="Issue not found")
 
     # Insert status history record
-    history_data = {
-        "issue_id": str(issue_id),
-        "changed_by": user_id,
-        "previous_status": previous_status,
-        "new_status": body.status,
-    }
-    if body.note:
-        history_data["note"] = body.note
-    db.table("issue_status_history").insert(history_data).execute()
+    execute(
+        conn,
+        """
+        INSERT INTO issue_status_history (issue_id, changed_by, previous_status, new_status, note)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (str(issue_id), user_id, previous_status, body.status, body.note),
+    )
 
     # Evaluate status_change escalation rules
     await evaluate_escalation_rules(
-        str(issue_id), "status_change", org_id, db, trigger_status=body.status
+        str(issue_id), "status_change", org_id, conn, trigger_status=body.status
     )
 
     # Notify the reporter that the issue status changed
     try:
-        issue_full = db.table("issues").select("title, reported_by").eq("id", str(issue_id)).maybe_single().execute()
-        issue_data = issue_full.data or {}
+        issue_data = row(conn, "SELECT title, reported_by FROM issues WHERE id = %s", (str(issue_id),)) or {}
         reported_by = issue_data.get("reported_by")
         issue_title = issue_data.get("title", "Issue")
         status_label = body.status.replace("_", " ").title()
@@ -577,7 +633,7 @@ async def update_issue_status(
     except Exception:
         pass
 
-    return resp.data[0]
+    return updated
 
 
 # ── Comments ───────────────────────────────────────────────────────────────────
@@ -587,36 +643,38 @@ async def add_comment(
     issue_id: UUID,
     body: AddCommentRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
-    issue = (
-        db.table("issues")
-        .select("id")
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    issue_check = row(
+        conn,
+        "SELECT id FROM issues WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(issue_id), org_id),
     )
-    if not issue.data:
+    if not issue_check:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    resp = db.table("issue_comments").insert({
-        "issue_id": str(issue_id),
-        "user_id": user_id,
-        "body": body.body,
-        "is_vendor_visible": body.is_vendor_visible or False,
-    }).execute()
-    if not resp.data:
+    comment = execute_returning(
+        conn,
+        """
+        INSERT INTO issue_comments (issue_id, user_id, body, is_vendor_visible)
+        VALUES (%s, %s, %s, %s)
+        RETURNING *
+        """,
+        (str(issue_id), user_id, body.body, body.is_vendor_visible or False),
+    )
+    if not comment:
         raise HTTPException(status_code=500, detail="Failed to add comment")
-    comment = resp.data[0]
 
     # Notify issue participants (assigned_to and reported_by, excluding commenter)
     try:
-        issue_full = db.table("issues").select("title, assigned_to, reported_by").eq("id", str(issue_id)).maybe_single().execute()
-        issue_data = issue_full.data or {}
+        issue_data = row(
+            conn,
+            "SELECT title, assigned_to, reported_by FROM issues WHERE id = %s",
+            (str(issue_id),),
+        ) or {}
         issue_title = issue_data.get("title", "Issue")
         recipients = set()
         if issue_data.get("assigned_to") and issue_data["assigned_to"] != user_id:
@@ -647,41 +705,35 @@ async def delete_comment(
     issue_id: UUID,
     comment_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
-    issue = (
-        db.table("issues")
-        .select("id")
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    issue_check = row(
+        conn,
+        "SELECT id FROM issues WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(issue_id), org_id),
     )
-    if not issue.data:
+    if not issue_check:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    # Only soft-delete own comment
-    comment_resp = (
-        db.table("issue_comments")
-        .select("id, user_id")
-        .eq("id", str(comment_id))
-        .eq("issue_id", str(issue_id))
-        .eq("is_deleted", False)
-        .execute()
+    comment_record = row(
+        conn,
+        "SELECT id, user_id FROM issue_comments WHERE id = %s AND issue_id = %s AND is_deleted = FALSE",
+        (str(comment_id), str(issue_id)),
     )
-    if not comment_resp.data:
+    if not comment_record:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    if comment_resp.data[0]["user_id"] != user_id:
+    if comment_record["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Cannot delete another user's comment")
 
-    db.table("issue_comments").update({
-        "is_deleted": True,
-        "updated_at": datetime.utcnow().isoformat(),
-    }).eq("id", str(comment_id)).execute()
+    execute(
+        conn,
+        "UPDATE issue_comments SET is_deleted = TRUE, updated_at = NOW() WHERE id = %s",
+        (str(comment_id),),
+    )
 
     return {"ok": True}
 
@@ -693,20 +745,17 @@ async def upload_attachments(
     issue_id: UUID,
     files: List[UploadFile] = File(...),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    db = get_supabase()
 
-    issue = (
-        db.table("issues")
-        .select("id")
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    issue_check = row(
+        conn,
+        "SELECT id FROM issues WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(issue_id), org_id),
     )
-    if not issue.data:
+    if not issue_check:
         raise HTTPException(status_code=404, detail="Issue not found")
 
     if len(files) > 5:
@@ -717,6 +766,10 @@ async def upload_attachments(
     uploaded = []
     bucket = "issue-media"
     timestamp = int(datetime.utcnow().timestamp())
+
+    # Phase 5: replace with Azure Blob
+    from services.supabase_client import get_supabase
+    _storage_client = get_supabase()
 
     for f in files:
         content = await f.read()
@@ -734,7 +787,8 @@ async def upload_attachments(
         storage_path = f"{user_id}/{str(issue_id)}/{timestamp}-{suffix}.{ext}" if ext else f"{user_id}/{str(issue_id)}/{timestamp}-{suffix}"
 
         try:
-            db.storage.from_(bucket).upload(
+            # Phase 5: replace with Azure Blob
+            _storage_client.storage.from_(bucket).upload(
                 storage_path,
                 content,
                 {"content-type": f.content_type or "application/octet-stream"},
@@ -742,7 +796,8 @@ async def upload_attachments(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
 
-        public_url_resp = db.storage.from_(bucket).get_public_url(storage_path)
+        # Phase 5: replace with Azure Blob
+        public_url_resp = _storage_client.storage.from_(bucket).get_public_url(storage_path)
         file_url = public_url_resp if isinstance(public_url_resp, str) else storage_path
 
         mime = f.content_type or "application/octet-stream"
@@ -753,15 +808,17 @@ async def upload_attachments(
         else:
             normalized_type = "document"
 
-        att_resp = db.table("issue_attachments").insert({
-            "issue_id": str(issue_id),
-            "uploaded_by": user_id,
-            "file_url": file_url,
-            "file_type": normalized_type,
-            "storage_path": storage_path,
-        }).execute()
-        if att_resp.data:
-            uploaded.append(att_resp.data[0])
+        attachment = execute_returning(
+            conn,
+            """
+            INSERT INTO issue_attachments (issue_id, uploaded_by, file_url, file_type, storage_path)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING *
+            """,
+            (str(issue_id), user_id, file_url, normalized_type, storage_path),
+        )
+        if attachment:
+            uploaded.append(attachment)
 
     return {"data": uploaded, "total": len(uploaded)}
 
@@ -773,29 +830,52 @@ async def export_issue(
     issue_id: UUID,
     email_to: Optional[str] = Query(None, description="Comma-separated email addresses"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("issues")
-        .select(
-            "*, profiles!reported_by(full_name, email), issue_categories(name), "
-            "locations(name), "
-            "issue_comments!left(body, created_at, is_deleted, profiles!user_id(full_name)), "
-            "issue_status_history!left(previous_status, new_status, changed_at, profiles!changed_by(full_name))"
-        )
-        .eq("id", str(issue_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    issue = row(
+        conn,
+        """
+        SELECT i.*,
+               p.full_name AS reporter_full_name,
+               p.email     AS reporter_email,
+               ic.name     AS category_name,
+               l.name      AS location_name
+        FROM issues i
+        LEFT JOIN profiles p ON p.id = i.reported_by
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        LEFT JOIN locations l ON l.id = i.location_id
+        WHERE i.id = %s AND i.organisation_id = %s AND i.is_deleted = FALSE
+        """,
+        (str(issue_id), org_id),
     )
-    if not resp.data:
+    if not issue:
         raise HTTPException(status_code=404, detail="Issue not found")
 
-    issue = resp.data[0]
-    comments = [c for c in (issue.get("issue_comments") or []) if not c.get("is_deleted")]
-    history = issue.get("issue_status_history") or []
+    issue = dict(issue)
+
+    comments = rows(
+        conn,
+        """
+        SELECT c.body, c.created_at, p.full_name AS commenter_full_name
+        FROM issue_comments c
+        LEFT JOIN profiles p ON p.id = c.user_id
+        WHERE c.issue_id = %s AND c.is_deleted = FALSE
+        """,
+        (str(issue_id),),
+    )
+
+    history = rows(
+        conn,
+        """
+        SELECT h.previous_status, h.new_status, h.changed_at, p.full_name AS changer_full_name
+        FROM issue_status_history h
+        LEFT JOIN profiles p ON p.id = h.changed_by
+        WHERE h.issue_id = %s
+        """,
+        (str(issue_id),),
+    )
 
     # Attempt PDF generation with reportlab; fall back to plain text
     try:
@@ -817,9 +897,9 @@ async def export_issue(
             ["ID", str(issue["id"])],
             ["Status", issue.get("status", "")],
             ["Priority", issue.get("priority", "")],
-            ["Category", (issue.get("issue_categories") or {}).get("name", "")],
-            ["Location", (issue.get("locations") or {}).get("name", issue.get("location_description", ""))],
-            ["Reported By", (issue.get("profiles") or {}).get("full_name", "")],
+            ["Category", issue.get("category_name", "")],
+            ["Location", issue.get("location_name") or issue.get("location_description", "")],
+            ["Reported By", issue.get("reporter_full_name", "")],
             ["Created At", str(issue.get("created_at", ""))],
         ]
         t = Table(meta, colWidths=[120, 360])
@@ -841,7 +921,7 @@ async def export_issue(
             for h in history:
                 story.append(Paragraph(
                     f"{h.get('changed_at', '')} — {h.get('previous_status', '')} → {h.get('new_status', '')} "
-                    f"(by {(h.get('profiles') or {}).get('full_name', 'unknown')})",
+                    f"(by {h.get('changer_full_name', 'unknown')})",
                     styles["Normal"],
                 ))
             story.append(Spacer(1, 12))
@@ -850,7 +930,7 @@ async def export_issue(
             story.append(Paragraph("Comments", styles["Heading2"]))
             for c in comments:
                 story.append(Paragraph(
-                    f"[{c.get('created_at', '')}] {(c.get('profiles') or {}).get('full_name', 'unknown')}: {c.get('body', '')}",
+                    f"[{c.get('created_at', '')}] {c.get('commenter_full_name', 'unknown')}: {c.get('body', '')}",
                     styles["Normal"],
                 ))
             story.append(Spacer(1, 6))
@@ -875,9 +955,9 @@ async def export_issue(
             f"Title: {issue['title']}",
             f"Status: {issue.get('status', '')}",
             f"Priority: {issue.get('priority', '')}",
-            f"Category: {(issue.get('issue_categories') or {}).get('name', '')}",
-            f"Location: {(issue.get('locations') or {}).get('name', issue.get('location_description', ''))}",
-            f"Reported By: {(issue.get('profiles') or {}).get('full_name', '')}",
+            f"Category: {issue.get('category_name', '')}",
+            f"Location: {issue.get('location_name') or issue.get('location_description', '')}",
+            f"Reported By: {issue.get('reporter_full_name', '')}",
             f"Created At: {issue.get('created_at', '')}",
             f"",
             f"Description:",
@@ -888,13 +968,13 @@ async def export_issue(
         for h in history:
             lines.append(
                 f"  {h.get('changed_at', '')} — {h.get('previous_status', '')} → {h.get('new_status', '')} "
-                f"(by {(h.get('profiles') or {}).get('full_name', 'unknown')})"
+                f"(by {h.get('changer_full_name', 'unknown')})"
             )
         lines.append("")
         lines.append("Comments:")
         for c in comments:
             lines.append(
-                f"  [{c.get('created_at', '')}] {(c.get('profiles') or {}).get('full_name', 'unknown')}: {c.get('body', '')}"
+                f"  [{c.get('created_at', '')}] {c.get('commenter_full_name', 'unknown')}: {c.get('body', '')}"
             )
 
         return PlainTextResponse("\n".join(lines), headers={

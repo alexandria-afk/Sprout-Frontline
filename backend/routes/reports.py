@@ -5,13 +5,15 @@ GET /api/v1/reports/checklist-completion
 """
 
 import logging
+import statistics
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from dependencies import require_manager_or_above
-from services.supabase_client import get_admin_client
+from dependencies import get_db, require_manager_or_above
+from services.db import row, rows, execute, execute_returning, execute_many
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -30,13 +32,13 @@ async def compliance_trend(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """
     Audit compliance trend by location and date range.
     Returns weekly buckets with avg_score, pass_rate, and total_audits.
     """
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     # Default: last 30 days
     if not to_date:
@@ -45,36 +47,43 @@ async def compliance_trend(
         from_dt = datetime.fromisoformat(to_date) - timedelta(days=30)
         from_date = from_dt.date().isoformat()
 
-    q = db.table("form_submissions") \
-        .select("""
-            id, submitted_at, overall_score, passed, location_id,
-            form_templates!inner(organisation_id, type)
-        """) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "audit") \
-        .gte("submitted_at", from_date) \
-        .lte("submitted_at", to_date + "T23:59:59Z") \
-        .order("submitted_at")
-
+    params: list = [org_id, from_date, to_date + "T23:59:59Z"]
+    location_clause = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        location_clause = "AND fs.location_id = %s"
+        params.append(location_id)
 
-    res = q.execute()
-    rows = res.data or []
+    sql = f"""
+        SELECT fs.id, fs.submitted_at, fs.overall_score, fs.passed, fs.location_id
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE ft.organisation_id = %s
+          AND ft.type = 'audit'
+          AND fs.submitted_at >= %s
+          AND fs.submitted_at <= %s
+          {location_clause}
+        ORDER BY fs.submitted_at
+    """
+
+    result_rows = rows(conn, sql, tuple(params))
 
     # Bucket by week
     buckets: dict[str, dict] = {}
-    for row in rows:
-        dt = datetime.fromisoformat(row["submitted_at"].replace("Z", "+00:00"))
+    for r in result_rows:
+        submitted_at = r["submitted_at"]
+        if hasattr(submitted_at, "isoformat"):
+            dt = submitted_at if submitted_at.tzinfo else submitted_at.replace(tzinfo=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(submitted_at).replace("Z", "+00:00"))
         # ISO week start (Monday)
         week_start = (dt - timedelta(days=dt.weekday())).date().isoformat()
         if week_start not in buckets:
             buckets[week_start] = {"week": week_start, "total": 0, "passed": 0, "score_sum": 0.0}
         b = buckets[week_start]
         b["total"] += 1
-        if row.get("passed"):
+        if r.get("passed"):
             b["passed"] += 1
-        b["score_sum"] += float(row.get("overall_score") or 0)
+        b["score_sum"] += float(r.get("overall_score") or 0)
 
     trend = []
     for week, b in sorted(buckets.items()):
@@ -108,10 +117,10 @@ async def checklist_completion(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Checklist completion rates by template + location."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
@@ -119,31 +128,34 @@ async def checklist_completion(
         from_dt = datetime.fromisoformat(to_date) - timedelta(days=30)
         from_date = from_dt.date().isoformat()
 
-    q = db.table("form_submissions") \
-        .select("""
-            id, status, location_id, form_template_id,
-            form_templates!inner(title, type, organisation_id)
-        """) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "checklist") \
-        .gte("created_at", from_date) \
-        .lte("created_at", to_date + "T23:59:59Z")
-
+    params: list = [org_id, from_date, to_date + "T23:59:59Z"]
+    location_clause = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        location_clause = "AND fs.location_id = %s"
+        params.append(location_id)
 
-    res = q.execute()
-    rows = res.data or []
+    sql = f"""
+        SELECT fs.id, fs.status, fs.location_id, fs.form_template_id, ft.title
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE ft.organisation_id = %s
+          AND ft.type = 'checklist'
+          AND fs.created_at >= %s
+          AND fs.created_at <= %s
+          {location_clause}
+    """
+
+    result_rows = rows(conn, sql, tuple(params))
 
     # Group by template
     by_template: dict[str, dict] = {}
-    for row in rows:
-        tid = row["form_template_id"]
-        title = (row.get("form_templates") or {}).get("title", tid)
+    for r in result_rows:
+        tid = r["form_template_id"]
+        title = r.get("title") or str(tid)
         if tid not in by_template:
             by_template[tid] = {"template_id": tid, "title": title, "total": 0, "completed": 0}
         by_template[tid]["total"] += 1
-        if row.get("status") == "submitted":
+        if r.get("status") == "submitted":
             by_template[tid]["completed"] += 1
 
     result = []
@@ -156,17 +168,16 @@ async def checklist_completion(
     return {"from": from_date, "to": to_date, "templates": result}
 
 
-def _get_pullout_template_ids(sb, org_id: str) -> list:
+def _get_pullout_template_ids(conn, org_id: str) -> list:
     """Return IDs of all active pull_out form templates for the org."""
-    res = (
-        sb.table("form_templates")
-        .select("id")
-        .eq("organisation_id", org_id)
-        .eq("type", "pull_out")
-        .eq("is_deleted", False)
-        .execute()
-    )
-    return [r["id"] for r in (res.data or [])]
+    result = rows(conn, """
+        SELECT id
+        FROM form_templates
+        WHERE organisation_id = %s
+          AND type = 'pull_out'
+          AND is_deleted = FALSE
+    """, (org_id,))
+    return [r["id"] for r in result]
 
 
 _TASK_SLA_HOURS = {
@@ -185,53 +196,68 @@ def get_pullout_summary(
     date_to: Optional[str] = Query(None),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Total pull-out count, total cost, and breakdown by reason and category."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
 
-    tpl_ids = _get_pullout_template_ids(sb, org_id)
+    tpl_ids = _get_pullout_template_ids(conn, org_id)
     if not tpl_ids:
         return {"total_submissions": 0, "total_cost": 0, "by_reason": [], "by_category": []}
 
-    q = (
-        sb.table("form_submissions")
-        .select("id, submitted_at, location_id, estimated_cost, form_responses(value, form_fields(label))")
-        .eq("is_deleted", False)
-        .eq("status", "submitted")
-        .in_("form_template_id", tpl_ids)
-    )
+    params: list = [list(tpl_ids)]
+    date_clauses = ""
     if date_from:
-        q = q.gte("submitted_at", date_from)
+        date_clauses += " AND fs.submitted_at >= %s"
+        params.append(date_from)
     if date_to:
-        q = q.lte("submitted_at", date_to + "T23:59:59")
+        date_clauses += " AND fs.submitted_at <= %s"
+        params.append(date_to + "T23:59:59")
     if location_id:
-        q = q.eq("location_id", location_id)
+        date_clauses += " AND fs.location_id = %s"
+        params.append(location_id)
 
-    submissions = q.execute().data or []
+    sql = f"""
+        SELECT fs.id, fs.submitted_at, fs.location_id, fs.estimated_cost,
+               ff.label, fr.value
+        FROM form_submissions fs
+        LEFT JOIN form_responses fr ON fr.form_submission_id = fs.id
+        LEFT JOIN form_fields ff ON ff.id = fr.form_field_id
+        WHERE fs.is_deleted = FALSE
+          AND fs.status = 'submitted'
+          AND fs.form_template_id = ANY(%s::uuid[])
+          {date_clauses}
+    """
 
-    total_cost = 0.0
+    result_rows = rows(conn, sql, tuple(params))
+
+    # Group by submission id first to collect estimated_cost once per submission
+    submission_costs: dict = {}
     reason_counts: dict = {}
     category_counts: dict = {}
 
-    for sub in submissions:
-        ec = sub.get("estimated_cost")
+    for r in result_rows:
+        sid = r["id"]
+        if sid not in submission_costs:
+            ec = r.get("estimated_cost")
+            submission_costs[sid] = ec
+        label = (r.get("label") or "").strip().lower()
+        val = r.get("value") or ""
+        if label == "reason":
+            reason_counts[val] = reason_counts.get(val, 0) + 1
+        elif label == "category":
+            category_counts[val] = category_counts.get(val, 0) + 1
+
+    total_cost = 0.0
+    for ec in submission_costs.values():
         if ec is not None:
             try:
                 total_cost += float(ec)
             except (ValueError, TypeError):
                 pass
-        responses = sub.get("form_responses") or []
-        for r in responses:
-            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
-            val = r.get("value") or ""
-            if label == "reason":
-                reason_counts[val] = reason_counts.get(val, 0) + 1
-            elif label == "category":
-                category_counts[val] = category_counts.get(val, 0) + 1
 
     return {
-        "total_submissions": len(submissions),
+        "total_submissions": len(submission_costs),
         "total_cost": round(total_cost, 2),
         "by_reason": [{"reason": k, "count": v} for k, v in sorted(reason_counts.items(), key=lambda x: -x[1])],
         "by_category": [{"category": k, "count": v} for k, v in sorted(category_counts.items(), key=lambda x: -x[1])],
@@ -245,42 +271,49 @@ def get_pullout_trends(
     location_id: Optional[str] = Query(None),
     granularity: str = Query("day"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Daily/weekly/monthly pull-out counts and total cost."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
 
-    tpl_ids = _get_pullout_template_ids(sb, org_id)
+    tpl_ids = _get_pullout_template_ids(conn, org_id)
     if not tpl_ids:
         return {"trends": []}
 
-    q = (
-        sb.table("form_submissions")
-        .select("submitted_at, estimated_cost")
-        .eq("is_deleted", False)
-        .eq("status", "submitted")
-        .in_("form_template_id", tpl_ids)
-    )
+    params: list = [list(tpl_ids)]
+    date_clauses = ""
     if date_from:
-        q = q.gte("submitted_at", date_from)
+        date_clauses += " AND submitted_at >= %s"
+        params.append(date_from)
     if date_to:
-        q = q.lte("submitted_at", date_to + "T23:59:59")
+        date_clauses += " AND submitted_at <= %s"
+        params.append(date_to + "T23:59:59")
     if location_id:
-        q = q.eq("location_id", location_id)
+        date_clauses += " AND location_id = %s"
+        params.append(location_id)
 
-    submissions = q.execute().data or []
+    sql = f"""
+        SELECT submitted_at, estimated_cost
+        FROM form_submissions
+        WHERE is_deleted = FALSE
+          AND status = 'submitted'
+          AND form_template_id = ANY(%s::uuid[])
+          {date_clauses}
+    """
 
-    from collections import defaultdict
-    from datetime import datetime as dt
+    result_rows = rows(conn, sql, tuple(params))
 
     bucket_counts: dict = defaultdict(int)
     bucket_cost: dict = defaultdict(float)
-    for sub in submissions:
-        ts = sub.get("submitted_at", "")
+    for r in result_rows:
+        ts = r.get("submitted_at")
         if not ts:
             continue
         try:
-            d = dt.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "strftime"):
+                d = ts if getattr(ts, "tzinfo", None) else ts.replace(tzinfo=timezone.utc)
+            else:
+                d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             if granularity == "month":
                 key = d.strftime("%Y-%m")
             elif granularity == "week":
@@ -288,7 +321,7 @@ def get_pullout_trends(
             else:
                 key = d.strftime("%Y-%m-%d")
             bucket_counts[key] += 1
-            ec = sub.get("estimated_cost")
+            ec = r.get("estimated_cost")
             if ec is not None:
                 try:
                     bucket_cost[key] += float(ec)
@@ -312,51 +345,63 @@ def get_pullout_top_items(
     location_id: Optional[str] = Query(None),
     limit: int = Query(10),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Top pulled-out items by frequency and total cost."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
 
-    tpl_ids = _get_pullout_template_ids(sb, org_id)
+    tpl_ids = _get_pullout_template_ids(conn, org_id)
     if not tpl_ids:
         return {"top_items": []}
 
-    q = (
-        sb.table("form_submissions")
-        .select("estimated_cost, form_responses(value, form_fields(label))")
-        .eq("is_deleted", False)
-        .eq("status", "submitted")
-        .in_("form_template_id", tpl_ids)
-    )
+    params: list = [list(tpl_ids)]
+    date_clauses = ""
     if date_from:
-        q = q.gte("submitted_at", date_from)
+        date_clauses += " AND fs.submitted_at >= %s"
+        params.append(date_from)
     if date_to:
-        q = q.lte("submitted_at", date_to + "T23:59:59")
+        date_clauses += " AND fs.submitted_at <= %s"
+        params.append(date_to + "T23:59:59")
     if location_id:
-        q = q.eq("location_id", location_id)
+        date_clauses += " AND fs.location_id = %s"
+        params.append(location_id)
 
-    submissions = q.execute().data or []
+    sql = f"""
+        SELECT fs.id, fs.estimated_cost, ff.label, fr.value
+        FROM form_submissions fs
+        LEFT JOIN form_responses fr ON fr.form_submission_id = fs.id
+        LEFT JOIN form_fields ff ON ff.id = fr.form_field_id
+        WHERE fs.is_deleted = FALSE
+          AND fs.status = 'submitted'
+          AND fs.form_template_id = ANY(%s::uuid[])
+          {date_clauses}
+    """
 
-    from collections import defaultdict
+    result_rows = rows(conn, sql, tuple(params))
+
+    # Collect item name and cost per submission
+    submission_item: dict = {}
+    submission_cost: dict = {}
+
+    for r in result_rows:
+        sid = r["id"]
+        label = (r.get("label") or "").strip().lower()
+        if label == "item name" and r.get("value"):
+            submission_item[sid] = r["value"]
+        if sid not in submission_cost:
+            ec = r.get("estimated_cost")
+            submission_cost[sid] = ec
+
     item_counts: dict = defaultdict(int)
     item_cost: dict = defaultdict(float)
-
-    for sub in submissions:
-        responses = sub.get("form_responses") or []
-        item_name = None
-        for r in responses:
-            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
-            if label == "item name":
-                item_name = r.get("value") or "Unknown"
-                break
-        if item_name:
-            item_counts[item_name] += 1
-            ec = sub.get("estimated_cost")
-            if ec is not None:
-                try:
-                    item_cost[item_name] += float(ec)
-                except (ValueError, TypeError):
-                    pass
+    for sid, item_name in submission_item.items():
+        item_counts[item_name] += 1
+        ec = submission_cost.get(sid)
+        if ec is not None:
+            try:
+                item_cost[item_name] += float(ec)
+            except (ValueError, TypeError):
+                pass
 
     top = sorted(item_counts.items(), key=lambda x: -x[1])[:limit]
     return {
@@ -371,6 +416,7 @@ def get_pullout_top_items(
 def get_pullout_anomalies(
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """
     Cost-based weekly anomaly detection per location.
@@ -378,45 +424,49 @@ def get_pullout_anomalies(
     Flags locations where current week > 1.5× average.
     """
     org_id = _get_org(current_user)
-    sb = get_admin_client()
 
-    tpl_ids = _get_pullout_template_ids(sb, org_id)
+    tpl_ids = _get_pullout_template_ids(conn, org_id)
     if not tpl_ids:
         return {"anomalies": [], "locations_checked": 0}
 
-    from datetime import datetime as dt, timedelta, timezone
-    now = dt.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     # Start of current week (Monday)
     current_week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     # 4 weeks back
     four_weeks_ago = current_week_start - timedelta(weeks=4)
 
-    q = (
-        sb.table("form_submissions")
-        .select("submitted_at, location_id, estimated_cost")
-        .eq("is_deleted", False)
-        .eq("status", "submitted")
-        .in_("form_template_id", tpl_ids)
-        .gte("submitted_at", four_weeks_ago.isoformat())
-    )
+    params: list = [list(tpl_ids), four_weeks_ago.isoformat()]
+    location_clause = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        location_clause = " AND location_id = %s"
+        params.append(location_id)
 
-    submissions = q.execute().data or []
+    sql = f"""
+        SELECT submitted_at, location_id, estimated_cost
+        FROM form_submissions
+        WHERE is_deleted = FALSE
+          AND status = 'submitted'
+          AND form_template_id = ANY(%s::uuid[])
+          AND submitted_at >= %s
+          {location_clause}
+    """
 
-    from collections import defaultdict
-    # loc_id → list of (week_start_str, cost)
+    result_rows = rows(conn, sql, tuple(params))
+
+    # loc_id → week_key → cumulative cost
     loc_weekly: dict = defaultdict(lambda: defaultdict(float))
 
-    for sub in submissions:
-        ts = sub.get("submitted_at", "")
-        loc = sub.get("location_id") or "unknown"
-        ec = sub.get("estimated_cost") or 0
+    for r in result_rows:
+        ts = r.get("submitted_at")
+        loc = r.get("location_id") or "unknown"
+        ec = r.get("estimated_cost") or 0
         if not ts:
             continue
         try:
-            d = dt.fromisoformat(ts.replace("Z", "+00:00"))
-            # Monday of this submission's week
+            if hasattr(ts, "weekday"):
+                d = ts if getattr(ts, "tzinfo", None) else ts.replace(tzinfo=timezone.utc)
+            else:
+                d = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             week_mon = d - timedelta(days=d.weekday())
             week_key = week_mon.strftime("%Y-%m-%d")
             loc_weekly[loc][week_key] += float(ec)
@@ -453,22 +503,22 @@ def get_maintenance_issues(
     date_to: Optional[str] = Query(None),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Maintenance costs report: issues where category.is_maintenance=true."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     # Get all maintenance category IDs for this org
-    cat_resp = (
-        db.table("issue_categories")
-        .select("id, name")
-        .eq("organisation_id", org_id)
-        .eq("is_maintenance", True)
-        .eq("is_deleted", False)
-        .execute()
-    )
-    maint_cat_ids = [r["id"] for r in (cat_resp.data or [])]
-    cat_name_map = {r["id"]: r["name"] for r in (cat_resp.data or [])}
+    cat_rows = rows(conn, """
+        SELECT id, name
+        FROM issue_categories
+        WHERE organisation_id = %s
+          AND is_maintenance = TRUE
+          AND is_deleted = FALSE
+    """, (org_id,))
+
+    maint_cat_ids = [r["id"] for r in cat_rows]
+    cat_name_map = {r["id"]: r["name"] for r in cat_rows}
 
     if not maint_cat_ids:
         return {
@@ -476,23 +526,34 @@ def get_maintenance_issues(
             "by_location": [], "by_asset": [], "by_month": [], "issues": []
         }
 
-    # Fetch issues in those categories
-    query = (
-        db.table("issues")
-        .select("id, title, priority, status, cost, created_at, resolved_at, location_id, asset_id, category_id, locations(name), assets(name)")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .in_("category_id", maint_cat_ids)
-    )
+    params: list = [org_id, list(maint_cat_ids)]
+    extra_clauses = ""
     if location_id:
-        query = query.eq("location_id", location_id)
+        extra_clauses += " AND i.location_id = %s"
+        params.append(location_id)
     if date_from:
-        query = query.gte("created_at", date_from)
+        extra_clauses += " AND i.created_at >= %s"
+        params.append(date_from)
     if date_to:
-        query = query.lte("created_at", date_to + "T23:59:59")
+        extra_clauses += " AND i.created_at <= %s"
+        params.append(date_to + "T23:59:59")
 
-    resp = query.order("created_at", desc=True).execute()
-    issues = resp.data or []
+    sql = f"""
+        SELECT i.id, i.title, i.priority, i.status, i.cost,
+               i.created_at, i.resolved_at, i.location_id, i.asset_id, i.category_id,
+               l.name AS location_name,
+               a.name AS asset_name
+        FROM issues i
+        LEFT JOIN locations l ON l.id = i.location_id
+        LEFT JOIN assets a ON a.id = i.asset_id
+        WHERE i.organisation_id = %s
+          AND i.is_deleted = FALSE
+          AND i.category_id = ANY(%s::uuid[])
+          {extra_clauses}
+        ORDER BY i.created_at DESC
+    """
+
+    issues = rows(conn, sql, tuple(params))
 
     # Summary
     total_cost = sum(float(i.get("cost") or 0) for i in issues if i.get("cost") is not None)
@@ -507,7 +568,7 @@ def get_maintenance_issues(
     loc_map: dict = {}
     for i in issues:
         loc_id = i.get("location_id") or "none"
-        loc_name = (i.get("locations") or {}).get("name", "Unknown")
+        loc_name = i.get("location_name") or "Unknown"
         if loc_id not in loc_map:
             loc_map[loc_id] = {"location_name": loc_name, "total_cost": 0.0, "count": 0}
         loc_map[loc_id]["count"] += 1
@@ -520,7 +581,7 @@ def get_maintenance_issues(
         asset_id = i.get("asset_id")
         if not asset_id:
             continue
-        asset_name = (i.get("assets") or {}).get("name", "Unknown Asset")
+        asset_name = i.get("asset_name") or "Unknown Asset"
         if asset_id not in asset_map:
             asset_map[asset_id] = {"asset_id": asset_id, "asset_name": asset_name, "total_cost": 0.0, "issue_count": 0}
         asset_map[asset_id]["issue_count"] += 1
@@ -530,7 +591,8 @@ def get_maintenance_issues(
     # By month
     month_map: dict = {}
     for i in issues:
-        month = (i.get("created_at") or "")[:7]  # YYYY-MM
+        created_at = i.get("created_at")
+        month = str(created_at)[:7] if created_at else ""  # YYYY-MM
         if not month:
             continue
         if month not in month_map:
@@ -548,10 +610,10 @@ def get_maintenance_issues(
             "priority": i.get("priority", ""),
             "status": i.get("status", ""),
             "cost": i.get("cost"),
-            "created_at": i.get("created_at", ""),
-            "resolved_at": i.get("resolved_at"),
-            "location_name": (i.get("locations") or {}).get("name", ""),
-            "asset_name": (i.get("assets") or {}).get("name", ""),
+            "created_at": str(i.get("created_at", "")),
+            "resolved_at": str(i.get("resolved_at")) if i.get("resolved_at") else None,
+            "location_name": i.get("location_name") or "",
+            "asset_name": i.get("asset_name") or "",
             "category_name": cat_name_map.get(i.get("category_id", ""), ""),
         })
 
@@ -580,31 +642,42 @@ def get_aging_tasks(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Task aging report: open age, SLA breach counts, aging buckets."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
-    from datetime import datetime as dt, timezone
 
-    q = (
-        sb.table("tasks")
-        .select("id, title, priority, status, created_at, completed_at, location_id, locations(name)")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-    )
+    params: list = [org_id]
+    extra_clauses = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        extra_clauses += " AND t.location_id = %s"
+        params.append(location_id)
     if priority:
-        q = q.eq("priority", priority)
+        extra_clauses += " AND t.priority = %s"
+        params.append(priority)
     if status:
-        q = q.eq("status", status)
+        extra_clauses += " AND t.status = %s"
+        params.append(status)
     if date_from:
-        q = q.gte("created_at", date_from)
+        extra_clauses += " AND t.created_at >= %s"
+        params.append(date_from)
     if date_to:
-        q = q.lte("created_at", date_to + "T23:59:59")
+        extra_clauses += " AND t.created_at <= %s"
+        params.append(date_to + "T23:59:59")
 
-    tasks = q.execute().data or []
-    now = dt.now(timezone.utc)
+    sql = f"""
+        SELECT t.id, t.title, t.priority, t.status,
+               t.created_at, t.completed_at, t.location_id,
+               l.name AS location_name
+        FROM tasks t
+        LEFT JOIN locations l ON l.id = t.location_id
+        WHERE t.organisation_id = %s
+          AND t.is_deleted = FALSE
+          {extra_clauses}
+    """
+
+    tasks = rows(conn, sql, tuple(params))
+    now = datetime.now(timezone.utc)
 
     open_statuses = {"pending", "in_progress", "overdue"}
     closed_statuses = {"completed", "cancelled"}
@@ -621,18 +694,24 @@ def get_aging_tasks(
         s = t.get("status", "pending")
         pri = t.get("priority", "medium")
         loc_id = t.get("location_id") or "unknown"
-        loc_name = (t.get("locations") or {}).get("name", "Unknown")
-        created = t.get("created_at", "")
+        loc_name = t.get("location_name") or "Unknown"
+        created = t.get("created_at")
         completed = t.get("completed_at")
 
         try:
-            created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+            if hasattr(created, "tzinfo"):
+                created_dt = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             continue
 
         if s in closed_statuses and completed:
             try:
-                end_dt = dt.fromisoformat(str(completed).replace("Z", "+00:00"))
+                if hasattr(completed, "tzinfo"):
+                    end_dt = completed if completed.tzinfo else completed.replace(tzinfo=timezone.utc)
+                else:
+                    end_dt = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
                 age_h = (end_dt - created_dt).total_seconds() / 3600
             except (ValueError, AttributeError):
                 age_h = (now - created_dt).total_seconds() / 3600
@@ -749,33 +828,48 @@ def get_aging_issues(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Issue aging report: open age, SLA breach counts from category sla_hours."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
-    from datetime import datetime as dt, timezone
 
-    q = (
-        sb.table("issues")
-        .select("id, title, priority, status, created_at, resolved_at, location_id, category_id, locations(name), issue_categories(name, sla_hours)")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-    )
+    params: list = [org_id]
+    extra_clauses = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        extra_clauses += " AND i.location_id = %s"
+        params.append(location_id)
     if category_id:
-        q = q.eq("category_id", category_id)
+        extra_clauses += " AND i.category_id = %s"
+        params.append(category_id)
     if priority:
-        q = q.eq("priority", priority)
+        extra_clauses += " AND i.priority = %s"
+        params.append(priority)
     if status:
-        q = q.eq("status", status)
+        extra_clauses += " AND i.status = %s"
+        params.append(status)
     if date_from:
-        q = q.gte("created_at", date_from)
+        extra_clauses += " AND i.created_at >= %s"
+        params.append(date_from)
     if date_to:
-        q = q.lte("created_at", date_to + "T23:59:59")
+        extra_clauses += " AND i.created_at <= %s"
+        params.append(date_to + "T23:59:59")
 
-    issues = q.execute().data or []
-    now = dt.now(timezone.utc)
+    sql = f"""
+        SELECT i.id, i.title, i.priority, i.status,
+               i.created_at, i.resolved_at, i.location_id, i.category_id,
+               l.name AS location_name,
+               ic.name AS category_name,
+               ic.sla_hours
+        FROM issues i
+        LEFT JOIN locations l ON l.id = i.location_id
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        WHERE i.organisation_id = %s
+          AND i.is_deleted = FALSE
+          {extra_clauses}
+    """
+
+    issues = rows(conn, sql, tuple(params))
+    now = datetime.now(timezone.utc)
 
     open_statuses = {"open", "in_progress", "pending_vendor"}
     closed_statuses = {"resolved", "closed"}
@@ -792,22 +886,27 @@ def get_aging_issues(
         s = issue.get("status", "open")
         pri = issue.get("priority", "medium")
         loc_id = issue.get("location_id") or "unknown"
-        loc_name = (issue.get("locations") or {}).get("name", "Unknown")
+        loc_name = issue.get("location_name") or "Unknown"
         cat_id = issue.get("category_id") or "unknown"
-        cat = issue.get("issue_categories") or {}
-        cat_name = cat.get("name", "Unknown")
-        sla_h = cat.get("sla_hours") or 24
-        created = issue.get("created_at", "")
+        cat_name = issue.get("category_name") or "Unknown"
+        sla_h = issue.get("sla_hours") or 24
+        created = issue.get("created_at")
         resolved = issue.get("resolved_at")
 
         try:
-            created_dt = dt.fromisoformat(created.replace("Z", "+00:00"))
+            if hasattr(created, "tzinfo"):
+                created_dt = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             continue
 
         if s in closed_statuses and resolved:
             try:
-                end_dt = dt.fromisoformat(str(resolved).replace("Z", "+00:00"))
+                if hasattr(resolved, "tzinfo"):
+                    end_dt = resolved if resolved.tzinfo else resolved.replace(tzinfo=timezone.utc)
+                else:
+                    end_dt = datetime.fromisoformat(str(resolved).replace("Z", "+00:00"))
                 age_h = (end_dt - created_dt).total_seconds() / 3600
             except (ValueError, AttributeError):
                 age_h = (now - created_dt).total_seconds() / 3600
@@ -922,54 +1021,65 @@ def get_resolution_time(
     date_to: Optional[str] = Query(None),
     entity_type: str = Query("issue"),  # "task" | "issue"
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Average and median resolution time for completed tasks or resolved issues."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
-    from datetime import datetime as dt, timezone
-    from collections import defaultdict
-    import statistics
+
+    params: list = [org_id]
+    extra_clauses = ""
+    if location_id:
+        extra_clauses += " AND t.location_id = %s"
+        params.append(location_id)
+    if date_from:
+        extra_clauses += " AND t.created_at >= %s"
+        params.append(date_from)
+    if date_to:
+        extra_clauses += " AND t.created_at <= %s"
+        params.append(date_to + "T23:59:59")
 
     if entity_type == "task":
-        q = (
-            sb.table("tasks")
-            .select("created_at, completed_at, location_id, locations(name)")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .in_("status", ["completed", "cancelled"])
-        )
-        end_col = "completed_at"
+        sql = f"""
+            SELECT t.created_at, t.completed_at AS end_at, t.location_id, l.name AS location_name
+            FROM tasks t
+            LEFT JOIN locations l ON l.id = t.location_id
+            WHERE t.organisation_id = %s
+              AND t.is_deleted = FALSE
+              AND t.status IN ('completed', 'cancelled')
+              {extra_clauses}
+        """
     else:
-        q = (
-            sb.table("issues")
-            .select("created_at, resolved_at, location_id, locations(name)")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .in_("status", ["resolved", "closed"])
-        )
-        end_col = "resolved_at"
+        sql = f"""
+            SELECT t.created_at, t.resolved_at AS end_at, t.location_id, l.name AS location_name
+            FROM issues t
+            LEFT JOIN locations l ON l.id = t.location_id
+            WHERE t.organisation_id = %s
+              AND t.is_deleted = FALSE
+              AND t.status IN ('resolved', 'closed')
+              AND t.resolved_at IS NOT NULL
+              {extra_clauses}
+        """
 
-    if location_id:
-        q = q.eq("location_id", location_id)
-    if date_from:
-        q = q.gte("created_at", date_from)
-    if date_to:
-        q = q.lte("created_at", date_to + "T23:59:59")
-
-    rows = q.execute().data or []
+    result_rows = rows(conn, sql, tuple(params))
 
     resolution_hours: list = []
     period_map: dict = defaultdict(list)
     loc_map: dict = defaultdict(list)
 
-    for row in rows:
-        created = row.get("created_at")
-        ended = row.get(end_col)
+    for r in result_rows:
+        created = r.get("created_at")
+        ended = r.get("end_at")
         if not created or not ended:
             continue
         try:
-            c_dt = dt.fromisoformat(str(created).replace("Z", "+00:00"))
-            e_dt = dt.fromisoformat(str(ended).replace("Z", "+00:00"))
+            if hasattr(created, "tzinfo"):
+                c_dt = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+            else:
+                c_dt = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            if hasattr(ended, "tzinfo"):
+                e_dt = ended if ended.tzinfo else ended.replace(tzinfo=timezone.utc)
+            else:
+                e_dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00"))
             h = (e_dt - c_dt).total_seconds() / 3600
             if h < 0:
                 continue
@@ -980,8 +1090,8 @@ def get_resolution_time(
         period_key = c_dt.strftime("%Y-%m")
         period_map[period_key].append(h)
 
-        loc_id = row.get("location_id") or "unknown"
-        loc_name = (row.get("locations") or {}).get("name", "Unknown")
+        loc_id = r.get("location_id") or "unknown"
+        loc_name = r.get("location_name") or "Unknown"
         loc_map[(loc_id, loc_name)].append(h)
 
     avg_h = round(sum(resolution_hours) / len(resolution_hours), 1) if resolution_hours else 0.0
@@ -1020,36 +1130,42 @@ def get_certification_expiry(
     days_ahead: int = Query(30, ge=1, le=365),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Certification expiry report: per-enrollment validity, summary, by-location and by-course breakdowns."""
     org_id = _get_org(current_user)
-    sb = get_admin_client()
 
-    # Fetch all passed enrollments with cert_expires_at for this org
-    res = (
-        sb.table("course_enrollments")
-        .select(
-            "id, user_id, course_id, status, cert_issued_at, cert_expires_at, "
-            "courses(title, cert_validity_days), profiles!user_id(full_name, location_id, role)"
-        )
-        .eq("organisation_id", org_id)
-        .eq("status", "passed")
-        .not_.is_("cert_expires_at", "null")
-        .execute()
-    )
-    rows = res.data or []
+    location_clause = ""
+    params: list = [org_id]
+    if location_id:
+        location_clause = " AND p.location_id = %s"
+        params.append(location_id)
+
+    sql = f"""
+        SELECT ce.id, ce.user_id, ce.course_id, ce.status,
+               ce.cert_issued_at, ce.cert_expires_at,
+               c.title AS course_title,
+               c.cert_validity_days,
+               p.full_name, p.location_id AS user_location_id, p.role
+        FROM course_enrollments ce
+        JOIN courses c ON c.id = ce.course_id
+        JOIN profiles p ON p.id = ce.user_id
+        WHERE ce.organisation_id = %s
+          AND ce.status = 'passed'
+          AND ce.cert_expires_at IS NOT NULL
+          {location_clause}
+    """
+
+    enrollment_rows = rows(conn, sql, tuple(params))
 
     # Fetch location names
-    loc_res = sb.table("locations").select("id, name").eq("organisation_id", org_id).execute()
-    loc_map: dict = {l["id"]: l["name"] for l in (loc_res.data or [])}
+    loc_name_rows = rows(conn, """
+        SELECT id, name FROM locations WHERE organisation_id = %s
+    """, (org_id,))
+    loc_name_map: dict = {r["id"]: r["name"] for r in loc_name_rows}
 
     today = date.today()
 
-    # Optionally filter by location in Python
-    if location_id:
-        rows = [r for r in rows if (r.get("profiles") or {}).get("location_id") == location_id]
-
-    # Build per-enrollment data and aggregate
     enrollments_out = []
     by_location: dict = {}
     by_course: dict = {}
@@ -1059,19 +1175,16 @@ def get_certification_expiry(
     expired = 0
     valid = 0
 
-    for row in rows:
-        profile = row.get("profiles") or {}
-        course = row.get("courses") or {}
+    for r in enrollment_rows:
+        full_name = r.get("full_name") or "Unknown"
+        user_loc_id = r.get("user_location_id") or ""
+        location_name = loc_name_map.get(user_loc_id, "Unknown") if user_loc_id else "Unknown"
 
-        full_name = profile.get("full_name") or "Unknown"
-        user_loc_id = profile.get("location_id") or ""
-        location_name = loc_map.get(user_loc_id, "Unknown") if user_loc_id else "Unknown"
+        course_id = r.get("course_id") or ""
+        course_title = r.get("course_title") or "Unknown Course"
 
-        course_id = row.get("course_id") or ""
-        course_title = course.get("title") or "Unknown Course"
-
-        cert_expires_raw = row.get("cert_expires_at")
-        cert_issued_raw = row.get("cert_issued_at")
+        cert_expires_raw = r.get("cert_expires_at")
+        cert_issued_raw = r.get("cert_issued_at")
 
         if not cert_expires_raw:
             continue
@@ -1114,7 +1227,7 @@ def get_certification_expiry(
         by_course[course_id][status_label] += 1
 
         enrollments_out.append({
-            "user_id": row.get("user_id") or "",
+            "user_id": r.get("user_id") or "",
             "full_name": full_name,
             "location_id": user_loc_id,
             "location_name": location_name,
@@ -1159,32 +1272,38 @@ def get_issues_by_category(
     to_date: Optional[str] = Query(None, alias="to"),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Issue volume grouped by category for the given date range."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
     if not from_date:
         from_date = (datetime.fromisoformat(to_date) - timedelta(days=30)).date().isoformat()
 
-    q = (
-        db.table("issues")
-        .select("id, category_id, issue_categories(name)")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .gte("created_at", from_date)
-        .lte("created_at", to_date + "T23:59:59Z")
-    )
+    params: list = [org_id, from_date, to_date + "T23:59:59Z"]
+    location_clause = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        location_clause = " AND i.location_id = %s"
+        params.append(location_id)
 
-    rows = q.execute().data or []
+    sql = f"""
+        SELECT i.id, i.category_id, ic.name AS category_name
+        FROM issues i
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        WHERE i.organisation_id = %s
+          AND i.is_deleted = FALSE
+          AND i.created_at >= %s
+          AND i.created_at <= %s
+          {location_clause}
+    """
+
+    result_rows = rows(conn, sql, tuple(params))
 
     counts: dict[str, int] = {}
-    for r in rows:
-        name = (r.get("issue_categories") or {}).get("name") or "Uncategorised"
+    for r in result_rows:
+        name = r.get("category_name") or "Uncategorised"
         counts[name] = counts.get(name, 0) + 1
 
     return sorted(
@@ -1201,39 +1320,53 @@ def get_issue_resolution_time(
     to_date: Optional[str] = Query(None, alias="to"),
     location_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Average resolution time vs SLA per issue category."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
     if not from_date:
         from_date = (datetime.fromisoformat(to_date) - timedelta(days=90)).date().isoformat()
 
-    q = (
-        db.table("issues")
-        .select("created_at, resolved_at, category_id, issue_categories(name, sla_hours)")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .in_("status", ["resolved", "verified_closed"])
-        .not_.is_("resolved_at", "null")
-        .gte("created_at", from_date)
-        .lte("created_at", to_date + "T23:59:59Z")
-    )
+    params: list = [org_id, from_date, to_date + "T23:59:59Z"]
+    location_clause = ""
     if location_id:
-        q = q.eq("location_id", location_id)
+        location_clause = " AND i.location_id = %s"
+        params.append(location_id)
 
-    rows = q.execute().data or []
+    sql = f"""
+        SELECT i.created_at, i.resolved_at, i.category_id,
+               ic.name AS category_name, ic.sla_hours
+        FROM issues i
+        LEFT JOIN issue_categories ic ON ic.id = i.category_id
+        WHERE i.organisation_id = %s
+          AND i.is_deleted = FALSE
+          AND i.status IN ('resolved', 'verified_closed')
+          AND i.resolved_at IS NOT NULL
+          AND i.created_at >= %s
+          AND i.created_at <= %s
+          {location_clause}
+    """
+
+    result_rows = rows(conn, sql, tuple(params))
 
     cat_data: dict[str, dict] = {}
-    for r in rows:
-        cat = (r.get("issue_categories") or {})
-        name = cat.get("name") or "Uncategorised"
-        sla = cat.get("sla_hours") or 24
+    for r in result_rows:
+        name = r.get("category_name") or "Uncategorised"
+        sla = r.get("sla_hours") or 24
+        created = r.get("created_at")
+        resolved = r.get("resolved_at")
         try:
-            c = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
-            res = datetime.fromisoformat(r["resolved_at"].replace("Z", "+00:00"))
+            if hasattr(created, "tzinfo"):
+                c = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+            else:
+                c = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+            if hasattr(resolved, "tzinfo"):
+                res = resolved if resolved.tzinfo else resolved.replace(tzinfo=timezone.utc)
+            else:
+                res = datetime.fromisoformat(str(resolved).replace("Z", "+00:00"))
             hrs = (res - c).total_seconds() / 3600
         except Exception:
             continue
@@ -1263,79 +1396,87 @@ def get_location_scorecard(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Composite score per location: 50% audit avg score + 30% checklist completion + 20% issue resolution rate."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     if not to_date:
         to_date = datetime.now(timezone.utc).date().isoformat()
     if not from_date:
         from_date = (datetime.fromisoformat(to_date) - timedelta(days=30)).date().isoformat()
 
-    loc_resp = db.table("locations").select("id, name").eq("organisation_id", org_id).eq("is_active", True).eq("is_deleted", False).execute()
-    locations = loc_resp.data or []
-    if not locations:
+    loc_rows = rows(conn, """
+        SELECT id, name
+        FROM locations
+        WHERE organisation_id = %s
+          AND is_active = TRUE
+          AND is_deleted = FALSE
+    """, (org_id,))
+
+    if not loc_rows:
         return []
-    loc_map = {l["id"]: l["name"] for l in locations}
+    loc_map = {r["id"]: r["name"] for r in loc_rows}
 
     # ── Audit avg score per location ─────────────────────────────────────────
-    audit_resp = (
-        db.table("form_submissions")
-        .select("location_id, overall_score, form_templates!inner(organisation_id, type)")
-        .eq("form_templates.organisation_id", org_id)
-        .eq("form_templates.type", "audit")
-        .gte("submitted_at", from_date)
-        .lte("submitted_at", to_date + "T23:59:59Z")
-        .execute()
-    )
+    audit_rows = rows(conn, """
+        SELECT fs.location_id, fs.overall_score
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE ft.organisation_id = %s
+          AND ft.type = 'audit'
+          AND fs.submitted_at >= %s
+          AND fs.submitted_at <= %s
+    """, (org_id, from_date, to_date + "T23:59:59Z"))
+
     audit_scores: dict[str, list] = {}
-    for r in (audit_resp.data or []):
+    for r in audit_rows:
         lid = r.get("location_id") or ""
         if r.get("overall_score") is not None:
             audit_scores.setdefault(lid, []).append(float(r["overall_score"]))
 
-    # ── Checklist completion rate per location (last 7 days of range) ────────
-    cl_resp = (
-        db.table("form_submissions")
-        .select("location_id, form_templates!inner(organisation_id, type)")
-        .eq("form_templates.organisation_id", org_id)
-        .eq("form_templates.type", "checklist")
-        .in_("status", ["submitted", "approved", "rejected"])
-        .gte("submitted_at", from_date)
-        .lte("submitted_at", to_date + "T23:59:59Z")
-        .execute()
-    )
-    assign_resp = (
-        db.table("form_assignments")
-        .select("assigned_to_location_id")
-        .eq("organisation_id", org_id)
-        .eq("is_active", True)
-        .eq("is_deleted", False)
-        .execute()
-    )
+    # ── Checklist completion rate per location ────────────────────────────────
+    cl_done_rows = rows(conn, """
+        SELECT fs.location_id
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE ft.organisation_id = %s
+          AND ft.type = 'checklist'
+          AND fs.status IN ('submitted', 'approved', 'rejected')
+          AND fs.submitted_at >= %s
+          AND fs.submitted_at <= %s
+    """, (org_id, from_date, to_date + "T23:59:59Z"))
+
+    assign_rows = rows(conn, """
+        SELECT assigned_to_location_id
+        FROM form_assignments
+        WHERE organisation_id = %s
+          AND is_active = TRUE
+          AND is_deleted = FALSE
+    """, (org_id,))
+
     cl_done: dict[str, int] = {}
-    for r in (cl_resp.data or []):
+    for r in cl_done_rows:
         lid = r.get("location_id") or ""
         cl_done[lid] = cl_done.get(lid, 0) + 1
     cl_assigned: dict[str, int] = {}
-    for r in (assign_resp.data or []):
+    for r in assign_rows:
         lid = r.get("assigned_to_location_id") or ""
         cl_assigned[lid] = cl_assigned.get(lid, 0) + 1
 
     # ── Issue resolution rate per location ────────────────────────────────────
-    iss_resp = (
-        db.table("issues")
-        .select("location_id, status")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .gte("created_at", from_date)
-        .lte("created_at", to_date + "T23:59:59Z")
-        .execute()
-    )
+    iss_rows = rows(conn, """
+        SELECT location_id, status
+        FROM issues
+        WHERE organisation_id = %s
+          AND is_deleted = FALSE
+          AND created_at >= %s
+          AND created_at <= %s
+    """, (org_id, from_date, to_date + "T23:59:59Z"))
+
     iss_total: dict[str, int] = {}
     iss_resolved: dict[str, int] = {}
-    for r in (iss_resp.data or []):
+    for r in iss_rows:
         lid = r.get("location_id") or ""
         iss_total[lid] = iss_total.get(lid, 0) + 1
         if r.get("status") in ("resolved", "verified_closed"):

@@ -1,6 +1,8 @@
+import json
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import HTTPException
+from psycopg2.extensions import connection as PgConn
 from models.announcements import (
     AnnouncementResponse,
     CreateAnnouncementRequest,
@@ -9,84 +11,96 @@ from models.announcements import (
     ReceiptStatsResponse,
 )
 from models.base import PaginatedResponse
-from services.supabase_client import get_supabase
+from services.db import row, rows, execute, execute_returning
 
 
 class AnnouncementService:
     @staticmethod
     async def create(
-        body: CreateAnnouncementRequest, org_id: str, created_by: str
+        body: CreateAnnouncementRequest, org_id: str, created_by: str, conn: PgConn
     ) -> AnnouncementResponse:
-        supabase = get_supabase()
+        columns = [
+            "organisation_id", "created_by", "title", "body",
+            "requires_acknowledgement", "is_deleted", "media_urls",
+        ]
+        values: list = [
+            org_id, created_by, body.title, body.body,
+            body.requires_acknowledgement, False,
+            json.dumps(body.media_urls or []),
+        ]
 
-        announcement_data = {
-            "organisation_id": str(org_id),
-            "created_by": str(created_by),
-            "title": body.title,
-            "body": body.body,
-            "requires_acknowledgement": body.requires_acknowledgement,
-            "is_deleted": False,
-        }
         if body.media_url is not None:
-            announcement_data["media_url"] = body.media_url
-        announcement_data["media_urls"] = body.media_urls or []
+            columns.append("media_url")
+            values.append(body.media_url)
         if body.publish_at is not None:
-            announcement_data["publish_at"] = body.publish_at.isoformat()
+            columns.append("publish_at")
+            values.append(body.publish_at.isoformat())
         if body.target_roles is not None:
-            announcement_data["target_roles"] = body.target_roles
+            columns.append("target_roles")
+            values.append(body.target_roles)
         if body.target_location_ids is not None:
-            announcement_data["target_location_ids"] = [
-                str(lid) for lid in body.target_location_ids
-            ]
+            columns.append("target_location_ids")
+            values.append([str(lid) for lid in body.target_location_ids])
+
+        col_clause = ", ".join(columns)
+        placeholder_clause = ", ".join(["%s"] * len(columns))
 
         try:
-            response = supabase.table("announcements").insert(announcement_data).execute()
+            result = execute_returning(
+                conn,
+                f"INSERT INTO announcements ({col_clause}) VALUES ({placeholder_clause}) RETURNING *",
+                tuple(values),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        return AnnouncementResponse(**response.data[0])
+        return AnnouncementResponse(**result)
 
     @staticmethod
     async def list_for_user(
-        user_id: str, org_id: str, page: int = 1, page_size: int = 20
+        user_id: str, org_id: str, conn: PgConn, page: int = 1, page_size: int = 20
     ) -> PaginatedResponse[AnnouncementResponse]:
-        supabase = get_supabase()
         offset = (page - 1) * page_size
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            query = (
-                supabase.table("announcements")
-                .select("*, profiles!created_by(full_name)", count="exact")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .or_(f"publish_at.is.null,publish_at.lte.{now}")
-                .order("created_at", desc=True)
-                .range(offset, offset + page_size - 1)
+            result = rows(
+                conn,
+                """
+                SELECT a.*, p.full_name AS creator_name,
+                       COUNT(*) OVER () AS _total_count
+                FROM announcements a
+                LEFT JOIN profiles p ON p.id = a.created_by
+                WHERE a.organisation_id = %s
+                  AND a.is_deleted = false
+                  AND (a.publish_at IS NULL OR a.publish_at <= %s)
+                ORDER BY a.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (org_id, now, page_size, offset),
             )
-            response = query.execute()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+        total_count = int(result[0]["_total_count"]) if result else 0
         items = []
-        for row in response.data:
-            profile = row.pop("profiles", None)
-            creator_name = (profile.get("full_name") if isinstance(profile, dict) else None)
-            items.append(AnnouncementResponse(**row, creator_name=creator_name))
-        total_count = response.count if response.count is not None else len(items)
+        for r in result:
+            r = dict(r)
+            r.pop("_total_count", None)
+            creator_name = r.pop("creator_name", None)
+            items.append(AnnouncementResponse(**r, creator_name=creator_name))
 
         # Annotate each announcement with whether the current user has acknowledged it
         if items:
             try:
-                receipts_resp = (
-                    supabase.table("announcement_receipts")
-                    .select("announcement_id, acknowledged_at")
-                    .eq("user_id", user_id)
-                    .execute()
+                receipts = rows(
+                    conn,
+                    "SELECT announcement_id, acknowledged_at FROM announcement_receipts WHERE user_id = %s",
+                    (user_id,),
                 )
                 acked_ids = {
                     str(r["announcement_id"])
-                    for r in (receipts_resp.data or [])
+                    for r in receipts
                     if r.get("acknowledged_at")
                 }
                 for item in items:
@@ -97,34 +111,34 @@ class AnnouncementService:
         return PaginatedResponse(items=items, total_count=total_count, page=page, page_size=page_size)
 
     @staticmethod
-    async def get(announcement_id: str, org_id: str) -> AnnouncementResponse:
-        supabase = get_supabase()
+    async def get(announcement_id: str, org_id: str, conn: PgConn) -> AnnouncementResponse:
         try:
-            response = (
-                supabase.table("announcements")
-                .select("*, profiles!created_by(full_name)")
-                .eq("id", str(announcement_id))
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .execute()
+            result = row(
+                conn,
+                """
+                SELECT a.*, p.full_name AS creator_name
+                FROM announcements a
+                LEFT JOIN profiles p ON p.id = a.created_by
+                WHERE a.id = %s
+                  AND a.organisation_id = %s
+                  AND a.is_deleted = false
+                """,
+                (announcement_id, org_id),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        if not response.data:
+        if result is None:
             raise HTTPException(status_code=404, detail="Announcement not found")
 
-        row = response.data[0]
-        profile = row.pop("profiles", None)
-        creator_name = (profile.get("full_name") if isinstance(profile, dict) else None)
-        return AnnouncementResponse(**row, creator_name=creator_name)
+        result = dict(result)
+        creator_name = result.pop("creator_name", None)
+        return AnnouncementResponse(**result, creator_name=creator_name)
 
     @staticmethod
     async def update(
-        announcement_id: str, org_id: str, body: UpdateAnnouncementRequest
+        announcement_id: str, org_id: str, body: UpdateAnnouncementRequest, conn: PgConn
     ) -> AnnouncementResponse:
-        supabase = get_supabase()
-
         updates = {}
         if body.title is not None:
             updates["title"] = body.title
@@ -144,127 +158,105 @@ class AnnouncementService:
             updates["target_location_ids"] = [str(lid) for lid in body.target_location_ids]
 
         if updates:
+            set_clause = ", ".join(f"{col} = %s" for col in updates)
+            params = tuple(updates.values()) + (announcement_id, org_id)
             try:
-                supabase.table("announcements").update(updates).eq(
-                    "id", str(announcement_id)
-                ).eq("organisation_id", str(org_id)).execute()
+                execute(
+                    conn,
+                    f"UPDATE announcements SET {set_clause} WHERE id = %s AND organisation_id = %s",
+                    params,
+                )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
-        return await AnnouncementService.get(announcement_id, org_id)
+        return await AnnouncementService.get(announcement_id, org_id, conn)
 
     @staticmethod
-    async def mark_read(announcement_id: str, user_id: str) -> dict:
-        supabase = get_supabase()
+    async def mark_read(announcement_id: str, user_id: str, conn: PgConn) -> dict:
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            existing = (
-                supabase.table("announcement_receipts")
-                .select("*")
-                .eq("announcement_id", str(announcement_id))
-                .eq("user_id", str(user_id))
-                .execute()
+            existing = row(
+                conn,
+                "SELECT read_at FROM announcement_receipts WHERE announcement_id = %s AND user_id = %s",
+                (announcement_id, user_id),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+        if existing is not None and existing.get("read_at") is not None:
+            return {"success": True, "message": "Already marked as read"}
+
         try:
-            if not existing.data:
-                response = supabase.table("announcement_receipts").insert(
-                    {
-                        "announcement_id": str(announcement_id),
-                        "user_id": str(user_id),
-                        "read_at": now,
-                    }
-                ).execute()
-            elif existing.data[0].get("read_at") is None:
-                response = (
-                    supabase.table("announcement_receipts")
-                    .update({"read_at": now})
-                    .eq("announcement_id", str(announcement_id))
-                    .eq("user_id", str(user_id))
-                    .execute()
-                )
-            else:
-                return {"success": True, "message": "Already marked as read"}
+            execute(
+                conn,
+                """
+                INSERT INTO announcement_receipts (announcement_id, user_id, read_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (announcement_id, user_id)
+                DO UPDATE SET read_at = EXCLUDED.read_at
+                WHERE announcement_receipts.read_at IS NULL
+                """,
+                (announcement_id, user_id, now),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         return {"success": True, "message": "Marked as read"}
 
     @staticmethod
-    async def acknowledge(announcement_id: str, user_id: str) -> dict:
-        supabase = get_supabase()
+    async def acknowledge(announcement_id: str, user_id: str, conn: PgConn) -> dict:
         now = datetime.now(timezone.utc).isoformat()
 
         try:
-            existing = (
-                supabase.table("announcement_receipts")
-                .select("*")
-                .eq("announcement_id", str(announcement_id))
-                .eq("user_id", str(user_id))
-                .execute()
+            execute(
+                conn,
+                """
+                INSERT INTO announcement_receipts (announcement_id, user_id, acknowledged_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (announcement_id, user_id)
+                DO UPDATE SET acknowledged_at = EXCLUDED.acknowledged_at
+                """,
+                (announcement_id, user_id, now),
             )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-        try:
-            if not existing.data:
-                supabase.table("announcement_receipts").insert(
-                    {
-                        "announcement_id": str(announcement_id),
-                        "user_id": str(user_id),
-                        "acknowledged_at": now,
-                    }
-                ).execute()
-            else:
-                supabase.table("announcement_receipts").update(
-                    {"acknowledged_at": now}
-                ).eq("announcement_id", str(announcement_id)).eq(
-                    "user_id", str(user_id)
-                ).execute()
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         return {"success": True, "message": "Acknowledged"}
 
     @staticmethod
-    async def get_receipts(announcement_id: str, org_id: str) -> ReceiptStatsResponse:
-        supabase = get_supabase()
-
+    async def get_receipts(announcement_id: str, org_id: str, conn: PgConn) -> ReceiptStatsResponse:
         # Verify announcement belongs to org
-        announcement = await AnnouncementService.get(announcement_id, org_id)
+        announcement = await AnnouncementService.get(announcement_id, org_id, conn)
 
         try:
-            # Total profiles in org
-            profiles_resp = (
-                supabase.table("profiles")
-                .select("id", count="exact")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .eq("is_active", True)
-                .execute()
+            total_targeted_row = row(
+                conn,
+                """
+                SELECT COUNT(*) AS cnt
+                FROM profiles
+                WHERE organisation_id = %s
+                  AND is_deleted = false
+                  AND is_active = true
+                """,
+                (org_id,),
             )
-            total_targeted = profiles_resp.count if profiles_resp.count is not None else 0
+            total_targeted = int(total_targeted_row["cnt"]) if total_targeted_row else 0
 
-            # All receipts for announcement
-            receipts_resp = (
-                supabase.table("announcement_receipts")
-                .select("*")
-                .eq("announcement_id", str(announcement_id))
-                .execute()
+            receipts_data = rows(
+                conn,
+                "SELECT * FROM announcement_receipts WHERE announcement_id = %s",
+                (announcement_id,),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        receipts = receipts_resp.data
-        total_read = sum(1 for r in receipts if r.get("read_at") is not None)
-        total_acknowledged = sum(1 for r in receipts if r.get("acknowledged_at") is not None)
+        total_read = sum(1 for r in receipts_data if r.get("read_at") is not None)
+        total_acknowledged = sum(1 for r in receipts_data if r.get("acknowledged_at") is not None)
 
         return ReceiptStatsResponse(
             total_targeted=total_targeted,
             total_read=total_read,
             total_acknowledged=total_acknowledged,
-            receipts=[ReceiptResponse(**r) for r in receipts],
+            receipts=[ReceiptResponse(**r) for r in receipts_data],
         )

@@ -20,7 +20,7 @@ from models.tasks import (
     UpdateTaskTemplateRequest,
     SpawnTaskRequest,
 )
-from services.supabase_client import get_supabase
+from services.db import row, rows, execute, execute_returning, execute_many
 
 
 class TaskService:
@@ -28,68 +28,96 @@ class TaskService:
     # ── Templates ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def list_templates(org_id: str) -> list[dict]:
-        db = get_supabase()
-        resp = (
-            db.table("task_templates")
-            .select("*, profiles!created_by(full_name)")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .order("created_at", desc=True)
-            .execute()
+    async def list_templates(conn, org_id: str) -> list[dict]:
+        return rows(
+            conn,
+            """
+            SELECT tt.*, p.full_name AS created_by_full_name
+            FROM task_templates tt
+            LEFT JOIN profiles p ON p.id = tt.created_by
+            WHERE tt.organisation_id = %s
+              AND tt.is_deleted = FALSE
+            ORDER BY tt.created_at DESC
+            """,
+            (org_id,),
         )
-        return resp.data or []
 
     @staticmethod
-    async def create_template(body: CreateTaskTemplateRequest, org_id: str, created_by: str) -> dict:
-        db = get_supabase()
-        data = {
-            "organisation_id": org_id,
-            "created_by": created_by,
-            "title": body.title,
-            "description": body.description,
-            "priority": body.priority,
-            "assign_to_role": body.assign_to_role,
-            "recurrence": body.recurrence,
-            "cron_expression": body.cron_expression,
-            "is_active": body.is_active,
-        }
-        resp = db.table("task_templates").insert(data).execute()
-        if not resp.data:
+    async def create_template(conn, body: CreateTaskTemplateRequest, org_id: str, created_by: str) -> dict:
+        result = execute_returning(
+            conn,
+            """
+            INSERT INTO task_templates
+                (organisation_id, created_by, title, description, priority,
+                 assign_to_role, recurrence, cron_expression, is_active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                org_id,
+                created_by,
+                body.title,
+                body.description,
+                body.priority,
+                body.assign_to_role,
+                body.recurrence,
+                body.cron_expression,
+                body.is_active,
+            ),
+        )
+        if not result:
             raise HTTPException(status_code=500, detail="Failed to create task template")
-        return resp.data[0]
+        return dict(result)
 
     @staticmethod
-    async def update_template(template_id: str, org_id: str, body: UpdateTaskTemplateRequest) -> dict:
-        db = get_supabase()
+    async def update_template(conn, template_id: str, org_id: str, body: UpdateTaskTemplateRequest) -> dict:
         updates = body.model_dump(exclude_unset=True)
         if not updates:
             raise HTTPException(status_code=400, detail="Nothing to update")
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        resp = (
-            db.table("task_templates")
-            .update(updates)
-            .eq("id", template_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+        updates["updated_at"] = datetime.now(timezone.utc)
+
+        set_clauses = ", ".join(f"{k} = %s" for k in updates)
+        values = list(updates.values()) + [template_id, org_id]
+        result = execute_returning(
+            conn,
+            f"""
+            UPDATE task_templates
+            SET {set_clauses}
+            WHERE id = %s
+              AND organisation_id = %s
+              AND is_deleted = FALSE
+            RETURNING *
+            """,
+            tuple(values),
         )
-        if not resp.data:
+        if not result:
             raise HTTPException(status_code=404, detail="Template not found")
-        return resp.data[0]
+        return dict(result)
 
     @staticmethod
-    async def delete_template(template_id: str, org_id: str) -> None:
-        db = get_supabase()
-        db.table("task_templates").update({"is_deleted": True}).eq("id", template_id).eq("organisation_id", org_id).execute()
+    async def delete_template(conn, template_id: str, org_id: str) -> None:
+        execute(
+            conn,
+            """
+            UPDATE task_templates
+            SET is_deleted = TRUE
+            WHERE id = %s AND organisation_id = %s
+            """,
+            (template_id, org_id),
+        )
 
     @staticmethod
-    async def spawn_from_template(template_id: str, org_id: str, created_by: str, body: SpawnTaskRequest) -> dict:
-        db = get_supabase()
-        tmpl_resp = db.table("task_templates").select("*").eq("id", template_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not tmpl_resp.data:
+    async def spawn_from_template(conn, template_id: str, org_id: str, created_by: str, body: SpawnTaskRequest) -> dict:
+        t = row(
+            conn,
+            """
+            SELECT * FROM task_templates
+            WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+            """,
+            (template_id, org_id),
+        )
+        if not t:
             raise HTTPException(status_code=404, detail="Template not found")
-        t = tmpl_resp.data[0]
 
         create_body = CreateTaskRequest(
             location_id=body.location_id,
@@ -102,65 +130,75 @@ class TaskService:
             assignee_user_ids=body.assignee_user_ids,
             assignee_roles=[t["assign_to_role"]] if t.get("assign_to_role") else [],
         )
-        return await TaskService.create_task(create_body, org_id, created_by)
+        return await TaskService.create_task(conn, create_body, org_id, created_by)
 
     # ── Tasks ──────────────────────────────────────────────────────────────────
 
     @staticmethod
-    async def create_task(body: CreateTaskRequest, org_id: str, created_by: str) -> dict:
-        db = get_supabase()
+    async def create_task(conn, body: CreateTaskRequest, org_id: str, created_by: str) -> dict:
+        # Build dynamic insert
+        cols = [
+            "organisation_id", "created_by", "title", "priority",
+            "source_type", "recurrence", "status",
+        ]
+        vals: list = [org_id, created_by, body.title, body.priority, body.source_type, body.recurrence, "pending"]
 
-        task_data: dict = {
-            "organisation_id": org_id,
-            "created_by": created_by,
-            "title": body.title,
-            "priority": body.priority,
-            "source_type": body.source_type,
-            "recurrence": body.recurrence,
-            "status": "pending",
-        }
         if body.location_id:
-            task_data["location_id"] = body.location_id
+            cols.append("location_id"); vals.append(body.location_id)
         if body.template_id:
-            task_data["template_id"] = body.template_id
+            cols.append("template_id"); vals.append(body.template_id)
         if body.description:
-            task_data["description"] = body.description
+            cols.append("description"); vals.append(body.description)
         if body.due_at:
-            task_data["due_at"] = body.due_at.isoformat()
+            cols.append("due_at"); vals.append(body.due_at)
         if body.cron_expression:
-            task_data["cron_expression"] = body.cron_expression
+            cols.append("cron_expression"); vals.append(body.cron_expression)
         if body.source_submission_id:
-            task_data["source_submission_id"] = body.source_submission_id
+            cols.append("source_submission_id"); vals.append(body.source_submission_id)
         if body.source_field_id:
-            task_data["source_field_id"] = body.source_field_id
+            cols.append("source_field_id"); vals.append(body.source_field_id)
         if body.cap_item_id:
-            task_data["cap_item_id"] = body.cap_item_id
+            cols.append("cap_item_id"); vals.append(body.cap_item_id)
 
-        resp = db.table("tasks").insert(task_data).execute()
-        if not resp.data:
+        col_sql = ", ".join(cols)
+        placeholder_sql = ", ".join(["%s"] * len(cols))
+        task = execute_returning(
+            conn,
+            f"INSERT INTO tasks ({col_sql}) VALUES ({placeholder_sql}) RETURNING *",
+            tuple(vals),
+        )
+        if not task:
             raise HTTPException(status_code=500, detail="Failed to create task")
-        task = resp.data[0]
+        task = dict(task)
         task_id = task["id"]
 
         # Insert assignees
-        assignee_rows = []
+        assignee_rows: list[tuple] = []
         for uid in body.assignee_user_ids:
-            assignee_rows.append({"task_id": task_id, "user_id": uid})
+            assignee_rows.append((task_id, uid, None))
         for role in body.assignee_roles:
-            assignee_rows.append({"task_id": task_id, "assign_role": role})
+            assignee_rows.append((task_id, None, role))
         if assignee_rows:
-            db.table("task_assignees").insert(assignee_rows).execute()
+            execute_many(
+                conn,
+                "INSERT INTO task_assignees (task_id, user_id, assign_role) VALUES (%s, %s, %s)",
+                assignee_rows,
+            )
 
         # Notify each directly-assigned user
         try:
-            user_assignee_ids = [uid for uid in body.assignee_user_ids]
+            user_assignee_ids = list(body.assignee_user_ids)
             if user_assignee_ids:
                 import asyncio as _asyncio
                 from services import notification_service as _ns
                 loc_name = ""
                 if body.location_id:
-                    loc_resp = db.table("locations").select("name").eq("id", body.location_id).maybe_single().execute()
-                    loc_name = (loc_resp.data or {}).get("name", "")
+                    loc_row = row(
+                        conn,
+                        "SELECT name FROM locations WHERE id = %s",
+                        (body.location_id,),
+                    )
+                    loc_name = (loc_row or {}).get("name", "")
                 due_str = body.due_at.strftime("%b %-d") if body.due_at else ""
                 notif_body_parts = [p for p in [loc_name, f"Due {due_str}" if due_str else ""] if p]
                 notif_body = " \u00b7 ".join(notif_body_parts) or None
@@ -179,17 +217,21 @@ class TaskService:
             pass
 
         # Initial status history entry
-        db.table("task_status_history").insert({
-            "task_id": task_id,
-            "changed_by": created_by,
-            "previous_status": None,
-            "new_status": "pending",
-        }).execute()
+        execute(
+            conn,
+            """
+            INSERT INTO task_status_history
+                (task_id, changed_by, previous_status, new_status)
+            VALUES (%s, %s, NULL, 'pending')
+            """,
+            (task_id, created_by),
+        )
 
         return task
 
     @staticmethod
     async def list_tasks(
+        conn,
         org_id: str,
         user_id: Optional[str] = None,
         status: Optional[str] = None,
@@ -204,186 +246,338 @@ class TaskService:
         page_size: int = 20,
         team_user_ids: Optional[list] = None,
     ) -> dict:
-        db = get_supabase()
 
-        query = (
-            db.table("tasks")
-            .select(
-                "*, profiles!created_by(full_name), locations(name), "
-                "task_assignees!left(id,user_id,assign_role,is_deleted,profiles(full_name)), "
-                "task_messages!left(id,user_id,created_at,is_deleted)",
-                count="exact",
-            )
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-        )
-
-        if status:
-            query = query.eq("status", status)
-        if priority:
-            query = query.eq("priority", priority)
-        if location_id:
-            query = query.eq("location_id", location_id)
-        if source_type:
-            query = query.eq("source_type", source_type)
-        if overdue:
-            query = query.lt("due_at", datetime.now(timezone.utc).isoformat()).neq("status", "completed").neq("status", "cancelled")
-        if from_dt:
-            query = query.gte("created_at", from_dt.isoformat())
-        if to_dt:
-            query = query.lte("created_at", to_dt.isoformat())
-
-        # Manager team view: tasks assigned to any direct report
+        # Resolve task_id filter from assignee tables when needed
+        filter_task_ids: Optional[list] = None
         if team_user_ids:
-            ta_resp = db.table("task_assignees").select("task_id").in_("user_id", team_user_ids).eq("is_deleted", False).execute()
-            task_ids = list({r["task_id"] for r in (ta_resp.data or [])})
-            if not task_ids:
+            assignee_rows = rows(
+                conn,
+                "SELECT task_id FROM task_assignees WHERE user_id = ANY(%s) AND is_deleted = FALSE",
+                (team_user_ids,),
+            )
+            filter_task_ids = list({r["task_id"] for r in assignee_rows})
+            if not filter_task_ids:
                 return {"items": [], "total_count": 0, "page": page, "page_size": page_size}
-            query = query.in_("id", task_ids)
         elif assigned_to:
-            # Filter by assigned user — need a subquery approach
-            ta_resp = db.table("task_assignees").select("task_id").eq("user_id", assigned_to).eq("is_deleted", False).execute()
-            task_ids = [r["task_id"] for r in (ta_resp.data or [])]
-            if not task_ids:
+            assignee_rows = rows(
+                conn,
+                "SELECT task_id FROM task_assignees WHERE user_id = %s AND is_deleted = FALSE",
+                (assigned_to,),
+            )
+            filter_task_ids = [r["task_id"] for r in assignee_rows]
+            if not filter_task_ids:
                 return {"items": [], "total_count": 0, "page": page, "page_size": page_size}
-            query = query.in_("id", task_ids)
+
+        # Build WHERE clauses
+        conditions = ["t.organisation_id = %s", "t.is_deleted = FALSE"]
+        params: list = [org_id]
+
+        if filter_task_ids is not None:
+            conditions.append("t.id = ANY(%s)")
+            params.append(filter_task_ids)
+        if status:
+            conditions.append("t.status = %s")
+            params.append(status)
+        if priority:
+            conditions.append("t.priority = %s")
+            params.append(priority)
+        if location_id:
+            conditions.append("t.location_id = %s")
+            params.append(location_id)
+        if source_type:
+            conditions.append("t.source_type = %s")
+            params.append(source_type)
+        if overdue:
+            conditions.append("t.due_at < %s AND t.status NOT IN ('completed', 'cancelled')")
+            params.append(datetime.now(timezone.utc))
+        if from_dt:
+            conditions.append("t.created_at >= %s")
+            params.append(from_dt)
+        if to_dt:
+            conditions.append("t.created_at <= %s")
+            params.append(to_dt)
+
+        where_sql = " AND ".join(conditions)
+
+        # Count query
+        count_result = row(
+            conn,
+            f"SELECT COUNT(*) AS total FROM tasks t WHERE {where_sql}",
+            tuple(params),
+        )
+        total_count = (count_result or {}).get("total", 0)
 
         offset = (page - 1) * page_size
-        resp = query.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+        task_rows = rows(
+            conn,
+            f"""
+            SELECT t.*,
+                   p.full_name                          AS created_by_full_name,
+                   l.name                               AS location_name
+            FROM tasks t
+            LEFT JOIN profiles p ON p.id = t.created_by
+            LEFT JOIN locations l ON l.id = t.location_id
+            WHERE {where_sql}
+            ORDER BY t.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params) + (page_size, offset),
+        )
 
-        # Filter out deleted assignees/messages client-side (PostgREST can't filter nested rows)
-        items = []
-        for t in (resp.data or []):
-            t["task_assignees"] = [a for a in (t.get("task_assignees") or []) if not a.get("is_deleted")]
-            t["task_messages"] = [m for m in (t.get("task_messages") or []) if not m.get("is_deleted")]
-            items.append(t)
+        if not task_rows:
+            return {"items": [], "total_count": total_count, "page": page, "page_size": page_size}
 
-        # Annotate unread_message_count per task for current user
-        if user_id and items:
-            task_ids = [t["id"] for t in items]
+        task_ids = [t["id"] for t in task_rows]
+
+        # Fetch assignees for all tasks in one query
+        all_assignees = rows(
+            conn,
+            """
+            SELECT ta.id, ta.task_id, ta.user_id, ta.assign_role, ta.is_deleted,
+                   pr.full_name AS assignee_full_name
+            FROM task_assignees ta
+            LEFT JOIN profiles pr ON pr.id = ta.user_id
+            WHERE ta.task_id = ANY(%s)
+            """,
+            (task_ids,),
+        )
+        # Fetch messages (id, user_id, created_at, is_deleted) for unread counting
+        all_messages = rows(
+            conn,
+            """
+            SELECT id, task_id, user_id, created_at, is_deleted
+            FROM task_messages
+            WHERE task_id = ANY(%s)
+            """,
+            (task_ids,),
+        )
+
+        # Build lookup maps
+        assignees_by_task: dict = {}
+        for a in all_assignees:
+            assignees_by_task.setdefault(a["task_id"], []).append(a)
+        messages_by_task: dict = {}
+        for m in all_messages:
+            messages_by_task.setdefault(m["task_id"], []).append(m)
+
+        # Fetch read receipts for current user
+        reads_map: dict = {}
+        if user_id:
             try:
-                reads_resp = (
-                    db.table("task_message_reads")
-                    .select("task_id, last_read_at")
-                    .in_("task_id", task_ids)
-                    .eq("user_id", user_id)
-                    .execute()
+                read_rows = rows(
+                    conn,
+                    "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                    (task_ids, user_id),
                 )
-                reads_map = {r["task_id"]: r["last_read_at"] for r in (reads_resp.data or [])}
-                for t in items:
-                    last_read = reads_map.get(t["id"])
-                    t["unread_message_count"] = sum(
-                        1 for m in t["task_messages"]
-                        if m["user_id"] != user_id
-                        and (last_read is None or m["created_at"] > last_read)
-                    )
+                reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
             except Exception as e:
                 _log.warning("Failed to fetch unread counts for tasks: %s", e)
-                for t in items:
-                    t["unread_message_count"] = 0
-        else:
-            for t in items:
-                t["unread_message_count"] = 0
 
-        return {"items": items, "total_count": resp.count or 0, "page": page, "page_size": page_size}
+        items = []
+        for t in task_rows:
+            t = dict(t)
+            tid = t["id"]
+            t["task_assignees"] = [
+                dict(a) for a in assignees_by_task.get(tid, []) if not a.get("is_deleted")
+            ]
+            task_msgs = [m for m in messages_by_task.get(tid, []) if not m.get("is_deleted")]
+            t["task_messages"] = [dict(m) for m in task_msgs]
+
+            if user_id:
+                last_read = reads_map.get(tid)
+                t["unread_message_count"] = sum(
+                    1 for m in task_msgs
+                    if m["user_id"] != user_id
+                    and (last_read is None or m["created_at"] > last_read)
+                )
+            else:
+                t["unread_message_count"] = 0
+            items.append(t)
+
+        return {"items": items, "total_count": total_count, "page": page, "page_size": page_size}
 
     @staticmethod
-    async def get_task(task_id: str, org_id: str) -> dict:
-        db = get_supabase()
-        resp = (
-            db.table("tasks")
-            .select(
-                "*, profiles!created_by(full_name), locations(name), "
-                "task_assignees(id,user_id,assign_role,is_deleted,profiles(id,full_name)), "
-                "task_messages(id,user_id,body,created_at,is_deleted,profiles(full_name)), "
-                "task_attachments(id,file_url,file_type,annotated_url,created_at,is_deleted,profiles!uploaded_by(full_name)), "
-                "task_status_history(id,changed_by,previous_status,new_status,changed_at,profiles!changed_by(full_name))"
-            )
-            .eq("id", task_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def get_task(conn, task_id: str, org_id: str) -> dict:
+        task = row(
+            conn,
+            """
+            SELECT t.*,
+                   p.full_name  AS created_by_full_name,
+                   l.name       AS location_name
+            FROM tasks t
+            LEFT JOIN profiles p ON p.id = t.created_by
+            LEFT JOIN locations l ON l.id = t.location_id
+            WHERE t.id = %s AND t.organisation_id = %s AND t.is_deleted = FALSE
+            """,
+            (task_id, org_id),
         )
-        if not resp.data:
+        if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        task = resp.data[0]
-        # Filter out soft-deleted nested items
-        task["task_assignees"] = [a for a in (task.get("task_assignees") or []) if not a.get("is_deleted")]
-        task["task_messages"] = [m for m in (task.get("task_messages") or []) if not m.get("is_deleted")]
-        task["task_attachments"] = [a for a in (task.get("task_attachments") or []) if not a.get("is_deleted")]
+        task = dict(task)
+
+        # Assignees
+        task["task_assignees"] = [
+            dict(a) for a in rows(
+                conn,
+                """
+                SELECT ta.id, ta.user_id, ta.assign_role, ta.is_deleted,
+                       pr.id AS profile_id, pr.full_name AS assignee_full_name
+                FROM task_assignees ta
+                LEFT JOIN profiles pr ON pr.id = ta.user_id
+                WHERE ta.task_id = %s AND ta.is_deleted = FALSE
+                """,
+                (task_id,),
+            )
+        ]
+
+        # Messages
+        task["task_messages"] = [
+            dict(m) for m in rows(
+                conn,
+                """
+                SELECT tm.id, tm.user_id, tm.body, tm.created_at, tm.is_deleted,
+                       pr.full_name AS sender_full_name
+                FROM task_messages tm
+                LEFT JOIN profiles pr ON pr.id = tm.user_id
+                WHERE tm.task_id = %s AND tm.is_deleted = FALSE
+                """,
+                (task_id,),
+            )
+        ]
+
+        # Attachments
+        task["task_attachments"] = [
+            dict(a) for a in rows(
+                conn,
+                """
+                SELECT ta.id, ta.file_url, ta.file_type, ta.annotated_url,
+                       ta.created_at, ta.is_deleted,
+                       pr.full_name AS uploader_full_name
+                FROM task_attachments ta
+                LEFT JOIN profiles pr ON pr.id = ta.uploaded_by
+                WHERE ta.task_id = %s AND ta.is_deleted = FALSE
+                """,
+                (task_id,),
+            )
+        ]
+
+        # Status history
+        task["task_status_history"] = [
+            dict(h) for h in rows(
+                conn,
+                """
+                SELECT tsh.id, tsh.changed_by, tsh.previous_status,
+                       tsh.new_status, tsh.changed_at,
+                       pr.full_name AS changer_full_name
+                FROM task_status_history tsh
+                LEFT JOIN profiles pr ON pr.id = tsh.changed_by
+                WHERE tsh.task_id = %s
+                ORDER BY tsh.changed_at ASC
+                """,
+                (task_id,),
+            )
+        ]
+
         return task
 
     @staticmethod
-    async def update_task(task_id: str, org_id: str, body: UpdateTaskRequest) -> dict:
-        db = get_supabase()
+    async def update_task(conn, task_id: str, org_id: str, body: UpdateTaskRequest) -> dict:
         updates: dict = body.model_dump(exclude_unset=True)
         if not updates:
             raise HTTPException(status_code=400, detail="Nothing to update")
         if "due_at" in updates and isinstance(updates["due_at"], datetime):
-            updates["due_at"] = updates["due_at"].isoformat()
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        resp = (
-            db.table("tasks")
-            .update(updates)
-            .eq("id", task_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+            updates["due_at"] = updates["due_at"]
+        updates["updated_at"] = datetime.now(timezone.utc)
+
+        set_clauses = ", ".join(f"{k} = %s" for k in updates)
+        values = list(updates.values()) + [task_id, org_id]
+        result = execute_returning(
+            conn,
+            f"""
+            UPDATE tasks
+            SET {set_clauses}
+            WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+            RETURNING *
+            """,
+            tuple(values),
         )
-        if not resp.data:
+        if not result:
             raise HTTPException(status_code=404, detail="Task not found")
-        return resp.data[0]
+        return dict(result)
 
     @staticmethod
-    async def update_status(task_id: str, org_id: str, body: UpdateTaskStatusRequest, user_id: str) -> dict:
-        db = get_supabase()
-
-        # Fetch current status
-        current_resp = db.table("tasks").select("status").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not current_resp.data:
+    async def update_status(conn, task_id: str, org_id: str, body: UpdateTaskStatusRequest, user_id: str) -> dict:
+        current = row(
+            conn,
+            "SELECT status FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not current:
             raise HTTPException(status_code=404, detail="Task not found")
-        previous_status = current_resp.data[0]["status"]
+        previous_status = current["status"]
 
-        updates: dict = {"status": body.status, "updated_at": datetime.now(timezone.utc).isoformat()}
+        extra_cols = ""
+        extra_vals: list = []
         if body.status == "completed":
-            updates["completed_at"] = datetime.now(timezone.utc).isoformat()
+            extra_cols = ", completed_at = %s"
+            extra_vals = [datetime.now(timezone.utc)]
 
-        # Update task and insert history atomically (best-effort; PostgREST doesn't support true txns via client)
-        task_resp = db.table("tasks").update(updates).eq("id", task_id).eq("organisation_id", org_id).execute()
-        db.table("task_status_history").insert({
-            "task_id": task_id,
-            "changed_by": user_id,
-            "previous_status": previous_status,
-            "new_status": body.status,
-        }).execute()
+        result = execute_returning(
+            conn,
+            f"""
+            UPDATE tasks
+            SET status = %s, updated_at = %s{extra_cols}
+            WHERE id = %s AND organisation_id = %s
+            RETURNING *
+            """,
+            tuple([body.status, datetime.now(timezone.utc)] + extra_vals + [task_id, org_id]),
+        )
 
-        if not task_resp.data:
+        execute(
+            conn,
+            """
+            INSERT INTO task_status_history
+                (task_id, changed_by, previous_status, new_status)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (task_id, user_id, previous_status, body.status),
+        )
+
+        if not result:
             raise HTTPException(status_code=404, detail="Task not found")
-        return task_resp.data[0]
+        return dict(result)
 
     @staticmethod
-    async def add_assignee(task_id: str, org_id: str, body: AddAssigneeRequest) -> dict:
-        db = get_supabase()
-        # Verify task belongs to org
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
+    async def add_assignee(conn, task_id: str, org_id: str, body: AddAssigneeRequest) -> dict:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not t:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        row: dict = {"task_id": task_id}
-        if body.user_id:
-            row["user_id"] = body.user_id
-        if body.assign_role:
-            row["assign_role"] = body.assign_role
-        if not row.get("user_id") and not row.get("assign_role"):
+        if not body.user_id and not body.assign_role:
             raise HTTPException(status_code=400, detail="Provide user_id or assign_role")
 
-        resp = db.table("task_assignees").insert(row).execute()
+        result = execute_returning(
+            conn,
+            """
+            INSERT INTO task_assignees (task_id, user_id, assign_role)
+            VALUES (%s, %s, %s)
+            RETURNING *
+            """,
+            (task_id, body.user_id or None, body.assign_role or None),
+        )
 
         # Notify the newly assigned user
         if body.user_id:
             try:
-                task_resp = db.table("tasks").select("title, location_id, due_at").eq("id", task_id).maybe_single().execute()
-                task_data = task_resp.data or {}
+                task_data = row(
+                    conn,
+                    "SELECT title, location_id, due_at FROM tasks WHERE id = %s",
+                    (task_id,),
+                ) or {}
                 import asyncio as _asyncio
                 from services import notification_service as _ns
                 _asyncio.create_task(_ns.notify(
@@ -398,121 +592,145 @@ class TaskService:
             except Exception:
                 pass
 
-        return resp.data[0] if resp.data else {}
+        return dict(result) if result else {}
 
     @staticmethod
-    async def remove_assignee(task_id: str, assignee_id: str, org_id: str) -> None:
-        db = get_supabase()
-        # Verify task belongs to org
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
-            raise HTTPException(status_code=404, detail="Task not found")
-        db.table("task_assignees").update({"is_deleted": True}).eq("id", assignee_id).eq("task_id", task_id).execute()
-
-    @staticmethod
-    async def post_message(task_id: str, org_id: str, user_id: str, body: PostMessageRequest) -> dict:
-        db = get_supabase()
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
-            raise HTTPException(status_code=404, detail="Task not found")
-        resp = db.table("task_messages").insert({
-            "task_id": task_id,
-            "user_id": user_id,
-            "body": body.body,
-        }).execute()
-        if not resp.data:
-            raise HTTPException(status_code=500, detail="Failed to post message")
-        return resp.data[0]
-
-    @staticmethod
-    async def add_attachment(task_id: str, org_id: str, user_id: str, body: AddAttachmentRequest) -> dict:
-        db = get_supabase()
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
-            raise HTTPException(status_code=404, detail="Task not found")
-        resp = db.table("task_attachments").insert({
-            "task_id": task_id,
-            "uploaded_by": user_id,
-            "file_url": body.file_url,
-            "file_type": body.file_type,
-        }).execute()
-        if not resp.data:
-            raise HTTPException(status_code=500, detail="Failed to add attachment")
-        return resp.data[0]
-
-    @staticmethod
-    async def annotate_attachment(task_id: str, attachment_id: str, org_id: str, body: AnnotateAttachmentRequest) -> dict:
-        db = get_supabase()
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
-            raise HTTPException(status_code=404, detail="Task not found")
-        resp = (
-            db.table("task_attachments")
-            .update({"annotated_url": body.annotated_url})
-            .eq("id", attachment_id)
-            .eq("task_id", task_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def remove_assignee(conn, task_id: str, assignee_id: str, org_id: str) -> None:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
         )
-        if not resp.data:
-            raise HTTPException(status_code=404, detail="Attachment not found")
-        return resp.data[0]
-
-    @staticmethod
-    async def mark_task_read(task_id: str, org_id: str, user_id: str) -> None:
-        db = get_supabase()
-        t = db.table("tasks").select("id").eq("id", task_id).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        if not t.data:
+        if not t:
             raise HTTPException(status_code=404, detail="Task not found")
-        db.table("task_message_reads").upsert(
-            {"task_id": task_id, "user_id": user_id, "last_read_at": datetime.now(timezone.utc).isoformat()},
-            on_conflict="task_id,user_id",
-        ).execute()
+        execute(
+            conn,
+            "UPDATE task_assignees SET is_deleted = TRUE WHERE id = %s AND task_id = %s",
+            (assignee_id, task_id),
+        )
 
     @staticmethod
-    async def unread_task_count(org_id: str, user_id: str) -> int:
+    async def post_message(conn, task_id: str, org_id: str, user_id: str, body: PostMessageRequest) -> dict:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not t:
+            raise HTTPException(status_code=404, detail="Task not found")
+        result = execute_returning(
+            conn,
+            "INSERT INTO task_messages (task_id, user_id, body) VALUES (%s, %s, %s) RETURNING *",
+            (task_id, user_id, body.body),
+        )
+        if not result:
+            raise HTTPException(status_code=500, detail="Failed to post message")
+        return dict(result)
+
+    @staticmethod
+    async def add_attachment(conn, task_id: str, org_id: str, user_id: str, body: AddAttachmentRequest) -> dict:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not t:
+            raise HTTPException(status_code=404, detail="Task not found")
+        result = execute_returning(
+            conn,
+            """
+            INSERT INTO task_attachments (task_id, uploaded_by, file_url, file_type)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (task_id, user_id, body.file_url, body.file_type),
+        )
+        if not result:
+            raise HTTPException(status_code=500, detail="Failed to add attachment")
+        return dict(result)
+
+    @staticmethod
+    async def annotate_attachment(conn, task_id: str, attachment_id: str, org_id: str, body: AnnotateAttachmentRequest) -> dict:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not t:
+            raise HTTPException(status_code=404, detail="Task not found")
+        result = execute_returning(
+            conn,
+            """
+            UPDATE task_attachments
+            SET annotated_url = %s
+            WHERE id = %s AND task_id = %s AND is_deleted = FALSE
+            RETURNING *
+            """,
+            (body.annotated_url, attachment_id, task_id),
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        return dict(result)
+
+    @staticmethod
+    async def mark_task_read(conn, task_id: str, org_id: str, user_id: str) -> None:
+        t = row(
+            conn,
+            "SELECT id FROM tasks WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (task_id, org_id),
+        )
+        if not t:
+            raise HTTPException(status_code=404, detail="Task not found")
+        execute(
+            conn,
+            """
+            INSERT INTO task_message_reads (task_id, user_id, last_read_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (task_id, user_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at
+            """,
+            (task_id, user_id, datetime.now(timezone.utc)),
+        )
+
+    @staticmethod
+    async def unread_task_count(conn, org_id: str, user_id: str) -> int:
         """Count tasks that have messages the current user hasn't read."""
-        db = get_supabase()
         try:
-            # Get all task IDs in org
-            tasks_resp = (
-                db.table("tasks")
-                .select("id")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .neq("status", "completed")
-                .neq("status", "cancelled")
-                .execute()
+            task_rows = rows(
+                conn,
+                """
+                SELECT id FROM tasks
+                WHERE organisation_id = %s
+                  AND is_deleted = FALSE
+                  AND status NOT IN ('completed', 'cancelled')
+                """,
+                (org_id,),
             )
-            task_ids = [t["id"] for t in (tasks_resp.data or [])]
+            task_ids = [t["id"] for t in task_rows]
             if not task_ids:
                 return 0
 
-            # Get messages not sent by this user
-            msgs_resp = (
-                db.table("task_messages")
-                .select("task_id, created_at")
-                .in_("task_id", task_ids)
-                .neq("user_id", user_id)
-                .eq("is_deleted", False)
-                .execute()
+            msg_rows = rows(
+                conn,
+                """
+                SELECT task_id, created_at FROM task_messages
+                WHERE task_id = ANY(%s)
+                  AND user_id != %s
+                  AND is_deleted = FALSE
+                """,
+                (task_ids, user_id),
             )
-            if not msgs_resp.data:
+            if not msg_rows:
                 return 0
 
-            # Get user's read receipts
-            reads_resp = (
-                db.table("task_message_reads")
-                .select("task_id, last_read_at")
-                .in_("task_id", task_ids)
-                .eq("user_id", user_id)
-                .execute()
+            read_rows = rows(
+                conn,
+                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                (task_ids, user_id),
             )
-            reads_map = {r["task_id"]: r["last_read_at"] for r in (reads_resp.data or [])}
+            reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
 
-            # Group messages by task
             tasks_with_unread: set = set()
-            for m in msgs_resp.data:
+            for m in msg_rows:
                 tid = m["task_id"]
                 last_read = reads_map.get(tid)
                 if last_read is None or m["created_at"] > last_read:
@@ -523,90 +741,152 @@ class TaskService:
             return 0
 
     @staticmethod
-    async def my_tasks(user_id: str, org_id: str) -> list[dict]:
+    async def my_tasks(conn, user_id: str, org_id: str) -> list[dict]:
         """Return the current user's pending + in_progress + overdue tasks."""
-        db = get_supabase()
-        # Tasks where user is an assignee
-        ta_resp = db.table("task_assignees").select("task_id").eq("user_id", user_id).eq("is_deleted", False).execute()
-        task_ids = [r["task_id"] for r in (ta_resp.data or [])]
+        assignee_rows = rows(
+            conn,
+            "SELECT task_id FROM task_assignees WHERE user_id = %s AND is_deleted = FALSE",
+            (user_id,),
+        )
+        task_ids = [r["task_id"] for r in assignee_rows]
         if not task_ids:
             return []
-        resp = (
-            db.table("tasks")
-            .select(
-                "*, locations(name), task_assignees(id,user_id,assign_role,profiles(full_name)), "
-                "task_messages!left(id,user_id,created_at,is_deleted)"
-            )
-            .in_("id", task_ids)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .in_("status", ["pending", "in_progress", "overdue"])
-            .order("due_at", desc=False, nullsfirst=False)
-            .execute()
-        )
-        tasks = resp.data or []
-        for t in tasks:
-            t["task_messages"] = [m for m in (t.get("task_messages") or []) if not m.get("is_deleted")]
 
-        # Annotate unread_message_count
-        if tasks:
-            try:
-                tids = [t["id"] for t in tasks]
-                reads_resp = (
-                    db.table("task_message_reads")
-                    .select("task_id, last_read_at")
-                    .in_("task_id", tids)
-                    .eq("user_id", user_id)
-                    .execute()
-                )
-                reads_map = {r["task_id"]: r["last_read_at"] for r in (reads_resp.data or [])}
-                for t in tasks:
-                    last_read = reads_map.get(t["id"])
-                    t["unread_message_count"] = sum(
-                        1 for m in t["task_messages"]
-                        if m["user_id"] != user_id
-                        and (last_read is None or m["created_at"] > last_read)
-                    )
-            except Exception as e:
-                _log.warning("Failed to fetch unread counts for tasks: %s", e)
-                for t in tasks:
-                    t["unread_message_count"] = 0
+        task_rows = rows(
+            conn,
+            """
+            SELECT t.*,
+                   l.name AS location_name
+            FROM tasks t
+            LEFT JOIN locations l ON l.id = t.location_id
+            WHERE t.id = ANY(%s)
+              AND t.organisation_id = %s
+              AND t.is_deleted = FALSE
+              AND t.status = ANY(%s)
+            ORDER BY t.due_at ASC NULLS LAST
+            """,
+            (task_ids, org_id, ["pending", "in_progress", "overdue"]),
+        )
+        if not task_rows:
+            return []
+
+        tids = [t["id"] for t in task_rows]
+
+        # Fetch assignees
+        all_assignees = rows(
+            conn,
+            """
+            SELECT ta.id, ta.task_id, ta.user_id, ta.assign_role,
+                   pr.full_name AS assignee_full_name
+            FROM task_assignees ta
+            LEFT JOIN profiles pr ON pr.id = ta.user_id
+            WHERE ta.task_id = ANY(%s) AND ta.is_deleted = FALSE
+            """,
+            (tids,),
+        )
+        assignees_by_task: dict = {}
+        for a in all_assignees:
+            assignees_by_task.setdefault(a["task_id"], []).append(a)
+
+        # Fetch messages for unread counting
+        all_messages = rows(
+            conn,
+            "SELECT id, task_id, user_id, created_at, is_deleted FROM task_messages WHERE task_id = ANY(%s)",
+            (tids,),
+        )
+        messages_by_task: dict = {}
+        for m in all_messages:
+            messages_by_task.setdefault(m["task_id"], []).append(m)
+
+        # Read receipts
+        reads_map: dict = {}
+        try:
+            read_rows = rows(
+                conn,
+                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                (tids, user_id),
+            )
+            reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
+        except Exception as e:
+            _log.warning("Failed to fetch unread counts for tasks: %s", e)
+
+        tasks = []
+        for t in task_rows:
+            t = dict(t)
+            tid = t["id"]
+            t["task_assignees"] = [dict(a) for a in assignees_by_task.get(tid, [])]
+            task_msgs = [m for m in messages_by_task.get(tid, []) if not m.get("is_deleted")]
+            t["task_messages"] = [dict(m) for m in task_msgs]
+            last_read = reads_map.get(tid)
+            t["unread_message_count"] = sum(
+                1 for m in task_msgs
+                if m["user_id"] != user_id
+                and (last_read is None or m["created_at"] > last_read)
+            )
+            tasks.append(t)
         return tasks
 
     @staticmethod
-    async def summary(org_id: str, user_id: Optional[str] = None) -> dict:
-        db = get_supabase()
-        query = (
-            db.table("tasks")
-            .select("id,status,due_at,priority,title,locations(name)", count="exact")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-        )
+    async def summary(conn, org_id: str, user_id: Optional[str] = None) -> dict:
+        conditions = ["organisation_id = %s", "is_deleted = FALSE"]
+        params: list = [org_id]
+
         if user_id:
-            # Scope to tasks assigned to this user
-            ta = db.table("task_assignees").select("task_id").eq("user_id", user_id).eq("is_deleted", False).execute()
-            task_ids = [r["task_id"] for r in (ta.data or [])]
+            assignee_rows = rows(
+                conn,
+                "SELECT task_id FROM task_assignees WHERE user_id = %s AND is_deleted = FALSE",
+                (user_id,),
+            )
+            task_ids = [r["task_id"] for r in assignee_rows]
             if not task_ids:
                 return {"total": 0, "by_status": {}, "by_priority": {}, "overdue_count": 0, "overdue_tasks": [], "completion_rate": None}
-            query = query.in_("id", task_ids)
-        resp = query.execute()
-        tasks = resp.data or []
-        now = datetime.now(timezone.utc)
+            conditions.append("id = ANY(%s)")
+            params.append(task_ids)
 
+        where_sql = " AND ".join(conditions)
+        task_rows = rows(
+            conn,
+            f"SELECT id, status, due_at, priority, title FROM tasks WHERE {where_sql}",
+            tuple(params),
+        )
+
+        # Fetch location names for tasks that have one (used in overdue_tasks)
+        if task_rows:
+            tids = [t["id"] for t in task_rows]
+            loc_rows = rows(
+                conn,
+                """
+                SELECT t.id AS task_id, l.name AS location_name
+                FROM tasks t
+                JOIN locations l ON l.id = t.location_id
+                WHERE t.id = ANY(%s)
+                """,
+                (tids,),
+            )
+            loc_map = {r["task_id"]: r["location_name"] for r in loc_rows}
+        else:
+            loc_map = {}
+
+        now = datetime.now(timezone.utc)
         by_status: dict = {}
         by_priority: dict = {}
         overdue_tasks = []
 
-        for t in tasks:
+        for t in task_rows:
+            t = dict(t)
             s = t["status"]
             by_status[s] = by_status.get(s, 0) + 1
             p = t["priority"]
             by_priority[p] = by_priority.get(p, 0) + 1
             if t.get("due_at") and t["status"] not in ("completed", "cancelled"):
-                if datetime.fromisoformat(t["due_at"].replace("Z", "+00:00")) < now:
+                due_val = t["due_at"]
+                if isinstance(due_val, str):
+                    due_val = datetime.fromisoformat(due_val.replace("Z", "+00:00"))
+                if due_val < now:
+                    t["locations"] = {"name": loc_map.get(t["id"])}
                     overdue_tasks.append(t)
 
-        total = len(tasks)
+        total = len(task_rows)
         completed = by_status.get("completed", 0)
         completion_rate = round(completed / total, 4) if total > 0 else None
 

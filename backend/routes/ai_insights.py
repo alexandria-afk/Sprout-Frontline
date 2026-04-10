@@ -15,10 +15,10 @@ import anthropic
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config import settings
-from dependencies import get_current_user, require_manager_or_above
+from dependencies import get_db, get_current_user, require_manager_or_above
 from services.ai_logger import AITimer, log_ai_request
+from services.db import row, rows, execute, execute_returning, execute_many
 from services.industry_context import get_industry_context
-from services.supabase_client import get_supabase
 
 router = APIRouter()
 
@@ -116,9 +116,8 @@ async def _call_claude(system_prompt: str, user_message: str, max_tokens: int = 
 
 # ── Snapshot builder ──────────────────────────────────────────────────────────
 
-def _build_snapshot(org_id: str) -> dict:
+def _build_snapshot(conn, org_id: str) -> dict:
     """Gather all operational data for the org. Runs synchronously."""
-    sb = get_supabase()
     today = _today()
     today_dt = datetime.combine(today, datetime.min.time())
 
@@ -155,15 +154,17 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Locations ─────────────────────────────────────────────────────────────
     try:
-        loc_resp = (
-            sb.table("locations")
-            .select("id,name")
-            .eq("organisation_id", org_id)
-            .eq("is_active", True)
-            .eq("is_deleted", False)
-            .execute()
+        locations = rows(
+            conn,
+            """
+            SELECT id, name
+            FROM locations
+            WHERE organisation_id = %s
+              AND is_active = TRUE
+              AND is_deleted = FALSE
+            """,
+            (org_id,),
         )
-        locations = loc_resp.data or []
         loc_map = {l["id"]: l["name"] for l in locations}
         snapshot["org"] = {
             "location_count": len(locations),
@@ -178,29 +179,36 @@ def _build_snapshot(org_id: str) -> dict:
     # ── Training & Certifications ─────────────────────────────────────────────
     try:
         # Certifications expiring soon — from course_enrollments.cert_expires_at
-        enroll_resp = (
-            sb.table("course_enrollments")
-            .select("user_id,status,cert_expires_at,cert_issued_at,courses!inner(organisation_id,is_mandatory,title)")
-            .eq("courses.organisation_id", org_id)
-            .eq("status", "passed")
-            .not_.is_("cert_expires_at", "null")
-            .execute()
+        enrollments_cert = rows(
+            conn,
+            """
+            SELECT ce.user_id, ce.status, ce.cert_expires_at, ce.cert_issued_at,
+                   c.is_mandatory, c.title
+            FROM course_enrollments ce
+            JOIN courses c ON c.id = ce.course_id
+            WHERE c.organisation_id = %s
+              AND ce.status = 'passed'
+              AND ce.cert_expires_at IS NOT NULL
+            """,
+            (org_id,),
         )
-        enrollments_cert = enroll_resp.data or []
 
         # Profile → location mapping
         all_user_ids_cert = list({e["user_id"] for e in enrollments_cert if e.get("user_id")})
         user_loc_map: dict[str, str] = {}
         if all_user_ids_cert:
-            prof_resp = (
-                sb.table("profiles")
-                .select("id,location_id,created_at")
-                .in_("id", all_user_ids_cert)
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .execute()
+            prof_rows = rows(
+                conn,
+                """
+                SELECT id, location_id
+                FROM profiles
+                WHERE id = ANY(%s::uuid[])
+                  AND organisation_id = %s
+                  AND is_deleted = FALSE
+                """,
+                (all_user_ids_cert, org_id),
             )
-            for p in (prof_resp.data or []):
+            for p in prof_rows:
                 user_loc_map[p["id"]] = p.get("location_id") or ""
 
         exp_7: dict[str, int] = {}   # loc_id → count
@@ -212,7 +220,7 @@ def _build_snapshot(org_id: str) -> dict:
             if not exp_str:
                 continue
             try:
-                exp_date = datetime.fromisoformat(exp_str.replace("Z", "+00:00")).date()
+                exp_date = datetime.fromisoformat(str(exp_str).replace("Z", "+00:00")).date()
             except Exception:
                 continue
             days_left = (exp_date - today).days
@@ -227,21 +235,23 @@ def _build_snapshot(org_id: str) -> dict:
                 exp_30[lid] = exp_30.get(lid, 0) + 1
 
         # All enrollments for completion rates
-        all_enroll_resp = (
-            sb.table("course_enrollments")
-            .select("user_id,status,courses!inner(organisation_id,is_mandatory)")
-            .eq("courses.organisation_id", org_id)
-            .execute()
+        all_enrollments = rows(
+            conn,
+            """
+            SELECT ce.user_id, ce.status,
+                   c.is_mandatory
+            FROM course_enrollments ce
+            JOIN courses c ON c.id = ce.course_id
+            WHERE c.organisation_id = %s
+            """,
+            (org_id,),
         )
-        all_enrollments = all_enroll_resp.data or []
 
-        # Overdue (not completed, has a deadline — using course deadline concept)
-        # Since courses don't have explicit enrollment deadlines in schema,
-        # we approximate: mandatory courses not started/in_progress for > 14 days
+        # Overdue mandatory enrollments (not completed)
         overdue_enroll = sum(
             1 for e in all_enrollments
             if e.get("status") in ("not_started", "in_progress")
-            and (e.get("courses") or {}).get("is_mandatory")
+            and e.get("is_mandatory")
         )
 
         # Per-location completion (passed / total enrolled)
@@ -265,22 +275,24 @@ def _build_snapshot(org_id: str) -> dict:
 
         # New hires with incomplete required training (joined in last 30 days)
         new_hire_ids: set[str] = set()
-        if all_user_ids_cert:
-            nh_resp = (
-                sb.table("profiles")
-                .select("id")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .gte("created_at", f"{tda}T00:00:00")
-                .execute()
-            )
-            new_hire_ids = {p["id"] for p in (nh_resp.data or [])}
+        nh_rows = rows(
+            conn,
+            """
+            SELECT id
+            FROM profiles
+            WHERE organisation_id = %s
+              AND is_deleted = FALSE
+              AND created_at >= %s::timestamptz
+            """,
+            (org_id, f"{tda}T00:00:00"),
+        )
+        new_hire_ids = {p["id"] for p in nh_rows}
 
         new_hire_incomplete = sum(
             1 for e in all_enrollments
             if e.get("user_id") in new_hire_ids
             and e.get("status") in ("not_started", "in_progress")
-            and (e.get("courses") or {}).get("is_mandatory")
+            and e.get("is_mandatory")
         )
 
         snapshot["certifications"] = {
@@ -302,30 +314,36 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Issues ────────────────────────────────────────────────────────────────
     try:
-        issues_resp = (
-            sb.table("issues")
-            .select("id,category_id,location_id,status,priority,created_at,resolved_at,cost,issue_categories(name,sla_hours,is_maintenance)")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .gte("created_at", f"{fwa}T00:00:00")
-            .execute()
+        issues_all = rows(
+            conn,
+            """
+            SELECT i.id, i.category_id, i.location_id, i.status, i.priority,
+                   i.created_at, i.resolved_at, i.cost,
+                   ic.name  AS cat_name,
+                   ic.sla_hours,
+                   ic.is_maintenance
+            FROM issues i
+            LEFT JOIN issue_categories ic ON ic.id = i.category_id
+            WHERE i.organisation_id = %s
+              AND i.is_deleted = FALSE
+              AND i.created_at >= %s::timestamptz
+            """,
+            (org_id, f"{fwa}T00:00:00"),
         )
-        issues_all = issues_resp.data or []
 
         # Resolution time per category (last 4 weeks, resolved only)
         cat_res: dict[str, list[float]] = {}
         cat_sla: dict[str, int] = {}
-        weekly_sla_breaches: dict[str, list[bool]] = {}  # cat → [week0, week1, week2, week3]
 
         for issue in issues_all:
-            cat = (issue.get("issue_categories") or {}).get("name", "Unknown")
-            sla = (issue.get("issue_categories") or {}).get("sla_hours", 24) or 24
+            cat = issue.get("cat_name") or "Unknown"
+            sla = issue.get("sla_hours", 24) or 24
             cat_sla[cat] = sla
 
             if issue.get("resolved_at") and issue.get("created_at"):
                 try:
-                    c = datetime.fromisoformat(issue["created_at"].replace("Z", "+00:00"))
-                    r = datetime.fromisoformat(issue["resolved_at"].replace("Z", "+00:00"))
+                    c = datetime.fromisoformat(str(issue["created_at"]).replace("Z", "+00:00"))
+                    r = datetime.fromisoformat(str(issue["resolved_at"]).replace("Z", "+00:00"))
                     hrs = (r - c).total_seconds() / 3600
                     cat_res.setdefault(cat, []).append(hrs)
                 except Exception:
@@ -344,14 +362,14 @@ def _build_snapshot(org_id: str) -> dict:
 
         # Chronic SLA breaches: cat where avg > 2x SLA for the full 4-week window
         chronic_sla = [
-            row for row in by_category_resolution
-            if row["sla_ratio"] >= 2.0 and row["sample_count"] >= 3
+            r for r in by_category_resolution
+            if r["sla_ratio"] >= 2.0 and r["sample_count"] >= 3
         ]
 
         # Recurring: same category+location appearing 3+ times in 30 days
         recurring_key: dict[tuple, int] = {}
         for issue in issues_all:
-            cat = (issue.get("issue_categories") or {}).get("name", "Unknown")
+            cat = issue.get("cat_name") or "Unknown"
             lid = issue.get("location_id", "")
             key = (cat, lid)
             recurring_key[key] = recurring_key.get(key, 0) + 1
@@ -363,25 +381,25 @@ def _build_snapshot(org_id: str) -> dict:
 
         # SLA breach count this/last week
         def _issue_breached(issue: dict) -> bool:
-            sla = (issue.get("issue_categories") or {}).get("sla_hours", 24) or 24
+            sla = issue.get("sla_hours", 24) or 24
             ca = issue.get("created_at", "")
             ra = issue.get("resolved_at")
             if not ca:
                 return False
             try:
-                c = datetime.fromisoformat(ca.replace("Z", "+00:00"))
-                end = datetime.fromisoformat(ra.replace("Z", "+00:00")) if ra else datetime.now(timezone.utc)
+                c = datetime.fromisoformat(str(ca).replace("Z", "+00:00"))
+                end = datetime.fromisoformat(str(ra).replace("Z", "+00:00")) if ra else datetime.now(timezone.utc)
                 return (end - c).total_seconds() / 3600 > sla
             except Exception:
                 return False
 
         sla_breach_this_week = sum(
             1 for i in issues_all
-            if i.get("created_at", "") >= f"{ws}T00:00:00" and _issue_breached(i)
+            if str(i.get("created_at", "")) >= f"{ws}T00:00:00" and _issue_breached(i)
         )
         sla_breach_last_week = sum(
             1 for i in issues_all
-            if f"{lws}T00:00:00" <= i.get("created_at", "") < f"{ws}T00:00:00" and _issue_breached(i)
+            if f"{lws}T00:00:00" <= str(i.get("created_at", "")) < f"{ws}T00:00:00" and _issue_breached(i)
         )
 
         snapshot["issues"] = {
@@ -396,16 +414,19 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Audits & CAPs ─────────────────────────────────────────────────────────
     try:
-        audit_resp = (
-            sb.table("form_submissions")
-            .select("id,location_id,overall_score,passed,submitted_at,form_templates!inner(organisation_id,type)")
-            .eq("form_templates.organisation_id", org_id)
-            .eq("form_templates.type", "audit")
-            .in_("status", ["submitted", "approved", "rejected"])
-            .gte("submitted_at", f"{fwa}T00:00:00")
-            .execute()
+        audits = rows(
+            conn,
+            """
+            SELECT fs.id, fs.location_id, fs.overall_score, fs.passed, fs.submitted_at
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE ft.organisation_id = %s
+              AND ft.type = 'audit'
+              AND fs.status IN ('submitted', 'approved', 'rejected')
+              AND fs.submitted_at >= %s::timestamptz
+            """,
+            (org_id, f"{fwa}T00:00:00"),
         )
-        audits = audit_resp.data or []
 
         # Per-location weekly avg score (4 weeks)
         loc_weekly_scores: dict[str, dict[int, list[float]]] = {}
@@ -415,7 +436,7 @@ def _build_snapshot(org_id: str) -> dict:
             if score is None:
                 continue
             try:
-                sub_date = datetime.fromisoformat(a["submitted_at"].replace("Z", "+00:00")).date()
+                sub_date = datetime.fromisoformat(str(a["submitted_at"]).replace("Z", "+00:00")).date()
                 days_ago = (today - sub_date).days
                 week_num = min(days_ago // 7, 3)  # 0=most recent, 3=oldest
             except Exception:
@@ -445,21 +466,23 @@ def _build_snapshot(org_id: str) -> dict:
         # Failed audits this week
         failed_this_week = sum(
             1 for a in audits
-            if a.get("submitted_at", "") >= f"{ws}T00:00:00" and a.get("passed") is False
+            if str(a.get("submitted_at", "")) >= f"{ws}T00:00:00" and a.get("passed") is False
         )
 
         # Pending CAPs
-        caps_resp = (
-            sb.table("corrective_action_plans")
-            .select("id,created_at,organisation_id")
-            .eq("organisation_id", org_id)
-            .eq("status", "pending_review")
-            .execute()
+        caps = rows(
+            conn,
+            """
+            SELECT id, created_at
+            FROM corrective_action_plans
+            WHERE organisation_id = %s
+              AND status = 'pending_review'
+            """,
+            (org_id,),
         )
-        caps = caps_resp.data or []
         pending_caps = [
             {
-                "age_days": (today - datetime.fromisoformat(c["created_at"].replace("Z", "+00:00")).date()).days
+                "age_days": (today - datetime.fromisoformat(str(c["created_at"]).replace("Z", "+00:00")).date()).days
                 if c.get("created_at") else 0
             }
             for c in caps
@@ -477,28 +500,34 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Checklists ────────────────────────────────────────────────────────────
     try:
-        checklist_sub_resp = (
-            sb.table("form_submissions")
-            .select("location_id,submitted_at,form_templates!inner(organisation_id,type)")
-            .eq("form_templates.organisation_id", org_id)
-            .eq("form_templates.type", "checklist")
-            .in_("status", ["submitted", "approved", "rejected"])
-            .gte("submitted_at", f"{sda}T00:00:00")
-            .execute()
+        checklist_subs = rows(
+            conn,
+            """
+            SELECT fs.location_id, fs.submitted_at
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE ft.organisation_id = %s
+              AND ft.type = 'checklist'
+              AND fs.status IN ('submitted', 'approved', 'rejected')
+              AND fs.submitted_at >= %s::timestamptz
+            """,
+            (org_id, f"{sda}T00:00:00"),
         )
-        checklist_subs = checklist_sub_resp.data or []
 
         # Assignments (total assigned, as denominator)
-        checklist_assign_resp = (
-            sb.table("form_assignments")
-            .select("assigned_to_location_id,form_templates!inner(organisation_id,type)")
-            .eq("organisation_id", org_id)
-            .eq("form_templates.type", "checklist")
-            .eq("is_active", True)
-            .eq("is_deleted", False)
-            .execute()
+        checklist_assigns = rows(
+            conn,
+            """
+            SELECT fa.assigned_to_location_id
+            FROM form_assignments fa
+            JOIN form_templates ft ON ft.id = fa.form_template_id
+            WHERE fa.organisation_id = %s
+              AND ft.type = 'checklist'
+              AND fa.is_active = TRUE
+              AND fa.is_deleted = FALSE
+            """,
+            (org_id,),
         )
-        checklist_assigns = checklist_assign_resp.data or []
         assigned_per_loc: dict[str, int] = {}
         for a in checklist_assigns:
             lid = a.get("assigned_to_location_id", "")
@@ -509,7 +538,7 @@ def _build_snapshot(org_id: str) -> dict:
         for s in checklist_subs:
             lid = s.get("location_id", "")
             try:
-                d = datetime.fromisoformat(s["submitted_at"].replace("Z", "+00:00")).date().isoformat()
+                d = datetime.fromisoformat(str(s["submitted_at"]).replace("Z", "+00:00")).date().isoformat()
             except Exception:
                 continue
             loc_daily.setdefault(lid, {})
@@ -540,35 +569,43 @@ def _build_snapshot(org_id: str) -> dict:
                 below_80_consecutive[lid] = consecutive
 
         # Template completion trend: this week vs last week
-        this_week_subs_resp = (
-            sb.table("form_submissions")
-            .select("form_template_id,form_templates!inner(organisation_id,type,title)")
-            .eq("form_templates.organisation_id", org_id)
-            .eq("form_templates.type", "checklist")
-            .in_("status", ["submitted", "approved", "rejected"])
-            .gte("submitted_at", f"{ws}T00:00:00")
-            .execute()
+        this_week_subs = rows(
+            conn,
+            """
+            SELECT fs.form_template_id, ft.title AS tpl_title
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE ft.organisation_id = %s
+              AND ft.type = 'checklist'
+              AND fs.status IN ('submitted', 'approved', 'rejected')
+              AND fs.submitted_at >= %s::timestamptz
+            """,
+            (org_id, f"{ws}T00:00:00"),
         )
-        last_week_subs_resp = (
-            sb.table("form_submissions")
-            .select("form_template_id,form_templates!inner(organisation_id,type,title)")
-            .eq("form_templates.organisation_id", org_id)
-            .eq("form_templates.type", "checklist")
-            .in_("status", ["submitted", "approved", "rejected"])
-            .gte("submitted_at", f"{lws}T00:00:00")
-            .lt("submitted_at", f"{ws}T00:00:00")
-            .execute()
+        last_week_subs = rows(
+            conn,
+            """
+            SELECT fs.form_template_id, ft.title AS tpl_title
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE ft.organisation_id = %s
+              AND ft.type = 'checklist'
+              AND fs.status IN ('submitted', 'approved', 'rejected')
+              AND fs.submitted_at >= %s::timestamptz
+              AND fs.submitted_at < %s::timestamptz
+            """,
+            (org_id, f"{lws}T00:00:00", f"{ws}T00:00:00"),
         )
         this_week_by_tpl: dict[str, int] = {}
-        for s in (this_week_subs_resp.data or []):
+        for s in this_week_subs:
             tid = s.get("form_template_id", "")
             this_week_by_tpl[tid] = this_week_by_tpl.get(tid, 0) + 1
         last_week_by_tpl: dict[str, int] = {}
         tpl_names: dict[str, str] = {}
-        for s in (last_week_subs_resp.data or []):
+        for s in last_week_subs:
             tid = s.get("form_template_id", "")
             last_week_by_tpl[tid] = last_week_by_tpl.get(tid, 0) + 1
-            tpl_names[tid] = (s.get("form_templates") or {}).get("title", "Unknown")
+            tpl_names[tid] = s.get("tpl_title") or "Unknown"
 
         template_trend = [
             {
@@ -593,16 +630,19 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Pull-Outs & Waste ─────────────────────────────────────────────────────
     try:
-        pullout_resp = (
-            sb.table("form_submissions")
-            .select("location_id,estimated_cost,submitted_at,form_templates!inner(organisation_id,type)")
-            .eq("form_templates.organisation_id", org_id)
-            .eq("form_templates.type", "pull_out")
-            .in_("status", ["submitted", "approved", "rejected"])
-            .gte("submitted_at", f"{fwa}T00:00:00")
-            .execute()
+        pullouts = rows(
+            conn,
+            """
+            SELECT fs.location_id, fs.estimated_cost, fs.submitted_at
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE ft.organisation_id = %s
+              AND ft.type = 'pull_out'
+              AND fs.status IN ('submitted', 'approved', 'rejected')
+              AND fs.submitted_at >= %s::timestamptz
+            """,
+            (org_id, f"{fwa}T00:00:00"),
         )
-        pullouts = pullout_resp.data or []
 
         # Weekly cost per location (4 weeks)
         loc_weekly_cost: dict[str, list[float]] = {}  # loc_id → [w0, w1, w2, w3]
@@ -614,7 +654,7 @@ def _build_snapshot(org_id: str) -> dict:
                 pass
             lid = p.get("location_id", "")
             try:
-                sub_date = datetime.fromisoformat(p["submitted_at"].replace("Z", "+00:00")).date()
+                sub_date = datetime.fromisoformat(str(p["submitted_at"]).replace("Z", "+00:00")).date()
                 days_ago = (today - sub_date).days
                 week_num = min(days_ago // 7, 3)
             except Exception:
@@ -657,57 +697,66 @@ def _build_snapshot(org_id: str) -> dict:
     # ── Shifts & Attendance ───────────────────────────────────────────────────
     try:
         # Shifts last 7 days
-        shifts_resp = (
-            sb.table("shifts")
-            .select("id,location_id,assigned_to_user_id,start_at,end_at,status,is_open_shift")
-            .eq("organisation_id", org_id)
-            .eq("status", "published")
-            .gte("start_at", f"{sda}T00:00:00")
-            .lt("start_at", f"{tod}T23:59:59")
-            .execute()
+        shifts_7d = rows(
+            conn,
+            """
+            SELECT id, location_id, assigned_to_user_id, start_at, end_at,
+                   status, is_open_shift
+            FROM shifts
+            WHERE organisation_id = %s
+              AND status = 'published'
+              AND start_at >= %s::timestamptz
+              AND start_at < %s::timestamptz
+            """,
+            (org_id, f"{sda}T00:00:00", f"{tod}T23:59:59"),
         )
-        shifts_7d = shifts_resp.data or []
 
-        # Open/unfilled shifts
-        open_shifts_resp = (
-            sb.table("shifts")
-            .select("id", count="exact")
-            .eq("organisation_id", org_id)
-            .eq("is_open_shift", True)
-            .in_("status", ["open", "published"])
-            .execute()
+        # Open/unfilled shifts count
+        open_shifts_row = row(
+            conn,
+            """
+            SELECT COUNT(*) AS cnt
+            FROM shifts
+            WHERE organisation_id = %s
+              AND is_open_shift = TRUE
+              AND status IN ('open', 'published')
+            """,
+            (org_id,),
         )
-        open_shifts_count = open_shifts_resp.count or 0
+        open_shifts_count = (open_shifts_row or {}).get("cnt", 0) or 0
 
         # Attendance records last 7 days
-        att_resp = (
-            sb.table("attendance_records")
-            .select("user_id,shift_id,location_id,clock_in_at,clock_out_at,overtime_minutes,status")
-            .eq("organisation_id", org_id)
-            .gte("clock_in_at", f"{sda}T00:00:00")
-            .execute()
+        att_7d = rows(
+            conn,
+            """
+            SELECT user_id, shift_id, location_id, clock_in_at, clock_out_at,
+                   overtime_minutes, status
+            FROM attendance_records
+            WHERE organisation_id = %s
+              AND clock_in_at >= %s::timestamptz
+            """,
+            (org_id, f"{sda}T00:00:00"),
         )
-        att_7d = att_resp.data or []
         att_shift_ids = {a["shift_id"] for a in att_7d if a.get("shift_id")}
 
         # No-shows: shifts without attendance records
         no_show_this_week = sum(
             1 for s in shifts_7d
             if s["id"] not in att_shift_ids
-            and s.get("start_at", "") >= f"{ws}T00:00:00"
+            and str(s.get("start_at", "")) >= f"{ws}T00:00:00"
             and s.get("assigned_to_user_id")
         )
         no_show_last_week = sum(
             1 for s in shifts_7d
             if s["id"] not in att_shift_ids
-            and f"{lws}T00:00:00" <= s.get("start_at", "") < f"{ws}T00:00:00"
+            and f"{lws}T00:00:00" <= str(s.get("start_at", "")) < f"{ws}T00:00:00"
             and s.get("assigned_to_user_id")
         )
 
         # Overtime by location this week
         overtime_by_loc: dict[str, int] = {}
         for a in att_7d:
-            if a.get("clock_in_at", "") < f"{ws}T00:00:00":
+            if str(a.get("clock_in_at", "")) < f"{ws}T00:00:00":
                 continue
             lid = a.get("location_id", "")
             ot = a.get("overtime_minutes") or 0
@@ -718,6 +767,7 @@ def _build_snapshot(org_id: str) -> dict:
         for s in shifts_7d:
             lid = s.get("location_id", "")
             loc_sched[lid] = loc_sched.get(lid, 0) + 1
+
         loc_att: dict[str, int] = {}
         for a in att_7d:
             lid = a.get("location_id", "")
@@ -745,21 +795,24 @@ def _build_snapshot(org_id: str) -> dict:
 
     # ── Tasks ─────────────────────────────────────────────────────────────────
     try:
-        tasks_resp = (
-            sb.table("tasks")
-            .select("id,location_id,status,priority,created_at,completed_at,title,due_at")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .gte("created_at", f"{lws}T00:00:00")
-            .execute()
+        tasks = rows(
+            conn,
+            """
+            SELECT id, location_id, status, priority, created_at, completed_at,
+                   title, due_at
+            FROM tasks
+            WHERE organisation_id = %s
+              AND is_deleted = FALSE
+              AND created_at >= %s::timestamptz
+            """,
+            (org_id, f"{lws}T00:00:00"),
         )
-        tasks = tasks_resp.data or []
 
         # Completion this week vs last week by location
         loc_task_completion: dict[str, dict] = {}
         for t in tasks:
             lid = t.get("location_id", "")
-            ca = t.get("created_at", "")
+            ca = str(t.get("created_at", ""))
             this_wk = ca >= f"{ws}T00:00:00"
             last_wk = f"{lws}T00:00:00" <= ca < f"{ws}T00:00:00"
             if lid not in loc_task_completion:
@@ -784,27 +837,41 @@ def _build_snapshot(org_id: str) -> dict:
         ]
 
         # Open > 7 days
-        open_over_7d_resp = (
-            sb.table("tasks")
-            .select("id,title,location_id,priority")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .in_("status", ["pending", "in_progress", "overdue"])
-            .lt("created_at", f"{sda}T00:00:00")
-            .limit(20)
-            .execute()
+        open_over_7d = rows(
+            conn,
+            """
+            SELECT id, title, location_id, priority
+            FROM tasks
+            WHERE organisation_id = %s
+              AND is_deleted = FALSE
+              AND status IN ('pending', 'in_progress', 'overdue')
+              AND created_at < %s::timestamptz
+            LIMIT 20
+            """,
+            (org_id, f"{sda}T00:00:00"),
         )
-        open_over_7d = open_over_7d_resp.data or []
 
         # Overdue trend
-        overdue_this = sum(1 for t in tasks if t.get("status") == "overdue" and t.get("created_at", "") >= f"{ws}T00:00:00")
-        overdue_last = sum(1 for t in tasks if t.get("status") == "overdue" and f"{lws}T00:00:00" <= t.get("created_at", "") < f"{ws}T00:00:00")
+        overdue_this = sum(
+            1 for t in tasks
+            if t.get("status") == "overdue"
+            and str(t.get("created_at", "")) >= f"{ws}T00:00:00"
+        )
+        overdue_last = sum(
+            1 for t in tasks
+            if t.get("status") == "overdue"
+            and f"{lws}T00:00:00" <= str(t.get("created_at", "")) < f"{ws}T00:00:00"
+        )
 
         snapshot["tasks"] = {
             "completion_by_location": task_completion_by_loc,
             "open_over_7d_count": len(open_over_7d),
             "open_over_7d_sample": [
-                {"title": t["title"], "location": loc_map.get(t.get("location_id", ""), t.get("location_id", "")), "priority": t.get("priority")}
+                {
+                    "title": t["title"],
+                    "location": loc_map.get(t.get("location_id", ""), t.get("location_id", "")),
+                    "priority": t.get("priority"),
+                }
                 for t in open_over_7d[:5]
             ],
             "overdue_this_week": overdue_this,
@@ -816,57 +883,76 @@ def _build_snapshot(org_id: str) -> dict:
     # ── Maintenance ───────────────────────────────────────────────────────────
     try:
         # Get maintenance category IDs
-        maint_cats_resp = (
-            sb.table("issue_categories")
-            .select("id")
-            .eq("organisation_id", org_id)
-            .eq("is_maintenance", True)
-            .eq("is_deleted", False)
-            .execute()
+        maint_cat_rows = rows(
+            conn,
+            """
+            SELECT id
+            FROM issue_categories
+            WHERE organisation_id = %s
+              AND is_maintenance = TRUE
+              AND is_deleted = FALSE
+            """,
+            (org_id,),
         )
-        maint_cat_ids = [c["id"] for c in (maint_cats_resp.data or [])]
+        maint_cat_ids = [c["id"] for c in maint_cat_rows]
 
         if maint_cat_ids:
-            maint_open_resp = (
-                sb.table("issues")
-                .select("id", count="exact")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .in_("category_id", maint_cat_ids)
-                .in_("status", ["open", "in_progress", "pending_vendor"])
-                .execute()
+            maint_open_row = row(
+                conn,
+                """
+                SELECT COUNT(*) AS cnt
+                FROM issues
+                WHERE organisation_id = %s
+                  AND is_deleted = FALSE
+                  AND category_id = ANY(%s::uuid[])
+                  AND status IN ('open', 'in_progress', 'pending_vendor')
+                """,
+                (org_id, maint_cat_ids),
             )
-            maint_open_count = maint_open_resp.count or 0
+            maint_open_count = (maint_open_row or {}).get("cnt", 0) or 0
 
             # Cost this month / last month
-            maint_cost_resp = (
-                sb.table("issues")
-                .select("cost,resolved_at")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .in_("category_id", maint_cat_ids)
-                .in_("status", ["resolved", "closed"])
-                .gte("resolved_at", f"{lms}T00:00:00")
-                .execute()
+            maint_issues = rows(
+                conn,
+                """
+                SELECT cost, resolved_at
+                FROM issues
+                WHERE organisation_id = %s
+                  AND is_deleted = FALSE
+                  AND category_id = ANY(%s::uuid[])
+                  AND status IN ('resolved', 'closed')
+                  AND resolved_at >= %s::timestamptz
+                """,
+                (org_id, maint_cat_ids, f"{lms}T00:00:00"),
             )
-            maint_issues = maint_cost_resp.data or []
 
-            cost_this_month = sum(float(i.get("cost") or 0) for i in maint_issues if (i.get("resolved_at") or "") >= f"{ms}T00:00:00")
-            cost_last_month = sum(float(i.get("cost") or 0) for i in maint_issues if f"{lms}T00:00:00" <= (i.get("resolved_at") or "") < f"{ms}T00:00:00")
+            cost_this_month = sum(
+                float(i.get("cost") or 0)
+                for i in maint_issues
+                if str(i.get("resolved_at") or "") >= f"{ms}T00:00:00"
+            )
+            cost_last_month = sum(
+                float(i.get("cost") or 0)
+                for i in maint_issues
+                if f"{lms}T00:00:00" <= str(i.get("resolved_at") or "") < f"{ms}T00:00:00"
+            )
 
             # Assets with 3+ issues in 30 days
-            asset_issues_resp = (
-                sb.table("issues")
-                .select("asset_id")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .in_("category_id", maint_cat_ids)
-                .gte("created_at", f"{tda}T00:00:00")
-                .not_.is_("asset_id", "null")
-                .execute()
+            asset_issue_rows = rows(
+                conn,
+                """
+                SELECT asset_id
+                FROM issues
+                WHERE organisation_id = %s
+                  AND is_deleted = FALSE
+                  AND category_id = ANY(%s::uuid[])
+                  AND created_at >= %s::timestamptz
+                  AND asset_id IS NOT NULL
+                """,
+                (org_id, maint_cat_ids, f"{tda}T00:00:00"),
             )
             asset_counts: dict[str, int] = {}
-            for i in (asset_issues_resp.data or []):
+            for i in asset_issue_rows:
                 aid = i.get("asset_id", "")
                 asset_counts[aid] = asset_counts.get(aid, 0) + 1
 
@@ -877,23 +963,36 @@ def _build_snapshot(org_id: str) -> dict:
                 "assets_with_3plus_issues_30d": sum(1 for v in asset_counts.values() if v >= 3),
             }
         else:
-            snapshot["maintenance"] = {"open_count": 0, "cost_this_month": 0, "cost_last_month": 0, "assets_with_3plus_issues_30d": 0}
+            snapshot["maintenance"] = {
+                "open_count": 0,
+                "cost_this_month": 0,
+                "cost_last_month": 0,
+                "assets_with_3plus_issues_30d": 0,
+            }
     except Exception as ex:
         snapshot["maintenance"] = {"error": str(ex)}
 
     # ── Incidents ─────────────────────────────────────────────────────────────
     try:
-        inc_resp = (
-            sb.table("incidents")
-            .select("id,status,created_at,resolved_at")
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .gte("created_at", f"{lws}T00:00:00")
-            .execute()
+        incidents = rows(
+            conn,
+            """
+            SELECT id, status, created_at, resolved_at
+            FROM incidents
+            WHERE organisation_id = %s
+              AND is_deleted = FALSE
+              AND created_at >= %s::timestamptz
+            """,
+            (org_id, f"{lws}T00:00:00"),
         )
-        incidents = inc_resp.data or []
-        inc_this_week = sum(1 for i in incidents if i.get("created_at", "") >= f"{ws}T00:00:00")
-        inc_open = sum(1 for i in incidents if i.get("status") not in ("resolved", "closed"))
+        inc_this_week = sum(
+            1 for i in incidents
+            if str(i.get("created_at", "")) >= f"{ws}T00:00:00"
+        )
+        inc_open = sum(
+            1 for i in incidents
+            if i.get("status") not in ("resolved", "closed")
+        )
 
         snapshot["incidents"] = {
             "this_week_count": inc_this_week,
@@ -906,15 +1005,15 @@ def _build_snapshot(org_id: str) -> dict:
     try:
         # Locations where low checklist completion AND rising issue counts
         low_cl_locs = {
-            row["location"]
-            for row in snapshot.get("checklists", {}).get("below_80pct_2plus_consecutive_days", [])
+            r["location"]
+            for r in snapshot.get("checklists", {}).get("below_80pct_2plus_consecutive_days", [])
         }
         # Issue count per location this week vs last week
         issue_loc_this: dict[str, int] = {}
         issue_loc_last: dict[str, int] = {}
-        for i in issues_all if "issues_all" in dir() else []:  # type: ignore
+        for i in (issues_all if "issues_all" in dir() else []):  # type: ignore
             lid = i.get("location_id", "")
-            ca = i.get("created_at", "")
+            ca = str(i.get("created_at", ""))
             if ca >= f"{ws}T00:00:00":
                 issue_loc_this[lid] = issue_loc_this.get(lid, 0) + 1
             elif ca >= f"{lws}T00:00:00":
@@ -947,6 +1046,7 @@ def _build_snapshot(org_id: str) -> dict:
 async def daily_snapshot(
     refresh: bool = Query(False),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """
     Returns rich operational data for the organisation.
@@ -963,7 +1063,7 @@ async def daily_snapshot(
         if cached:
             return cached
 
-    data = await asyncio.to_thread(_build_snapshot, org_id)
+    data = await asyncio.to_thread(_build_snapshot, conn, org_id)
     _cache_set(_snapshot_cache, cache_key, data)
     return data
 
@@ -1033,8 +1133,8 @@ def _filter_snapshot_by_role(snapshot: dict, role_level: str, user_location_id: 
     # Keep loc_id_to_name so subsequent calls can still resolve if needed
     filtered["org"]["loc_id_to_name"] = {user_location_id: loc_name}
 
-    def _keep(row: dict) -> bool:
-        return (row.get("location") == loc_name) if isinstance(row, dict) else True
+    def _keep(r: dict) -> bool:
+        return (r.get("location") == loc_name) if isinstance(r, dict) else True
 
     # ── certifications ──────────────────────────────────────────────────────
     certs = filtered.get("certifications") or {}
@@ -1092,6 +1192,7 @@ def _filter_snapshot_by_role(snapshot: dict, role_level: str, user_location_id: 
 async def dashboard_insights(
     refresh: bool = Query(False),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     """
     Returns AI-generated daily brief + insight cards.
@@ -1123,7 +1224,7 @@ async def dashboard_insights(
     snap_key = f"snapshot:{org_id}"
     snapshot = _cache_get(_snapshot_cache, snap_key)
     if not snapshot or refresh:
-        snapshot = await asyncio.to_thread(_build_snapshot, org_id)
+        snapshot = await asyncio.to_thread(_build_snapshot, conn, org_id)
         _cache_set(_snapshot_cache, snap_key, snapshot)
 
     # Filter for role

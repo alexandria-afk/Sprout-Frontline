@@ -12,9 +12,9 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from dependencies import get_current_user, require_manager_or_above
+from dependencies import get_current_user, require_manager_or_above, get_db
 from models.audits import UpdateCorrectiveActionRequest
-from services.supabase_client import get_admin_client
+from services.db import row, rows, execute
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,63 +37,129 @@ async def list_corrective_actions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
     offset = (page - 1) * page_size
 
-    q = db.table("corrective_actions") \
-        .select("""
-            *,
-            profiles!assigned_to(id, full_name, email),
-            form_submissions(id, form_template_id, submitted_at,
-                form_templates(title))
-        """) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .order("created_at", desc=True)
+    filters = ["ca.organisation_id = %s", "ca.is_deleted = FALSE"]
+    params: list = [org_id]
 
     if location_id:
-        q = q.eq("location_id", location_id)
+        filters.append("ca.location_id = %s")
+        params.append(location_id)
     if status:
-        q = q.eq("status", status)
+        filters.append("ca.status = %s")
+        params.append(status)
     if assigned_to:
-        q = q.eq("assigned_to", assigned_to)
+        filters.append("ca.assigned_to = %s")
+        params.append(assigned_to)
     if from_date:
-        q = q.gte("created_at", from_date)
+        filters.append("ca.created_at >= %s")
+        params.append(from_date)
     if to_date:
-        q = q.lte("created_at", to_date)
+        filters.append("ca.created_at <= %s")
+        params.append(to_date)
 
-    q = q.range(offset, offset + page_size - 1)
-    res = q.execute()
-    return res.data
+    where = " AND ".join(filters)
+    params.extend([page_size, offset])
+
+    result_rows = rows(
+        conn,
+        f"""
+        SELECT
+            ca.*,
+            p.id            AS assignee_id,
+            p.full_name     AS assignee_full_name,
+            p.email         AS assignee_email,
+            sub.id          AS sub_id,
+            sub.form_template_id,
+            sub.submitted_at,
+            ft.title        AS form_template_title
+        FROM corrective_actions ca
+        LEFT JOIN profiles p        ON p.id   = ca.assigned_to
+        LEFT JOIN form_submissions sub ON sub.id = ca.form_submission_id
+        LEFT JOIN form_templates ft ON ft.id  = sub.form_template_id
+        WHERE {where}
+        ORDER BY ca.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params),
+    )
+
+    records = []
+    for r in result_rows:
+        r = dict(r)
+        r["profiles"] = {
+            "id": r.pop("assignee_id", None),
+            "full_name": r.pop("assignee_full_name", None),
+            "email": r.pop("assignee_email", None),
+        }
+        r["form_submissions"] = {
+            "id": r.pop("sub_id", None),
+            "form_template_id": r.pop("form_template_id", None),
+            "submitted_at": r.pop("submitted_at", None),
+            "form_templates": {"title": r.pop("form_template_title", None)},
+        }
+        records.append(r)
+
+    return records
 
 
 @router.get("/{cap_id}")
 async def get_corrective_action(
     cap_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    res = db.table("corrective_actions") \
-        .select("""
-            *,
-            profiles!assigned_to(id, full_name, email),
-            form_submissions(id, form_template_id, submitted_at,
-                form_templates(title)),
-            form_fields!field_id(label, field_type)
-        """) \
-        .eq("id", str(cap_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
+    result = row(
+        conn,
+        """
+        SELECT
+            ca.*,
+            p.id            AS assignee_id,
+            p.full_name     AS assignee_full_name,
+            p.email         AS assignee_email,
+            sub.id          AS sub_id,
+            sub.form_template_id,
+            sub.submitted_at,
+            ft.title        AS form_template_title,
+            ff.label        AS field_label,
+            ff.field_type
+        FROM corrective_actions ca
+        LEFT JOIN profiles p            ON p.id   = ca.assigned_to
+        LEFT JOIN form_submissions sub  ON sub.id = ca.form_submission_id
+        LEFT JOIN form_templates ft     ON ft.id  = sub.form_template_id
+        LEFT JOIN form_fields ff        ON ff.id  = ca.field_id
+        WHERE ca.id = %s
+          AND ca.organisation_id = %s
+          AND ca.is_deleted = FALSE
+        """,
+        (str(cap_id), org_id),
+    )
 
-    if not res.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Corrective action not found")
-    return res.data
+
+    record = dict(result)
+    record["profiles"] = {
+        "id": record.pop("assignee_id", None),
+        "full_name": record.pop("assignee_full_name", None),
+        "email": record.pop("assignee_email", None),
+    }
+    record["form_submissions"] = {
+        "id": record.pop("sub_id", None),
+        "form_template_id": record.pop("form_template_id", None),
+        "submitted_at": record.pop("submitted_at", None),
+        "form_templates": {"title": record.pop("form_template_title", None)},
+    }
+    record["form_fields"] = {
+        "label": record.pop("field_label", None),
+        "field_type": record.pop("field_type", None),
+    }
+    return record
 
 
 @router.put("/{cap_id}")
@@ -101,23 +167,25 @@ async def update_corrective_action(
     cap_id: UUID,
     body: UpdateCorrectiveActionRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
     user_id = current_user["sub"]
-    db = get_admin_client()
 
-    existing = db.table("corrective_actions") \
-        .select("id, assigned_to, status") \
-        .eq("id", str(cap_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
+    existing = row(
+        conn,
+        """
+        SELECT id, assigned_to, status
+        FROM corrective_actions
+        WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+        """,
+        (str(cap_id), org_id),
+    )
 
-    if not existing.data:
+    if not existing:
         raise HTTPException(status_code=404, detail="Corrective action not found")
 
-    cap = existing.data
+    cap = dict(existing)
     role = (current_user.get("app_metadata") or {}).get("role", "")
     is_manager = role in ("manager", "admin", "super_admin")
 
@@ -125,23 +193,35 @@ async def update_corrective_action(
     if str(cap.get("assigned_to")) != str(user_id) and not is_manager:
         raise HTTPException(status_code=403, detail="Not authorised to update this corrective action")
 
-    updates: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    set_parts: list[str] = ["updated_at = %s"]
+    params: list = [datetime.now(timezone.utc).isoformat()]
 
     if body.status is not None:
         if body.status not in ("open", "in_progress", "resolved"):
             raise HTTPException(status_code=400, detail="Invalid status")
-        updates["status"] = body.status
+        set_parts.append("status = %s")
+        params.append(body.status)
         if body.status == "resolved":
-            updates["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            set_parts.append("resolved_at = %s")
+            params.append(datetime.now(timezone.utc).isoformat())
 
     if body.assigned_to is not None and is_manager:
-        updates["assigned_to"] = str(body.assigned_to)
+        set_parts.append("assigned_to = %s")
+        params.append(str(body.assigned_to))
 
     if body.due_at is not None and is_manager:
-        updates["due_at"] = body.due_at.isoformat()
+        set_parts.append("due_at = %s")
+        params.append(body.due_at.isoformat())
 
     if body.resolution_note is not None:
-        updates["resolution_note"] = body.resolution_note
+        set_parts.append("resolution_note = %s")
+        params.append(body.resolution_note)
 
-    db.table("corrective_actions").update(updates).eq("id", str(cap_id)).execute()
+    params.append(str(cap_id))
+
+    execute(
+        conn,
+        f"UPDATE corrective_actions SET {', '.join(set_parts)} WHERE id = %s",
+        tuple(params),
+    )
     return {"success": True}

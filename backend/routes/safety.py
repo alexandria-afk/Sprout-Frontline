@@ -16,8 +16,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_admin, require_manager_or_above, paginate
-from services.supabase_client import get_supabase
+from dependencies import get_current_user, require_admin, require_manager_or_above, paginate, get_db
+from services.db import row, rows, execute, execute_returning
 
 router = APIRouter()
 
@@ -45,45 +45,89 @@ async def leaderboard(
     location_id: Optional[str] = Query(None),
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 
-    query = (
-        db.table("user_points")
-        .select(
-            "id, user_id, total_points, profiles!user_id(full_name, role, location_id, locations(name))",
-            count="exact",
-        )
-        .eq("organisation_id", org_id)
-    )
-
     if location_id:
         # Filter via profiles join — fetch user_ids at this location first
-        profile_resp = (
-            db.table("profiles")
-            .select("id")
-            .eq("organisation_id", org_id)
-            .eq("location_id", location_id)
-            .eq("is_deleted", False)
-            .execute()
+        profile_rows = rows(
+            conn,
+            """
+            SELECT id FROM profiles
+            WHERE organisation_id = %s
+              AND location_id = %s
+              AND is_deleted = FALSE
+            """,
+            (org_id, location_id),
         )
-        user_ids = [p["id"] for p in (profile_resp.data or [])]
+        user_ids = [p["id"] for p in profile_rows]
         if not user_ids:
             return {"data": [], "total": 0}
-        query = query.in_("user_id", user_ids)
 
-    resp = (
-        query
-        .order("total_points", desc=True)
-        .range(offset, offset + page_size - 1)
-        .execute()
-    )
+        data = rows(
+            conn,
+            """
+            SELECT
+                up.id,
+                up.user_id,
+                up.total_points,
+                p.full_name,
+                p.role,
+                p.location_id,
+                l.name AS location_name
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            LEFT JOIN locations l ON l.id = p.location_id
+            WHERE up.organisation_id = %s
+              AND up.user_id = ANY(%s)
+            ORDER BY up.total_points DESC
+            LIMIT %s OFFSET %s
+            """,
+            (org_id, user_ids, page_size, offset),
+        )
+        total_row = row(
+            conn,
+            """
+            SELECT COUNT(*) AS cnt
+            FROM user_points
+            WHERE organisation_id = %s
+              AND user_id = ANY(%s)
+            """,
+            (org_id, user_ids),
+        )
+    else:
+        data = rows(
+            conn,
+            """
+            SELECT
+                up.id,
+                up.user_id,
+                up.total_points,
+                p.full_name,
+                p.role,
+                p.location_id,
+                l.name AS location_name
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            LEFT JOIN locations l ON l.id = p.location_id
+            WHERE up.organisation_id = %s
+            ORDER BY up.total_points DESC
+            LIMIT %s OFFSET %s
+            """,
+            (org_id, page_size, offset),
+        )
+        total_row = row(
+            conn,
+            "SELECT COUNT(*) AS cnt FROM user_points WHERE organisation_id = %s",
+            (org_id,),
+        )
 
-    return {"data": resp.data or [], "total": resp.count or 0}
+    total = total_row["cnt"] if total_row else 0
+    return {"data": data, "total": total}
 
 
 # ── Badges ─────────────────────────────────────────────────────────────────────
@@ -91,71 +135,87 @@ async def leaderboard(
 @router.get("/badges")
 async def list_badges(
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("badge_configs")
-        .select("*")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .eq("is_active", True)
-        .order("name")
-        .execute()
+    data = rows(
+        conn,
+        """
+        SELECT * FROM badge_configs
+        WHERE organisation_id = %s
+          AND is_deleted = FALSE
+          AND is_active = TRUE
+        ORDER BY name
+        """,
+        (org_id,),
     )
 
-    return {"data": resp.data or [], "total": len(resp.data or [])}
+    return {"data": data, "total": len(data)}
 
 
 @router.post("/badges")
 async def create_badge(
     body: CreateBadgeRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    data = {
-        "organisation_id": org_id,
-        "name": body.name,
-        "points_awarded": body.points_awarded or 0,
-        "criteria_type": body.criteria_type or "manual",
-        "is_active": True,
-        "is_template": False,
-    }
-    if body.description is not None:
-        data["description"] = body.description
-    if body.icon is not None:
-        data["icon"] = body.icon
-    if body.criteria_value is not None:
-        data["criteria_value"] = body.criteria_value
-
-    resp = db.table("badge_configs").insert(data).execute()
-    if not resp.data:
+    result = execute_returning(
+        conn,
+        """
+        INSERT INTO badge_configs (
+            organisation_id, name, description, icon,
+            points_awarded, criteria_type, criteria_value,
+            is_active, is_template
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, FALSE)
+        RETURNING *
+        """,
+        (
+            org_id,
+            body.name,
+            body.description,
+            body.icon,
+            body.points_awarded or 0,
+            body.criteria_type or "manual",
+            body.criteria_value,
+        ),
+    )
+    if not result:
         raise HTTPException(status_code=500, detail="Failed to create badge")
-    return resp.data[0]
+    return result
 
 
 @router.get("/badges/my")
 async def my_badges(
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("user_badge_awards")
-        .select("*, badge_configs(name, description, icon, points_awarded, criteria_type)")
-        .eq("user_id", user_id)
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .order("awarded_at", desc=True)
-        .execute()
+    data = rows(
+        conn,
+        """
+        SELECT
+            uba.*,
+            bc.name        AS badge_name,
+            bc.description AS badge_description,
+            bc.icon        AS badge_icon,
+            bc.points_awarded,
+            bc.criteria_type
+        FROM user_badge_awards uba
+        JOIN badge_configs bc ON bc.id = uba.badge_id
+        WHERE uba.user_id = %s
+          AND uba.organisation_id = %s
+          AND uba.is_deleted = FALSE
+        ORDER BY uba.awarded_at DESC
+        """,
+        (user_id, org_id),
     )
 
-    return {"data": resp.data or [], "total": len(resp.data or [])}
+    return {"data": data, "total": len(data)}
 
 
 @router.post("/badges/{badge_id}/award")
@@ -163,79 +223,91 @@ async def award_badge(
     badge_id: UUID,
     body: AwardBadgeRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     awarded_by = current_user["sub"]
-    db = get_supabase()
 
     # Verify badge belongs to org
-    badge_resp = (
-        db.table("badge_configs")
-        .select("id, name, points_awarded")
-        .eq("id", str(badge_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    badge = row(
+        conn,
+        """
+        SELECT id, name, points_awarded FROM badge_configs
+        WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+        """,
+        (str(badge_id), org_id),
     )
-    if not badge_resp.data:
+    if not badge:
         raise HTTPException(status_code=404, detail="Badge not found")
 
-    badge = badge_resp.data[0]
     points_value = badge.get("points_awarded") or 0
 
     # Verify recipient exists in org
-    recipient_resp = (
-        db.table("profiles")
-        .select("id, fcm_token")
-        .eq("id", body.user_id)
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    recipient = row(
+        conn,
+        """
+        SELECT id, fcm_token FROM profiles
+        WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+        """,
+        (body.user_id, org_id),
     )
-    if not recipient_resp.data:
+    if not recipient:
         raise HTTPException(status_code=404, detail="User not found in organisation")
 
-    recipient = recipient_resp.data[0]
-
     # Insert user_badge_awards record
-    award_data = {
-        "organisation_id": org_id,
-        "user_id": body.user_id,
-        "badge_id": str(badge_id),
-        "awarded_by": awarded_by,
-        "awarded_at": datetime.utcnow().isoformat(),
-        "is_deleted": False,
-    }
-
-    award_resp = db.table("user_badge_awards").insert(award_data).execute()
-    if not award_resp.data:
+    award = execute_returning(
+        conn,
+        """
+        INSERT INTO user_badge_awards (
+            organisation_id, user_id, badge_id, awarded_by, awarded_at, is_deleted
+        ) VALUES (%s, %s, %s, %s, %s, FALSE)
+        RETURNING *
+        """,
+        (
+            org_id,
+            body.user_id,
+            str(badge_id),
+            awarded_by,
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    if not award:
         raise HTTPException(status_code=500, detail="Failed to award badge")
 
     # Update or create safety_points record
     try:
-        points_resp = (
-            db.table("safety_points")
-            .select("id, total_points")
-            .eq("user_id", body.user_id)
-            .eq("organisation_id", org_id)
-            .execute()
+        existing_points = row(
+            conn,
+            """
+            SELECT id, total_points FROM safety_points
+            WHERE user_id = %s AND organisation_id = %s
+            """,
+            (body.user_id, org_id),
         )
-        if points_resp.data:
-            current_total = float(points_resp.data[0].get("total_points") or 0)
-            db.table("safety_points").update({
-                "total_points": current_total + points_value,
-                "updated_at": datetime.utcnow().isoformat(),
-            }).eq("id", points_resp.data[0]["id"]).execute()
+        if existing_points:
+            current_total = float(existing_points.get("total_points") or 0)
+            execute(
+                conn,
+                """
+                UPDATE safety_points
+                SET total_points = %s, updated_at = %s
+                WHERE id = %s
+                """,
+                (current_total + points_value, datetime.utcnow().isoformat(), existing_points["id"]),
+            )
         else:
-            db.table("safety_points").insert({
-                "organisation_id": org_id,
-                "user_id": body.user_id,
-                "total_points": points_value,
-            }).execute()
+            execute(
+                conn,
+                """
+                INSERT INTO safety_points (organisation_id, user_id, total_points)
+                VALUES (%s, %s, %s)
+                """,
+                (org_id, body.user_id, points_value),
+            )
     except Exception:
         pass
 
-    return award_resp.data[0]
+    return award
 
 
 # ── Points ─────────────────────────────────────────────────────────────────────
@@ -243,20 +315,21 @@ async def award_badge(
 @router.get("/points/my")
 async def my_points(
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("user_points")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("organisation_id", org_id)
-        .execute()
+    result = row(
+        conn,
+        """
+        SELECT * FROM user_points
+        WHERE user_id = %s AND organisation_id = %s
+        """,
+        (user_id, org_id),
     )
 
-    if not resp.data:
+    if not result:
         # Return a zero-points record if none exists yet
         return {
             "user_id": user_id,
@@ -264,4 +337,4 @@ async def my_points(
             "total_points": 0,
         }
 
-    return resp.data[0]
+    return result

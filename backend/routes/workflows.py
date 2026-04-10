@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 _INTERNAL_SECRET = _os.environ.get("INTERNAL_CRON_SECRET", "")
 
-from dependencies import get_current_user, require_admin, require_manager_or_above
+from dependencies import get_db, get_current_user, require_admin, require_manager_or_above
 from models.workflows import (
     CreateWorkflowDefinitionRequest,
     UpdateWorkflowDefinitionRequest,
@@ -49,6 +49,7 @@ from models.workflows import (
     RejectStageRequest,
     SubmitFormForStageRequest,
 )
+from services.db import row, rows, execute, execute_returning, execute_many
 from services.workflow_service import (
     approve_stage,
     reject_stage,
@@ -58,7 +59,6 @@ from services.workflow_service import (
     trigger_workflow,
     tick_wait_stages,
 )
-from services.supabase_client import get_admin_client
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -71,17 +71,15 @@ def _get_org(current_user: dict) -> str:
     return org_id
 
 
-def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
+def _validate_for_publish(conn, definition_id: str, org_id: str) -> list[str]:
     """Run all publish validation rules. Returns a list of error strings (empty = valid)."""
     errors = []
 
     # Fetch definition for trigger context
-    def_res = db.table("workflow_definitions") \
-        .select("trigger_type,trigger_config") \
-        .eq("id", definition_id) \
-        .maybe_single() \
-        .execute()
-    def_data = def_res.data or {}
+    def_data = row(conn,
+        "SELECT trigger_type, trigger_config FROM workflow_definitions WHERE id = %s",
+        (definition_id,),
+    ) or {}
     trigger_type = def_data.get("trigger_type", "manual")
     trigger_config = def_data.get("trigger_config") or {}
     auto_linked_triggers = {"audit_submitted", "form_submitted"}
@@ -89,13 +87,15 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
     no_form_first_triggers = {"employee_created", "issue_created", "incident_created", "scheduled"}
 
     # Fetch stages — include top-level form_template_id column in addition to config JSONB
-    stages_res = db.table("workflow_stages") \
-        .select("id,name,action_type,assigned_role,form_template_id,config,is_final,stage_order") \
-        .eq("workflow_definition_id", definition_id) \
-        .eq("is_deleted", False) \
-        .order("stage_order") \
-        .execute()
-    stages = stages_res.data or []
+    stages = rows(conn,
+        """
+        SELECT id, name, action_type, assigned_role, form_template_id, config, is_final, stage_order
+        FROM workflow_stages
+        WHERE workflow_definition_id = %s AND is_deleted = FALSE
+        ORDER BY stage_order
+        """,
+        (definition_id,),
+    )
     logger.info(f"_validate_for_publish {definition_id}: {len(stages)} stages — " +
         str([{"name": s.get("name"), "action_type": s.get("action_type"),
               "assigned_role": s.get("assigned_role"), "form_template_id": s.get("form_template_id"),
@@ -159,14 +159,15 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
 
     # Routing rules: every non-final stage must have at least one outgoing rule
     # OR an implicit sequential connection to the next stage (always-fallback).
-    rules_res = db.table("workflow_routing_rules") \
-        .select("from_stage_id,to_stage_id") \
-        .eq("workflow_definition_id", definition_id) \
-        .eq("is_deleted", False) \
-        .execute()
-    rules = rules_res.data or []
+    rule_rows = rows(conn,
+        """
+        SELECT from_stage_id, to_stage_id FROM workflow_routing_rules
+        WHERE workflow_definition_id = %s AND is_deleted = FALSE
+        """,
+        (definition_id,),
+    )
     rules_by_from: dict[str, list[str]] = {}
-    for r in rules:
+    for r in rule_rows:
         rules_by_from.setdefault(r["from_stage_id"], []).append(r["to_stage_id"])
 
     # Build sequential next-stage map (implicit "always" fallback)
@@ -221,72 +222,102 @@ def _validate_for_publish(definition_id: str, org_id: str, db) -> list[str]:
 
 @router.get("/definitions")
 async def list_workflow_definitions(
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
-    res = db.table("workflow_definitions") \
-        .select("*, workflow_stages(id, name, stage_order, action_type, is_final)") \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .order("created_at", desc=True) \
-        .execute()
-    return res.data or []
+    wf_rows = rows(conn,
+        """
+        SELECT wd.*,
+               COALESCE(
+                   json_agg(
+                       json_build_object(
+                           'id', ws.id,
+                           'name', ws.name,
+                           'stage_order', ws.stage_order,
+                           'action_type', ws.action_type,
+                           'is_final', ws.is_final
+                       ) ORDER BY ws.stage_order
+                   ) FILTER (WHERE ws.id IS NOT NULL),
+                   '[]'
+               ) AS workflow_stages
+        FROM workflow_definitions wd
+        LEFT JOIN workflow_stages ws ON ws.workflow_definition_id = wd.id AND ws.is_deleted = FALSE
+        WHERE wd.organisation_id = %s AND wd.is_deleted = FALSE
+        GROUP BY wd.id
+        ORDER BY wd.created_at DESC
+        """,
+        (org_id,),
+    )
+    return [dict(r) for r in wf_rows]
 
 
 @router.post("/definitions")
 async def create_workflow_definition(
     body: CreateWorkflowDefinitionRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    wf_data: dict = {
-        "organisation_id": org_id,
-        "name": body.name,
-        "trigger_type": body.trigger_type,
-        "is_active": body.is_active,
-    }
     if body.form_template_id:
         # Check no existing *active* workflow for this template.
         # Inactive (but not deleted) workflows do not block creation so that
         # a deactivated workflow can be superseded by a fresh one.
-        existing = db.table("workflow_definitions") \
-            .select("id") \
-            .eq("form_template_id", str(body.form_template_id)) \
-            .eq("organisation_id", org_id) \
-            .eq("is_deleted", False) \
-            .eq("is_active", True) \
-            .maybe_single() \
-            .execute()
-        if existing.data:
+        existing = row(conn,
+            """
+            SELECT id FROM workflow_definitions
+            WHERE form_template_id = %s AND organisation_id = %s
+              AND is_deleted = FALSE AND is_active = TRUE
+            LIMIT 1
+            """,
+            (str(body.form_template_id), org_id),
+        )
+        if existing:
             raise HTTPException(status_code=409, detail="A workflow definition already exists for this template")
-        wf_data["form_template_id"] = str(body.form_template_id)
-    if body.trigger_config:
-        wf_data["trigger_config"] = body.trigger_config
 
-    wf_res = db.table("workflow_definitions").insert(wf_data).execute()
-    wf = wf_res.data[0]
+    wf = execute_returning(conn,
+        """
+        INSERT INTO workflow_definitions (organisation_id, name, trigger_type, is_active, form_template_id, trigger_config)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            org_id,
+            body.name,
+            body.trigger_type,
+            body.is_active,
+            str(body.form_template_id) if body.form_template_id else None,
+            json.dumps(body.trigger_config) if body.trigger_config else None,
+        ),
+    )
+    wf = dict(wf)
     wf_id = wf["id"]
 
     if body.stages:
-        stage_records = [
-            {
-                "workflow_definition_id": wf_id,
-                "name": s.name,
-                "stage_order": s.stage_order,
-                "assigned_role": s.assigned_role,
-                "assigned_user_id": str(s.assigned_user_id) if s.assigned_user_id else None,
-                "action_type": s.action_type,
-                "form_template_id": str(s.form_template_id) if s.form_template_id else None,
-                "is_final": s.is_final,
-                "config": s.config,
-                "sla_hours": s.sla_hours,
-            }
-            for s in body.stages
-        ]
-        db.table("workflow_stages").insert(stage_records).execute()
+        execute_many(conn,
+            """
+            INSERT INTO workflow_stages (
+                workflow_definition_id, name, stage_order, assigned_role,
+                assigned_user_id, action_type, form_template_id, is_final, config, sla_hours
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            [
+                (
+                    wf_id,
+                    s.name,
+                    s.stage_order,
+                    s.assigned_role,
+                    str(s.assigned_user_id) if s.assigned_user_id else None,
+                    s.action_type,
+                    str(s.form_template_id) if s.form_template_id else None,
+                    s.is_final,
+                    json.dumps(s.config) if s.config else None,
+                    s.sla_hours,
+                )
+                for s in body.stages
+            ],
+        )
 
     return wf
 
@@ -294,41 +325,49 @@ async def create_workflow_definition(
 @router.get("/definitions/{definition_id}")
 async def get_workflow_definition(
     definition_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    res = db.table("workflow_definitions") \
-        .select("*, workflow_stages(*), workflow_routing_rules(*)") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-
-    if not res.data:
+    wf = row(conn,
+        """
+        SELECT * FROM workflow_definitions
+        WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+        """,
+        (str(definition_id), org_id),
+    )
+    if not wf:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
-    return res.data
+    wf = dict(wf)
+
+    stage_rows = rows(conn,
+        "SELECT * FROM workflow_stages WHERE workflow_definition_id = %s AND is_deleted = FALSE ORDER BY stage_order",
+        (str(definition_id),),
+    )
+    routing_rows = rows(conn,
+        "SELECT * FROM workflow_routing_rules WHERE workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(definition_id),),
+    )
+    wf["workflow_stages"] = [dict(s) for s in stage_rows]
+    wf["workflow_routing_rules"] = [dict(r) for r in routing_rows]
+    return wf
 
 
 @router.put("/definitions/{definition_id}")
 async def update_workflow_definition(
     definition_id: UUID,
     body: UpdateWorkflowDefinitionRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
     updates: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
@@ -339,142 +378,176 @@ async def update_workflow_definition(
     if body.trigger_type is not None:
         updates["trigger_type"] = body.trigger_type
     if body.trigger_config is not None:
-        updates["trigger_config"] = body.trigger_config
+        updates["trigger_config"] = json.dumps(body.trigger_config)
 
-    db.table("workflow_definitions").update(updates).eq("id", str(definition_id)).execute()
+    set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+    execute(conn,
+        f"UPDATE workflow_definitions SET {set_clause} WHERE id = %s",
+        (*updates.values(), str(definition_id)),
+    )
     return {"success": True}
 
 
 @router.post("/definitions/{definition_id}/publish")
 async def publish_workflow(
     definition_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Validate and publish a workflow (set is_active = true). Runs all validation rules."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id,trigger_type") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id, trigger_type FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
-    errors = _validate_for_publish(str(definition_id), org_id, db)
+    errors = _validate_for_publish(conn, str(definition_id), org_id)
     if errors:
         raise HTTPException(status_code=422, detail={"errors": errors})
 
-    db.table("workflow_definitions") \
-        .update({"is_active": True, "updated_at": datetime.now(timezone.utc).isoformat()}) \
-        .eq("id", str(definition_id)) \
-        .execute()
-
+    execute(conn,
+        "UPDATE workflow_definitions SET is_active = TRUE, updated_at = %s WHERE id = %s",
+        (datetime.now(timezone.utc).isoformat(), str(definition_id)),
+    )
     return {"success": True}
 
 
 @router.delete("/definitions/{definition_id}")
 async def delete_workflow_definition(
     definition_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id,is_active") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id, is_active FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
-    if existing.data.get("is_active"):
+    if existing["is_active"]:
         raise HTTPException(status_code=409, detail="Cannot delete an active workflow. Deactivate it first.")
 
     # Cancel all in-progress instances (cascade).
     # current_stage_id is also cleared so deleted stage foreign keys don't
     # linger on cancelled instances.
-    db.table("workflow_instances") \
-        .update({"status": "cancelled", "current_stage_id": None}) \
-        .eq("workflow_definition_id", str(definition_id)) \
-        .eq("status", "in_progress") \
-        .execute()
+    execute(conn,
+        """
+        UPDATE workflow_instances
+        SET status = 'cancelled', current_stage_id = NULL
+        WHERE workflow_definition_id = %s AND status = 'in_progress'
+        """,
+        (str(definition_id),),
+    )
 
-    db.table("workflow_definitions").update({"is_deleted": True}).eq("id", str(definition_id)).execute()
+    execute(conn,
+        "UPDATE workflow_definitions SET is_deleted = TRUE WHERE id = %s",
+        (str(definition_id),),
+    )
     return {"success": True}
 
 
 @router.post("/definitions/{definition_id}/duplicate")
 async def duplicate_workflow_definition(
     definition_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    # Load original
-    orig_res = db.table("workflow_definitions") \
-        .select("*, workflow_stages(*), workflow_routing_rules(*)") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not orig_res.data:
+    orig = row(conn,
+        """
+        SELECT wd.*
+        FROM workflow_definitions wd
+        WHERE wd.id = %s AND wd.organisation_id = %s AND wd.is_deleted = FALSE
+        """,
+        (str(definition_id), org_id),
+    )
+    if not orig:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
-    orig = orig_res.data
+    orig = dict(orig)
+
+    orig_stages = rows(conn,
+        "SELECT * FROM workflow_stages WHERE workflow_definition_id = %s AND is_deleted = FALSE ORDER BY stage_order",
+        (str(definition_id),),
+    )
+    orig_rules = rows(conn,
+        "SELECT * FROM workflow_routing_rules WHERE workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(definition_id),),
+    )
 
     # Create copy of definition
-    new_wf_res = db.table("workflow_definitions").insert({
-        "organisation_id": org_id,
-        "name": f"Copy of {orig['name']}",
-        "trigger_type": orig.get("trigger_type", "manual"),
-        "trigger_config": orig.get("trigger_config"),
-        "form_template_id": orig.get("form_template_id"),
-        "is_active": False,  # duplicates start inactive
-    }).execute()
-    new_wf = new_wf_res.data[0]
+    new_wf = execute_returning(conn,
+        """
+        INSERT INTO workflow_definitions (organisation_id, name, trigger_type, trigger_config, form_template_id, is_active)
+        VALUES (%s, %s, %s, %s, %s, FALSE)
+        RETURNING *
+        """,
+        (
+            org_id,
+            f"Copy of {orig['name']}",
+            orig.get("trigger_type", "manual"),
+            orig.get("trigger_config"),
+            orig.get("form_template_id"),
+        ),
+    )
+    new_wf = dict(new_wf)
     new_wf_id = new_wf["id"]
 
     # Copy stages and build old_id → new_id map
     stage_id_map: dict[str, str] = {}
-    orig_stages = sorted(orig.get("workflow_stages") or [], key=lambda s: s["stage_order"])
-    for stage in orig_stages:
-        new_stage_res = db.table("workflow_stages").insert({
-            "workflow_definition_id": new_wf_id,
-            "name": stage["name"],
-            "stage_order": stage["stage_order"],
-            "assigned_role": stage.get("assigned_role"),
-            "assigned_user_id": stage.get("assigned_user_id"),
-            "action_type": stage["action_type"],
-            "form_template_id": stage.get("form_template_id"),
-            "is_final": stage.get("is_final", False),
-            "config": stage.get("config"),
-            "sla_hours": stage.get("sla_hours"),
-        }).execute()
-        stage_id_map[stage["id"]] = new_stage_res.data[0]["id"]
+    for stage in sorted(orig_stages, key=lambda s: s["stage_order"]):
+        new_stage = execute_returning(conn,
+            """
+            INSERT INTO workflow_stages (
+                workflow_definition_id, name, stage_order, assigned_role,
+                assigned_user_id, action_type, form_template_id, is_final, config, sla_hours
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                new_wf_id,
+                stage["name"],
+                stage["stage_order"],
+                stage.get("assigned_role"),
+                stage.get("assigned_user_id"),
+                stage["action_type"],
+                stage.get("form_template_id"),
+                stage.get("is_final", False),
+                stage.get("config"),
+                stage.get("sla_hours"),
+            ),
+        )
+        stage_id_map[str(stage["id"])] = str(new_stage["id"])
 
     # Copy routing rules using new stage IDs
-    for rule in (orig.get("workflow_routing_rules") or []):
-        from_id = stage_id_map.get(rule["from_stage_id"])
-        to_id = stage_id_map.get(rule["to_stage_id"])
+    for rule in orig_rules:
+        from_id = stage_id_map.get(str(rule["from_stage_id"]))
+        to_id = stage_id_map.get(str(rule["to_stage_id"]))
         if from_id and to_id:
-            db.table("workflow_routing_rules").insert({
-                "workflow_definition_id": new_wf_id,
-                "from_stage_id": from_id,
-                "to_stage_id": to_id,
-                "condition_type": rule["condition_type"],
-                "condition_field_id": rule.get("condition_field_id"),
-                "condition_value": rule.get("condition_value"),
-                "priority": rule.get("priority", 0),
-                "label": rule.get("label"),
-            }).execute()
+            execute(conn,
+                """
+                INSERT INTO workflow_routing_rules (
+                    workflow_definition_id, from_stage_id, to_stage_id,
+                    condition_type, condition_field_id, condition_value, priority, label
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    new_wf_id,
+                    from_id,
+                    to_id,
+                    rule["condition_type"],
+                    rule.get("condition_field_id"),
+                    rule.get("condition_value"),
+                    rule.get("priority", 0),
+                    rule.get("label"),
+                ),
+            )
 
     return new_wf
 
@@ -483,63 +556,67 @@ async def duplicate_workflow_definition(
 async def add_stage(
     definition_id: UUID,
     body: CreateWorkflowStageRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
-    res = db.table("workflow_stages").insert({
-        "workflow_definition_id": str(definition_id),
-        "name": body.name,
-        "stage_order": body.stage_order,
-        "assigned_role": body.assigned_role,
-        "assigned_user_id": str(body.assigned_user_id) if body.assigned_user_id else None,
-        "action_type": body.action_type,
-        "form_template_id": str(body.form_template_id) if body.form_template_id else None,
-        "is_final": body.is_final,
-        "config": body.config,
-        "sla_hours": body.sla_hours,
-    }).execute()
-    return res.data[0]
+    stage = execute_returning(conn,
+        """
+        INSERT INTO workflow_stages (
+            workflow_definition_id, name, stage_order, assigned_role,
+            assigned_user_id, action_type, form_template_id, is_final, config, sla_hours
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            str(definition_id),
+            body.name,
+            body.stage_order,
+            body.assigned_role,
+            str(body.assigned_user_id) if body.assigned_user_id else None,
+            body.action_type,
+            str(body.form_template_id) if body.form_template_id else None,
+            body.is_final,
+            json.dumps(body.config) if body.config else None,
+            body.sla_hours,
+        ),
+    )
+    return dict(stage)
 
 
 @router.put("/definitions/{definition_id}/stages/reorder")
 async def reorder_stages(
     definition_id: UUID,
     body: ReorderStagesRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Bulk update stage_order after drag-and-drop reorder."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
     for item in body.stages:
-        db.table("workflow_stages") \
-            .update({"stage_order": item["stage_order"]}) \
-            .eq("id", item["id"]) \
-            .eq("workflow_definition_id", str(definition_id)) \
-            .eq("organisation_id", org_id) \
-            .execute()
+        execute(conn,
+            """
+            UPDATE workflow_stages SET stage_order = %s
+            WHERE id = %s AND workflow_definition_id = %s
+            """,
+            (item["stage_order"], item["id"], str(definition_id)),
+        )
 
     return {"success": True}
 
@@ -549,26 +626,26 @@ async def update_stage(
     definition_id: UUID,
     stage_id: UUID,
     body: UpdateWorkflowStageRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_stages") \
-        .select("id") \
-        .eq("id", str(stage_id)) \
-        .eq("workflow_definition_id", str(definition_id)) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_stages WHERE id = %s AND workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(stage_id), str(definition_id)),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Stage not found")
 
     updates: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
-    for field in ("name", "stage_order", "assigned_role", "action_type", "config", "sla_hours"):
+    for field in ("name", "stage_order", "assigned_role", "action_type", "sla_hours"):
         val = getattr(body, field, None)
         if val is not None:
             updates[field] = val
+    # config needs JSON serialisation
+    if getattr(body, "config", None) is not None:
+        updates["config"] = json.dumps(body.config)
     # is_final must use explicit None check since False is falsy but valid
     if body.is_final is not None:
         updates["is_final"] = body.is_final
@@ -579,8 +656,12 @@ async def update_stage(
 
     logger.info(f"update_stage {stage_id}: {list(updates.keys())}")
     try:
-        res = db.table("workflow_stages").update(updates).eq("id", str(stage_id)).execute()
-        logger.info(f"update_stage {stage_id} result: {res.data}")
+        set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+        execute(conn,
+            f"UPDATE workflow_stages SET {set_clause} WHERE id = %s",
+            (*updates.values(), str(stage_id)),
+        )
+        logger.info(f"update_stage {stage_id} success")
     except Exception as e:
         logger.error(f"update_stage {stage_id} DB error: {e}")
         raise HTTPException(status_code=500, detail=f"Database update failed: {str(e)}")
@@ -591,22 +672,22 @@ async def update_stage(
 async def delete_stage(
     definition_id: UUID,
     stage_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_stages") \
-        .select("id") \
-        .eq("id", str(stage_id)) \
-        .eq("workflow_definition_id", str(definition_id)) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_stages WHERE id = %s AND workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(stage_id), str(definition_id)),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    db.table("workflow_stages").update({"is_deleted": True}).eq("id", str(stage_id)).execute()
+    execute(conn,
+        "UPDATE workflow_stages SET is_deleted = TRUE WHERE id = %s",
+        (str(stage_id),),
+    )
     return {"success": True}
 
 
@@ -614,32 +695,38 @@ async def delete_stage(
 async def add_routing_rule(
     definition_id: UUID,
     body: CreateRoutingRuleRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_definitions") \
-        .select("id") \
-        .eq("id", str(definition_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_definitions WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(definition_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
 
-    res = db.table("workflow_routing_rules").insert({
-        "workflow_definition_id": str(definition_id),
-        "from_stage_id": str(body.from_stage_id),
-        "to_stage_id": str(body.to_stage_id),
-        "condition_type": body.condition_type,
-        "condition_field_id": str(body.condition_field_id) if body.condition_field_id else None,
-        "condition_value": body.condition_value,
-        "priority": body.priority,
-        "label": body.label,
-    }).execute()
-    return res.data[0]
+    rule = execute_returning(conn,
+        """
+        INSERT INTO workflow_routing_rules (
+            workflow_definition_id, from_stage_id, to_stage_id,
+            condition_type, condition_field_id, condition_value, priority, label
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            str(definition_id),
+            str(body.from_stage_id),
+            str(body.to_stage_id),
+            body.condition_type,
+            str(body.condition_field_id) if body.condition_field_id else None,
+            body.condition_value,
+            body.priority,
+            body.label,
+        ),
+    )
+    return dict(rule)
 
 
 @router.put("/definitions/{definition_id}/rules/{rule_id}")
@@ -647,19 +734,16 @@ async def update_routing_rule(
     definition_id: UUID,
     rule_id: UUID,
     body: UpdateRoutingRuleRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_routing_rules") \
-        .select("id") \
-        .eq("id", str(rule_id)) \
-        .eq("workflow_definition_id", str(definition_id)) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_routing_rules WHERE id = %s AND workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(rule_id), str(definition_id)),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Routing rule not found")
 
     updates: dict = {}
@@ -669,7 +753,11 @@ async def update_routing_rule(
             updates[field] = val
 
     if updates:
-        db.table("workflow_routing_rules").update(updates).eq("id", str(rule_id)).execute()
+        set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+        execute(conn,
+            f"UPDATE workflow_routing_rules SET {set_clause} WHERE id = %s",
+            (*updates.values(), str(rule_id)),
+        )
     return {"success": True}
 
 
@@ -677,22 +765,22 @@ async def update_routing_rule(
 async def delete_routing_rule(
     definition_id: UUID,
     rule_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("workflow_routing_rules") \
-        .select("id") \
-        .eq("id", str(rule_id)) \
-        .eq("workflow_definition_id", str(definition_id)) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(conn,
+        "SELECT id FROM workflow_routing_rules WHERE id = %s AND workflow_definition_id = %s AND is_deleted = FALSE",
+        (str(rule_id), str(definition_id)),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Routing rule not found")
 
-    db.table("workflow_routing_rules").update({"is_deleted": True}).eq("id", str(rule_id)).execute()
+    execute(conn,
+        "UPDATE workflow_routing_rules SET is_deleted = TRUE WHERE id = %s",
+        (str(rule_id),),
+    )
     return {"success": True}
 
 
@@ -703,6 +791,7 @@ async def delete_routing_rule(
 @router.post("/instances")
 async def trigger_workflow_instance(
     body: TriggerWorkflowRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     """Manually trigger a workflow instance."""
@@ -710,6 +799,7 @@ async def trigger_workflow_instance(
     user_id = current_user["sub"]
     try:
         instance = await trigger_workflow(
+            conn,
             definition_id=str(body.definition_id),
             org_id=org_id,
             source_type=body.source_type,
@@ -726,6 +816,7 @@ async def trigger_workflow_instance(
 
 @router.get("/instances/my-tasks")
 async def my_workflow_tasks(
+    conn = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = _get_org(current_user)
@@ -733,7 +824,7 @@ async def my_workflow_tasks(
     user_role = (current_user.get("app_metadata") or {}).get("role")
     logger.info(f"my-tasks: user={user_id} role={user_role} org={org_id}")
     try:
-        tasks = await get_my_tasks(user_id, org_id, user_role=user_role)
+        tasks = await get_my_tasks(conn, user_id, org_id, user_role=user_role)
         logger.info(f"my-tasks: returning {len(tasks)} tasks")
         return tasks
     except Exception as e:
@@ -750,45 +841,67 @@ async def list_workflow_instances(
     to_date: Optional[str] = Query(None, alias="to"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
     offset = (page - 1) * page_size
 
-    q = db.table("workflow_instances") \
-        .select("""
-            *,
-            workflow_definitions(name, trigger_type),
-            workflow_stages!current_stage_id(name, action_type)
-        """) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .order("created_at", desc=True)
+    conditions = ["wi.organisation_id = %s", "wi.is_deleted = FALSE"]
+    params: list = [org_id]
 
     if status:
-        q = q.eq("status", status)
+        conditions.append("wi.status = %s")
+        params.append(status)
     if location_id:
-        q = q.eq("location_id", location_id)
+        conditions.append("wi.location_id = %s")
+        params.append(location_id)
     if definition_id:
-        q = q.eq("workflow_definition_id", definition_id)
+        conditions.append("wi.workflow_definition_id = %s")
+        params.append(definition_id)
     if from_date:
-        q = q.gte("created_at", from_date)
+        conditions.append("wi.created_at >= %s")
+        params.append(from_date)
     if to_date:
-        q = q.lte("created_at", to_date)
+        conditions.append("wi.created_at <= %s")
+        params.append(to_date)
 
-    q = q.range(offset, offset + page_size - 1)
-    res = q.execute()
-    return res.data
+    where_clause = " AND ".join(conditions)
+    params.extend([page_size, offset])
+
+    instance_rows = rows(conn,
+        f"""
+        SELECT
+            wi.*,
+            wd.name AS wd_name, wd.trigger_type AS wd_trigger_type,
+            ws_cur.name AS cur_stage_name, ws_cur.action_type AS cur_stage_action_type
+        FROM workflow_instances wi
+        LEFT JOIN workflow_definitions wd ON wd.id = wi.workflow_definition_id
+        LEFT JOIN workflow_stages ws_cur ON ws_cur.id = wi.current_stage_id
+        WHERE {where_clause}
+        ORDER BY wi.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params),
+    )
+
+    result = []
+    for wi in instance_rows:
+        wi = dict(wi)
+        wi["workflow_definitions"] = {"name": wi.pop("wd_name", None), "trigger_type": wi.pop("wd_trigger_type", None)}
+        wi["workflow_stages"] = {"name": wi.pop("cur_stage_name", None), "action_type": wi.pop("cur_stage_action_type", None)}
+        result.append(wi)
+    return result
 
 
 @router.get("/instances/{instance_id}")
 async def get_workflow_instance(
     instance_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = _get_org(current_user)
-    data = await get_instance_detail(str(instance_id), org_id)
+    data = await get_instance_detail(conn, str(instance_id), org_id)
     if not data:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
     return data
@@ -798,28 +911,24 @@ async def get_workflow_instance(
 async def cancel_workflow_instance(
     instance_id: UUID,
     body: CancelWorkflowRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    inst = db.table("workflow_instances") \
-        .select("id, status") \
-        .eq("id", str(instance_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not inst.data:
+    inst = row(conn,
+        "SELECT id, status FROM workflow_instances WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(instance_id), org_id),
+    )
+    if not inst:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
-    if inst.data["status"] in ("completed", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"Instance already {inst.data['status']}")
+    if inst["status"] in ("completed", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Instance already {inst['status']}")
 
-    db.table("workflow_instances").update({
-        "status": "cancelled",
-        "cancelled_reason": body.reason,
-    }).eq("id", str(instance_id)).execute()
-
+    execute(conn,
+        "UPDATE workflow_instances SET status = 'cancelled', cancelled_reason = %s WHERE id = %s",
+        (body.reason, str(instance_id)),
+    )
     return {"success": True}
 
 
@@ -828,11 +937,13 @@ async def approve_workflow_stage(
     instance_id: UUID,
     stage_instance_id: UUID,
     body: ApproveStageRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = _get_org(current_user)
     try:
         result = await approve_stage(
+            conn,
             instance_id=str(instance_id),
             stage_instance_id=str(stage_instance_id),
             acting_user_id=current_user["sub"],
@@ -849,11 +960,13 @@ async def reject_workflow_stage(
     instance_id: UUID,
     stage_instance_id: UUID,
     body: RejectStageRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = _get_org(current_user)
     try:
         result = await reject_stage(
+            conn,
             instance_id=str(instance_id),
             stage_instance_id=str(stage_instance_id),
             acting_user_id=current_user["sub"],
@@ -869,68 +982,92 @@ async def reject_workflow_stage(
 async def get_stage_instance_detail(
     instance_id: UUID,
     stage_instance_id: UUID,
+    conn = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Return a single stage instance with its stage definition (includes form_template_id)."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     # Verify the workflow instance belongs to this org
-    inst = db.table("workflow_instances") \
-        .select("id") \
-        .eq("id", str(instance_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not inst.data:
+    inst = row(conn,
+        "SELECT id FROM workflow_instances WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+        (str(instance_id), org_id),
+    )
+    if not inst:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
 
-    res = db.table("workflow_stage_instances") \
-        .select("*, workflow_stages(name, action_type, form_template_id, config, stage_order), workflow_instances(workflow_definitions(name))") \
-        .eq("id", str(stage_instance_id)) \
-        .eq("workflow_instance_id", str(instance_id)) \
-        .maybe_single() \
-        .execute()
-    if not res.data:
+    si = row(conn,
+        """
+        SELECT
+            wsi.*,
+            ws.name AS ws_name, ws.action_type AS ws_action_type,
+            ws.form_template_id AS ws_form_template_id,
+            ws.config AS ws_config, ws.stage_order AS ws_stage_order,
+            wd.name AS wd_name
+        FROM workflow_stage_instances wsi
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        JOIN workflow_instances wi ON wi.id = wsi.workflow_instance_id
+        JOIN workflow_definitions wd ON wd.id = wi.workflow_definition_id
+        WHERE wsi.id = %s AND wsi.workflow_instance_id = %s
+        """,
+        (str(stage_instance_id), str(instance_id)),
+    )
+    if not si:
         raise HTTPException(status_code=404, detail="Stage instance not found")
 
-    data = dict(res.data)
-    action_type = (data.get("workflow_stages") or {}).get("action_type")
+    data = dict(si)
+    action_type = data.get("ws_action_type")
+    data["workflow_stages"] = {
+        "name": data.pop("ws_name"),
+        "action_type": action_type,
+        "form_template_id": data.pop("ws_form_template_id"),
+        "config": data.pop("ws_config"),
+        "stage_order": data.pop("ws_stage_order"),
+    }
+    data["workflow_instances"] = {
+        "workflow_definitions": {"name": data.pop("wd_name")}
+    }
 
     # Always fetch all sibling stage instances for history timeline
-    sibling_res = db.table("workflow_stage_instances") \
-        .select("id, status, completed_at, comment, assigned_to, form_submission_id, workflow_stages(name, action_type, stage_order), profiles!assigned_to(full_name)") \
-        .eq("workflow_instance_id", str(instance_id)) \
-        .execute()
-    siblings = sibling_res.data or []
+    siblings = rows(conn,
+        """
+        SELECT
+            wsi.id, wsi.status, wsi.completed_at, wsi.comment,
+            wsi.assigned_to, wsi.form_submission_id,
+            ws.name AS ws_name, ws.action_type AS ws_action_type, ws.stage_order AS ws_stage_order,
+            p.full_name AS assignee_full_name
+        FROM workflow_stage_instances wsi
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        LEFT JOIN profiles p ON p.id = wsi.assigned_to
+        WHERE wsi.workflow_instance_id = %s
+        ORDER BY ws.stage_order
+        """,
+        (str(instance_id),),
+    )
 
-    # Build stage history sorted by stage_order
-    siblings_sorted = sorted(siblings, key=lambda s: (s.get("workflow_stages") or {}).get("stage_order", 0))
     data["stage_history"] = [
         {
-            "id": s.get("id"),
-            "stage_name": (s.get("workflow_stages") or {}).get("name"),
-            "action_type": (s.get("workflow_stages") or {}).get("action_type"),
-            "stage_order": (s.get("workflow_stages") or {}).get("stage_order"),
-            "status": s.get("status"),
-            "completed_at": s.get("completed_at"),
-            "comment": s.get("comment"),
-            "completed_by": (s.get("profiles") or {}).get("full_name"),
-            "form_submission_id": s.get("form_submission_id"),
+            "id": s["id"],
+            "stage_name": s["ws_name"],
+            "action_type": s["ws_action_type"],
+            "stage_order": s["ws_stage_order"],
+            "status": s["status"],
+            "completed_at": s["completed_at"],
+            "comment": s["comment"],
+            "completed_by": s["assignee_full_name"],
+            "form_submission_id": s["form_submission_id"],
         }
-        for s in siblings_sorted
+        for s in siblings
     ]
 
     # For approve/review/sign stages, find the most recently completed fill_form stage's submission
     if action_type in ("approve", "review", "sign"):
         fill_stages = [
             s for s in siblings
-            if (s.get("workflow_stages") or {}).get("action_type") in ("fill_form", "sign")
-            and s.get("form_submission_id")
+            if s["ws_action_type"] in ("fill_form", "sign") and s["form_submission_id"]
         ]
         if fill_stages:
-            fill_stages.sort(key=lambda s: (s.get("workflow_stages") or {}).get("stage_order", 0), reverse=True)
+            fill_stages.sort(key=lambda s: s["ws_stage_order"] or 0, reverse=True)
             data["review_submission_id"] = fill_stages[0]["form_submission_id"]
     return data
 
@@ -940,66 +1077,75 @@ async def submit_form_for_stage(
     instance_id: UUID,
     stage_instance_id: UUID,
     body: SubmitFormForStageRequest,
+    conn = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Submit a form for a fill_form type stage."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     # Verify the workflow instance belongs to this org
-    inst_check = db.table("workflow_instances").select("id").eq("id", str(instance_id)).eq("organisation_id", org_id).maybe_single().execute()
-    if not inst_check.data:
+    inst_check = row(conn,
+        "SELECT id FROM workflow_instances WHERE id = %s AND organisation_id = %s",
+        (str(instance_id), org_id),
+    )
+    if not inst_check:
         raise HTTPException(status_code=403, detail="Not found")
 
-    si_res = db.table("workflow_stage_instances") \
-        .select("*, workflow_stages(form_template_id, action_type)") \
-        .eq("id", str(stage_instance_id)) \
-        .eq("workflow_instance_id", str(instance_id)) \
-        .maybe_single() \
-        .execute()
-
-    if not si_res.data:
+    si = row(conn,
+        """
+        SELECT wsi.*, ws.form_template_id AS ws_form_template_id, ws.action_type AS ws_action_type
+        FROM workflow_stage_instances wsi
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        WHERE wsi.id = %s AND wsi.workflow_instance_id = %s
+        """,
+        (str(stage_instance_id), str(instance_id)),
+    )
+    if not si:
         raise HTTPException(status_code=404, detail="Stage instance not found")
 
-    stage = si_res.data.get("workflow_stages", {})
-    if stage.get("action_type") not in ("fill_form", "sign"):
+    if si["ws_action_type"] not in ("fill_form", "sign"):
         raise HTTPException(status_code=400, detail="This stage does not require a form submission")
 
-    form_template_id = stage.get("form_template_id")
+    form_template_id = si["ws_form_template_id"]
     if not form_template_id:
         raise HTTPException(status_code=400, detail="Stage has no form template configured")
 
     try:
-        sub_res = db.table("form_submissions").insert({
-            "form_template_id": form_template_id,
-            "submitted_by": current_user["sub"],
-            "status": "submitted",
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        sub = execute_returning(conn,
+            """
+            INSERT INTO form_submissions (form_template_id, submitted_by, status, submitted_at)
+            VALUES (%s, %s, 'submitted', %s)
+            RETURNING id
+            """,
+            (form_template_id, current_user["sub"], datetime.now(timezone.utc).isoformat()),
+        )
     except Exception as e:
         logger.error(f"submit_form_for_stage: form_submissions insert failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create submission: {e}")
 
-    if not sub_res.data:
-        logger.error(f"submit_form_for_stage: insert returned no data")
+    if not sub:
+        logger.error("submit_form_for_stage: insert returned no data")
         raise HTTPException(status_code=500, detail="Failed to create submission — no data returned")
 
-    sub_id = sub_res.data[0]["id"]
+    sub_id = sub["id"]
     logger.info(f"submit_form_for_stage: created submission {sub_id} for stage {stage_instance_id}")
 
     if body.responses:
-        db.table("form_responses").insert([
-            {"submission_id": sub_id, "field_id": r.get("field_id"), "value": r.get("value")}
-            for r in body.responses
-        ]).execute()
+        execute_many(conn,
+            "INSERT INTO form_responses (submission_id, field_id, value) VALUES (%s, %s, %s)",
+            [(sub_id, r.get("field_id"), r.get("value")) for r in body.responses],
+        )
 
-    db.table("workflow_stage_instances").update({
-        "form_submission_id": sub_id,
-        "status": "approved",
-        "completed_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", str(stage_instance_id)).execute()
+    execute(conn,
+        """
+        UPDATE workflow_stage_instances
+        SET form_submission_id = %s, status = 'approved', completed_at = %s
+        WHERE id = %s
+        """,
+        (sub_id, datetime.now(timezone.utc).isoformat(), str(stage_instance_id)),
+    )
 
-    await advance_workflow(str(instance_id), str(stage_instance_id), current_user["sub"])
+    await advance_workflow(conn, str(instance_id), str(stage_instance_id), current_user["sub"])
 
     return {"success": True, "form_submission_id": sub_id}
 
@@ -1008,14 +1154,15 @@ async def submit_form_for_stage(
 
 @router.post("/internal/tick")
 async def tick(
+    conn = Depends(get_db),
     x_internal_secret: str = Header(default="", alias="X-Internal-Secret"),
     current_user: dict = Depends(require_admin),
 ):
     """
     Advance condition-based and timed-out wait stages.
-    Call every 5 minutes via a server cron or Supabase Edge Function scheduler.
+    Call every 5 minutes via a server cron job.
     Requires admin role to prevent accidental public exposure.
     """
     if not _INTERNAL_SECRET or x_internal_secret != _INTERNAL_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
-    return await tick_wait_stages()
+    return await tick_wait_stages(conn)

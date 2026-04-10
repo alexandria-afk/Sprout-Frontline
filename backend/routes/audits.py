@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_manager_or_above, paginate
+from dependencies import get_current_user, require_manager_or_above, paginate, get_db
 from services.industry_context import get_industry_context
 from models.audits import (
     CreateAuditTemplateRequest,
@@ -36,7 +36,7 @@ from models.audits import (
 from services.audit_scoring_service import calculate_audit_score, create_corrective_actions
 from services.workflow_service import instantiate_workflow
 from services.form_service import FormService
-from services.supabase_client import get_admin_client
+from services.db import row, rows, execute, execute_returning
 from services.ai_logger import log_ai_request, AITimer
 
 logger = logging.getLogger(__name__)
@@ -152,14 +152,14 @@ async def generate_audit_template_draft(
 async def create_audit_template(
     body: CreateAuditTemplateRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Create an audit template with scoring config."""
     org_id = _get_org(current_user)
     created_by = current_user["sub"]
-    db = get_admin_client()
 
     # 1. Create form_template with type='audit'
-    from models.forms import CreateFormTemplateRequest, CreateFormSectionRequest
+    from models.forms import CreateFormTemplateRequest
     ft_req = CreateFormTemplateRequest(
         title=body.title,
         description=body.description,
@@ -170,24 +170,41 @@ async def create_audit_template(
     template_id = str(template.id)
 
     # 2. Persist audit_config (passing_score)
-    db.table("audit_configs").insert({
-        "form_template_id": template_id,
-        "passing_score": body.passing_score,
-    }).execute()
+    execute(
+        conn,
+        """
+        INSERT INTO audit_configs (form_template_id, passing_score)
+        VALUES (%s, %s)
+        ON CONFLICT (form_template_id) DO UPDATE SET passing_score = EXCLUDED.passing_score
+        """,
+        (template_id, body.passing_score),
+    )
 
     # 3. Persist section weights
     if body.section_weights:
-        db.table("audit_section_weights").insert([
-            {"section_id": str(sw.section_id), "weight": sw.weight}
-            for sw in body.section_weights
-        ]).execute()
+        for sw in body.section_weights:
+            execute(
+                conn,
+                """
+                INSERT INTO audit_section_weights (section_id, weight)
+                VALUES (%s, %s)
+                ON CONFLICT (section_id) DO UPDATE SET weight = EXCLUDED.weight
+                """,
+                (str(sw.section_id), sw.weight),
+            )
 
     # 4. Persist field scores
     if body.field_scores:
-        db.table("audit_field_scores").insert([
-            {"field_id": str(fs.field_id), "max_score": fs.max_score}
-            for fs in body.field_scores
-        ]).execute()
+        for fs in body.field_scores:
+            execute(
+                conn,
+                """
+                INSERT INTO audit_field_scores (field_id, max_score)
+                VALUES (%s, %s)
+                ON CONFLICT (field_id) DO UPDATE SET max_score = EXCLUDED.max_score
+                """,
+                (str(fs.field_id), fs.max_score),
+            )
 
     return {**template.model_dump(), "passing_score": body.passing_score}
 
@@ -197,59 +214,107 @@ async def list_audit_templates(
     is_active: Optional[bool] = Query(None),
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    q = db.table("form_templates") \
-        .select("*, audit_configs(passing_score)") \
-        .eq("organisation_id", org_id) \
-        .eq("type", "audit") \
-        .eq("is_deleted", False) \
-        .order("created_at", desc=True)
+    conditions = [
+        "ft.organisation_id = %s",
+        "ft.type = 'audit'",
+        "ft.is_deleted = FALSE",
+    ]
+    params: list = [org_id]
 
     if is_active is not None:
-        q = q.eq("is_active", is_active)
+        conditions.append("ft.is_active = %s")
+        params.append(is_active)
 
-    q = q.range(
-        pagination["offset"],
-        pagination["offset"] + pagination["page_size"] - 1,
+    where = " AND ".join(conditions)
+    params += [pagination["page_size"], pagination["offset"]]
+
+    return rows(
+        conn,
+        f"""
+        SELECT
+            ft.*,
+            ac.passing_score
+        FROM form_templates ft
+        LEFT JOIN audit_configs ac ON ac.form_template_id = ft.id
+        WHERE {where}
+        ORDER BY ft.created_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params),
     )
-    res = q.execute()
-    return res.data
 
 
 @router.get("/templates/{template_id}")
 async def get_audit_template(
     template_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    res = db.table("form_templates") \
-        .select("""
-            *,
-            audit_configs(passing_score),
-            form_sections(
-                id, title, display_order,
-                audit_section_weights(weight),
-                form_fields(
-                    id, label, field_type, is_required, options,
-                    display_order, placeholder,
-                    audit_field_scores(max_score)
-                )
-            )
-        """) \
-        .eq("id", str(template_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-
-    if not res.data:
+    tmpl = row(
+        conn,
+        """
+        SELECT ft.*, ac.passing_score
+        FROM form_templates ft
+        LEFT JOIN audit_configs ac ON ac.form_template_id = ft.id
+        WHERE ft.id = %s
+          AND ft.organisation_id = %s
+          AND ft.type = 'audit'
+          AND ft.is_deleted = FALSE
+        """,
+        (str(template_id), org_id),
+    )
+    if not tmpl:
         raise HTTPException(status_code=404, detail="Audit template not found")
-    return res.data
+
+    sections = rows(
+        conn,
+        """
+        SELECT fs.id, fs.title, fs.display_order,
+               asw.weight
+        FROM form_sections fs
+        LEFT JOIN audit_section_weights asw ON asw.section_id = fs.id
+        WHERE fs.form_template_id = %s
+          AND fs.is_deleted = FALSE
+        ORDER BY fs.display_order
+        """,
+        (str(template_id),),
+    )
+
+    section_ids = [str(s["id"]) for s in sections]
+    fields_by_section: dict[str, list] = {sid: [] for sid in section_ids}
+
+    if section_ids:
+        all_fields = rows(
+            conn,
+            """
+            SELECT ff.id, ff.form_section_id, ff.label, ff.field_type,
+                   ff.is_required, ff.options, ff.display_order, ff.placeholder,
+                   afs.max_score
+            FROM form_fields ff
+            LEFT JOIN audit_field_scores afs ON afs.field_id = ff.id
+            WHERE ff.form_section_id = ANY(%s::uuid[])
+              AND ff.is_deleted = FALSE
+            ORDER BY ff.display_order
+            """,
+            (section_ids,),
+        )
+        for f in all_fields:
+            key = str(f["form_section_id"])
+            if key in fields_by_section:
+                fields_by_section[key].append(dict(f))
+
+    result = dict(tmpl)
+    result["form_sections"] = [
+        {**dict(s), "form_fields": fields_by_section.get(str(s["id"]), [])}
+        for s in sections
+    ]
+    return result
 
 
 @router.put("/templates/{template_id}")
@@ -257,52 +322,80 @@ async def update_audit_template(
     template_id: UUID,
     body: UpdateAuditTemplateRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
     # Verify ownership
-    existing = db.table("form_templates") \
-        .select("id") \
-        .eq("id", str(template_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("type", "audit") \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(
+        conn,
+        """
+        SELECT id FROM form_templates
+        WHERE id = %s
+          AND organisation_id = %s
+          AND type = 'audit'
+          AND is_deleted = FALSE
+        """,
+        (str(template_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Audit template not found")
 
-    updates: dict = {"updated_at": datetime.now(timezone.utc).isoformat()}
-    if body.title is not None:
-        updates["title"] = body.title
-    if body.description is not None:
-        updates["description"] = body.description
-    if body.is_active is not None:
-        updates["is_active"] = body.is_active
+    # Build dynamic SET clause for form_templates
+    set_clauses = ["updated_at = %s"]
+    params: list = [datetime.now(timezone.utc)]
 
-    if updates:
-        db.table("form_templates").update(updates).eq("id", str(template_id)).execute()
+    if body.title is not None:
+        set_clauses.append("title = %s")
+        params.append(body.title)
+    if body.description is not None:
+        set_clauses.append("description = %s")
+        params.append(body.description)
+    if body.is_active is not None:
+        set_clauses.append("is_active = %s")
+        params.append(body.is_active)
+
+    params.append(str(template_id))
+    execute(
+        conn,
+        f"UPDATE form_templates SET {', '.join(set_clauses)} WHERE id = %s",
+        tuple(params),
+    )
 
     if body.passing_score is not None:
-        db.table("audit_configs").upsert({
-            "form_template_id": str(template_id),
-            "passing_score": body.passing_score,
-        }, on_conflict="form_template_id").execute()
+        execute(
+            conn,
+            """
+            INSERT INTO audit_configs (form_template_id, passing_score)
+            VALUES (%s, %s)
+            ON CONFLICT (form_template_id) DO UPDATE SET passing_score = EXCLUDED.passing_score
+            """,
+            (str(template_id), body.passing_score),
+        )
 
     if body.section_weights:
         for sw in body.section_weights:
-            db.table("audit_section_weights").upsert({
-                "section_id": str(sw.section_id),
-                "weight": sw.weight,
-            }, on_conflict="section_id").execute()
+            execute(
+                conn,
+                """
+                INSERT INTO audit_section_weights (section_id, weight)
+                VALUES (%s, %s)
+                ON CONFLICT (section_id) DO UPDATE SET weight = EXCLUDED.weight
+                """,
+                (str(sw.section_id), sw.weight),
+            )
 
     if body.field_scores:
         for fs in body.field_scores:
-            db.table("audit_field_scores").upsert({
-                "field_id": str(fs.field_id),
-                "max_score": fs.max_score,
-            }, on_conflict="field_id").execute()
+            execute(
+                conn,
+                """
+                INSERT INTO audit_field_scores (field_id, max_score)
+                VALUES (%s, %s)
+                ON CONFLICT (field_id) DO UPDATE SET max_score = EXCLUDED.max_score
+                """,
+                (str(fs.field_id), fs.max_score),
+            )
 
     return {"success": True}
 
@@ -311,25 +404,33 @@ async def update_audit_template(
 async def delete_audit_template(
     template_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    existing = db.table("form_templates") \
-        .select("id") \
-        .eq("id", str(template_id)) \
-        .eq("organisation_id", org_id) \
-        .eq("type", "audit") \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not existing.data:
+    existing = row(
+        conn,
+        """
+        SELECT id FROM form_templates
+        WHERE id = %s
+          AND organisation_id = %s
+          AND type = 'audit'
+          AND is_deleted = FALSE
+        """,
+        (str(template_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Audit template not found")
 
-    db.table("form_templates").update({
-        "is_deleted": True,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", str(template_id)).execute()
+    execute(
+        conn,
+        """
+        UPDATE form_templates
+        SET is_deleted = TRUE, updated_at = %s
+        WHERE id = %s
+        """,
+        (datetime.now(timezone.utc), str(template_id)),
+    )
 
     return {"success": True}
 
@@ -342,6 +443,7 @@ async def delete_audit_template(
 async def submit_audit(
     body: CreateAuditSubmissionRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     """
     Submit audit → server scores → atomically create CAPs for failed fields
@@ -349,26 +451,29 @@ async def submit_audit(
     """
     org_id = _get_org(current_user)
     user_id = current_user["sub"]
-    db = get_admin_client()
 
     form_template_id = str(body.form_template_id)
     location_id = str(body.location_id)
 
     # Verify template belongs to org and is audit type
-    tmpl = db.table("form_templates") \
-        .select("id, type") \
-        .eq("id", form_template_id) \
-        .eq("organisation_id", org_id) \
-        .eq("type", "audit") \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    if not tmpl.data:
+    tmpl = row(
+        conn,
+        """
+        SELECT id, type FROM form_templates
+        WHERE id = %s
+          AND organisation_id = %s
+          AND type = 'audit'
+          AND is_deleted = FALSE
+        """,
+        (form_template_id, org_id),
+    )
+    if not tmpl:
         raise HTTPException(status_code=404, detail="Audit template not found")
 
     # 1. Score the submission server-side
     responses_raw = [{"field_id": str(r.field_id), "value": r.value} for r in body.responses]
     score_result = await calculate_audit_score(
+        conn,
         submission_id="",   # not yet created
         form_template_id=form_template_id,
         responses=responses_raw,
@@ -376,34 +481,40 @@ async def submit_audit(
     )
 
     # 2. Create form_submission record
-    sub_res = db.table("form_submissions").insert({
-        "form_template_id": form_template_id,
-        "submitted_by": user_id,
-        "location_id": location_id,
-        "status": "submitted",
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "overall_score": score_result.overall_score,
-        "passed": score_result.passed,
-    }).execute()
-
-    if not sub_res.data:
+    submission = execute_returning(
+        conn,
+        """
+        INSERT INTO form_submissions
+            (form_template_id, submitted_by, location_id, status,
+             submitted_at, overall_score, passed)
+        VALUES (%s, %s, %s, 'submitted', %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            form_template_id,
+            user_id,
+            location_id,
+            datetime.now(timezone.utc),
+            score_result.overall_score,
+            score_result.passed,
+        ),
+    )
+    if not submission:
         raise HTTPException(status_code=500, detail="Failed to create submission")
 
-    submission = sub_res.data[0]
-    submission_id = submission["id"]
+    submission_id = str(submission["id"])
 
     # 3. Persist individual field responses
     if body.responses:
-        response_records = [
-            {
-                "submission_id": submission_id,
-                "field_id": str(r.field_id),
-                "value": r.value,
-                "comment": r.comment,
-            }
-            for r in body.responses
-        ]
-        db.table("form_responses").insert(response_records).execute()
+        for r in body.responses:
+            execute(
+                conn,
+                """
+                INSERT INTO form_responses (submission_id, field_id, value, comment)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (submission_id, str(r.field_id), r.value, r.comment),
+            )
 
     # 4. Atomically create CAP for all failed fields (if audit failed)
     cap_id: str | None = None
@@ -411,6 +522,7 @@ async def submit_audit(
         try:
             responses_raw = [{"field_id": str(r.field_id), "value": r.value} for r in body.responses]
             cap = await create_corrective_actions(
+                conn,
                 submission_id=submission_id,
                 failed_fields=score_result.failed_fields,
                 org_id=org_id,
@@ -421,8 +533,8 @@ async def submit_audit(
             cap_id = cap["id"] if cap else None
         except Exception as e:
             # Atomic requirement: roll back submission if CAP creation fails
-            db.table("form_submissions").delete().eq("id", submission_id).execute()
-            db.table("form_responses").delete().eq("submission_id", submission_id).execute()
+            execute(conn, "DELETE FROM form_submissions WHERE id = %s", (submission_id,))
+            execute(conn, "DELETE FROM form_responses WHERE submission_id = %s", (submission_id,))
             logger.error(f"CAP creation failed, rolling back submission: {e}")
             raise HTTPException(status_code=500, detail="Failed to create corrective actions — submission rolled back")
 
@@ -476,65 +588,131 @@ async def list_audit_submissions(
     to_date: Optional[str] = Query(None, alias="to"),
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    q = db.table("form_submissions") \
-        .select("""
-            id, form_template_id, submitted_by, location_id,
-            submitted_at, overall_score, passed, status, created_at,
-            form_templates!inner(title, type, organisation_id)
-        """) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "audit") \
-        .order("submitted_at", desc=True)
+    conditions = [
+        "ft.organisation_id = %s",
+        "ft.type = 'audit'",
+    ]
+    params: list = [org_id]
 
     if location_id:
-        q = q.eq("location_id", location_id)
+        conditions.append("fs.location_id = %s")
+        params.append(location_id)
     if passed is not None:
-        q = q.eq("passed", passed)
+        conditions.append("fs.passed = %s")
+        params.append(passed)
     if from_date:
-        q = q.gte("submitted_at", from_date)
+        conditions.append("fs.submitted_at >= %s")
+        params.append(from_date)
     if to_date:
-        q = q.lte("submitted_at", to_date)
+        conditions.append("fs.submitted_at <= %s")
+        params.append(to_date)
 
-    q = q.range(
-        pagination["offset"],
-        pagination["offset"] + pagination["page_size"] - 1,
+    where = " AND ".join(conditions)
+    params += [pagination["page_size"], pagination["offset"]]
+
+    return rows(
+        conn,
+        f"""
+        SELECT
+            fs.id, fs.form_template_id, fs.submitted_by, fs.location_id,
+            fs.submitted_at, fs.overall_score, fs.passed, fs.status, fs.created_at,
+            ft.title AS template_title, ft.type AS template_type
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE {where}
+        ORDER BY fs.submitted_at DESC
+        LIMIT %s OFFSET %s
+        """,
+        tuple(params),
     )
-    res = q.execute()
-    return res.data
 
 
 @router.get("/submissions/{submission_id}")
 async def get_audit_submission(
     submission_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    res = db.table("form_submissions") \
-        .select("""
-            *,
-            form_templates!inner(title, type, organisation_id),
-            form_responses(field_id, value, comment),
-            audit_signatures(id, signed_by, signature_url, signed_at),
-            corrective_actions(id, field_id, description, status, assigned_to, due_at),
-            corrective_action_plans(id, status, generated_at, reviewed_at,
-                cap_items(id, field_id, field_label, response_value, is_critical,
-                    followup_type, followup_title, followup_priority, spawned_task_id))
-        """) \
-        .eq("id", str(submission_id)) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "audit") \
-        .maybe_single() \
-        .execute()
-
-    if not res.data:
+    submission = row(
+        conn,
+        """
+        SELECT fs.*,
+               ft.title AS template_title,
+               ft.type  AS template_type
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE fs.id = %s
+          AND ft.organisation_id = %s
+          AND ft.type = 'audit'
+        """,
+        (str(submission_id), org_id),
+    )
+    if not submission:
         raise HTTPException(status_code=404, detail="Audit submission not found")
-    return res.data
+
+    result = dict(submission)
+
+    result["form_responses"] = rows(
+        conn,
+        "SELECT field_id, value, comment FROM form_responses WHERE submission_id = %s",
+        (str(submission_id),),
+    )
+
+    result["audit_signatures"] = rows(
+        conn,
+        "SELECT id, signed_by, signature_url, signed_at FROM audit_signatures WHERE submission_id = %s",
+        (str(submission_id),),
+    )
+
+    result["corrective_actions"] = rows(
+        conn,
+        """
+        SELECT id, field_id, description, status, assigned_to, due_at
+        FROM corrective_actions
+        WHERE submission_id = %s
+        """,
+        (str(submission_id),),
+    )
+
+    caps = rows(
+        conn,
+        """
+        SELECT id, status, generated_at, reviewed_at
+        FROM corrective_action_plans
+        WHERE submission_id = %s
+        """,
+        (str(submission_id),),
+    )
+    cap_ids = [str(c["id"]) for c in caps]
+    cap_items_by_cap: dict[str, list] = {cid: [] for cid in cap_ids}
+    if cap_ids:
+        cap_items = rows(
+            conn,
+            """
+            SELECT id, cap_id, field_id, field_label, response_value, is_critical,
+                   followup_type, followup_title, followup_priority, spawned_task_id
+            FROM cap_items
+            WHERE cap_id = ANY(%s::uuid[])
+            """,
+            (cap_ids,),
+        )
+        for item in cap_items:
+            key = str(item["cap_id"])
+            if key in cap_items_by_cap:
+                cap_items_by_cap[key].append(dict(item))
+
+    result["corrective_action_plans"] = [
+        {**dict(c), "cap_items": cap_items_by_cap.get(str(c["id"]), [])}
+        for c in caps
+    ]
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -545,34 +723,93 @@ async def get_audit_submission(
 async def export_audit_pdf(
     submission_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Stream a PDF audit report generated on-demand via reportlab."""
     org_id = _get_org(current_user)
-    db = get_admin_client()
 
-    # Fetch submission with full detail
-    res = db.table("form_submissions") \
-        .select("""
-            *,
-            form_templates!inner(title, type, organisation_id, form_sections(
-                id, title, display_order,
-                form_fields(id, label, field_type, display_order)
-            )),
-            form_responses(field_id, value, comment),
-            audit_signatures(signed_by, signature_url, signed_at),
-            corrective_actions(field_id, description, status, due_at)
-        """) \
-        .eq("id", str(submission_id)) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "audit") \
-        .maybe_single() \
-        .execute()
-
-    if not res.data:
+    submission = row(
+        conn,
+        """
+        SELECT fs.*,
+               ft.title AS template_title,
+               ft.type  AS template_type
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE fs.id = %s
+          AND ft.organisation_id = %s
+          AND ft.type = 'audit'
+        """,
+        (str(submission_id), org_id),
+    )
+    if not submission:
         raise HTTPException(status_code=404, detail="Audit submission not found")
 
-    submission = res.data
-    pdf_bytes = _generate_audit_pdf(submission)
+    result = dict(submission)
+
+    # Load sections + fields for the template
+    sections = rows(
+        conn,
+        """
+        SELECT id, title, display_order
+        FROM form_sections
+        WHERE form_template_id = %s
+          AND is_deleted = FALSE
+        ORDER BY display_order
+        """,
+        (str(result["form_template_id"]),),
+    )
+    section_ids = [str(s["id"]) for s in sections]
+    fields_by_section: dict[str, list] = {sid: [] for sid in section_ids}
+    if section_ids:
+        all_fields = rows(
+            conn,
+            """
+            SELECT id, form_section_id, label, field_type, display_order
+            FROM form_fields
+            WHERE form_section_id = ANY(%s::uuid[])
+              AND is_deleted = FALSE
+            ORDER BY display_order
+            """,
+            (section_ids,),
+        )
+        for f in all_fields:
+            key = str(f["form_section_id"])
+            if key in fields_by_section:
+                fields_by_section[key].append(dict(f))
+
+    result["form_templates"] = {
+        "title": result.pop("template_title", ""),
+        "type": result.pop("template_type", ""),
+        "form_sections": [
+            {**dict(s), "form_fields": fields_by_section.get(str(s["id"]), [])}
+            for s in sections
+        ],
+    }
+
+    result["form_responses"] = rows(
+        conn,
+        "SELECT field_id, value, comment FROM form_responses WHERE submission_id = %s",
+        (str(submission_id),),
+    )
+
+    result["audit_signatures"] = rows(
+        conn,
+        "SELECT signed_by, signature_url, signed_at FROM audit_signatures WHERE submission_id = %s",
+        (str(submission_id),),
+    )
+
+    result["corrective_actions"] = rows(
+        conn,
+        """
+        SELECT field_id, description, status, due_at
+        FROM corrective_actions
+        WHERE submission_id = %s
+        """,
+        (str(submission_id),),
+    )
+
+    pdf_bytes = _generate_audit_pdf(result)
 
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
@@ -648,13 +885,13 @@ def _generate_audit_pdf(submission: dict) -> bytes:
     # Sections
     for section in sorted(template.get("form_sections") or [], key=lambda s: s.get("display_order", 0)):
         elements.append(Paragraph(section.get("title", "Section"), h2_style))
-        rows = [["Field", "Response"]]
+        table_rows = [["Field", "Response"]]
         for field in sorted(section.get("form_fields") or [], key=lambda f: f.get("display_order", 0)):
             fid = str(field["id"])
             response_val = response_map.get(fid, "—")
-            rows.append([field.get("label", ""), response_val])
+            table_rows.append([field.get("label", ""), response_val])
 
-        t = Table(rows, colWidths=[9*cm, 7*cm])
+        t = Table(table_rows, colWidths=[9*cm, 7*cm])
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), brand),
             ("TEXTCOLOR", (0, 0), (-1, 0), white),
@@ -718,21 +955,26 @@ async def capture_signature(
     submission_id: UUID,
     body: CaptureSignatureRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     """Upload a base64 signature PNG to audit-signatures bucket and record it."""
     org_id = _get_org(current_user)
     user_id = current_user["sub"]
-    db = get_admin_client()
 
     # Verify submission belongs to org
-    res = db.table("form_submissions") \
-        .select("id, form_templates!inner(organisation_id, type)") \
-        .eq("id", str(submission_id)) \
-        .eq("form_templates.organisation_id", org_id) \
-        .eq("form_templates.type", "audit") \
-        .maybe_single() \
-        .execute()
-    if not res.data:
+    existing = row(
+        conn,
+        """
+        SELECT fs.id
+        FROM form_submissions fs
+        JOIN form_templates ft ON ft.id = fs.form_template_id
+        WHERE fs.id = %s
+          AND ft.organisation_id = %s
+          AND ft.type = 'audit'
+        """,
+        (str(submission_id), org_id),
+    )
+    if not existing:
         raise HTTPException(status_code=404, detail="Audit submission not found")
 
     # Decode base64 data URL (data:image/png;base64,<data>)
@@ -745,9 +987,9 @@ async def capture_signature(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 signature data")
 
-    # Upload to audit-signatures bucket
-    path = f"{org_id}/{submission_id}/signature_{uuid4().hex}.png"
+    # Phase 5: replace with Azure Blob
     from services.supabase_client import get_supabase
+    path = f"{org_id}/{submission_id}/signature_{uuid4().hex}.png"
     storage = get_supabase().storage.from_("audit-signatures")
 
     try:
@@ -756,16 +998,24 @@ async def capture_signature(
         raise HTTPException(status_code=500, detail=f"Failed to upload signature: {e}")
 
     # Generate signed URL (1 hour)
+    # Phase 5: replace with Azure Blob
     signed = storage.create_signed_url(path, 3600)
     signed_url = signed.get("signedURL") or signed.get("signed_url") or path
 
     # Upsert audit_signatures record
-    sig_res = db.table("audit_signatures").upsert({
-        "submission_id": str(submission_id),
-        "signed_by": user_id,
-        "signature_url": path,   # store path, serve via signed URL
-        "signed_at": datetime.now(timezone.utc).isoformat(),
-    }, on_conflict="submission_id").execute()
+    execute(
+        conn,
+        """
+        INSERT INTO audit_signatures (submission_id, signed_by, signature_url, signed_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (submission_id)
+        DO UPDATE SET
+            signed_by     = EXCLUDED.signed_by,
+            signature_url = EXCLUDED.signature_url,
+            signed_at     = EXCLUDED.signed_at
+        """,
+        (str(submission_id), user_id, path, datetime.now(timezone.utc)),
+    )
 
     return {
         "success": True,

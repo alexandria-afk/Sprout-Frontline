@@ -4,8 +4,8 @@ import anthropic
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
-from dependencies import get_current_user, require_manager_or_above
-from services.supabase_client import get_supabase
+from dependencies import get_db, get_current_user, require_manager_or_above
+from services.db import rows
 from config import settings
 from services.ai_logger import log_ai_request, AITimer
 from services.industry_context import get_industry_context
@@ -1076,6 +1076,7 @@ Never make up policy details — direct them to their manager or HR for specific
 async def sidekick_chat(
     body: ChatRequest,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     """Sidekick conversational AI — general-purpose assistant for the platform."""
     if not body.messages:
@@ -1147,51 +1148,67 @@ async def sidekick_chat(
         try:
             from datetime import datetime, timedelta, timezone
             from collections import Counter
-            sb_ctx = get_supabase()
-            tpl_res = (
-                sb_ctx.table("form_templates")
-                .select("id")
-                .eq("organisation_id", org_id)
-                .eq("type", "pull_out")
-                .eq("is_deleted", False)
-                .execute()
+            tpl_rows = rows(
+                conn,
+                """
+                SELECT id
+                FROM form_templates
+                WHERE organisation_id = %s
+                  AND type = 'pull_out'
+                  AND is_deleted = FALSE
+                """,
+                (org_id,),
             )
-            tpl_ids = [r["id"] for r in (tpl_res.data or [])]
+            tpl_ids = [r["id"] for r in tpl_rows]
             if tpl_ids:
                 since = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-                po_res = (
-                    sb_ctx.table("form_submissions")
-                    .select("submitted_at, estimated_cost, location_id, form_responses(value, form_fields(label))")
-                    .eq("is_deleted", False)
-                    .eq("status", "submitted")
-                    .in_("form_template_id", tpl_ids)
-                    .gte("submitted_at", since)
-                    .limit(200)
-                    .execute()
+                po_submissions = rows(
+                    conn,
+                    """
+                    SELECT
+                        fs.submitted_at,
+                        fs.estimated_cost,
+                        fs.location_id,
+                        fr.value        AS response_value,
+                        ff.label        AS field_label
+                    FROM form_submissions fs
+                    LEFT JOIN form_responses fr ON fr.form_submission_id = fs.id
+                    LEFT JOIN form_fields ff ON ff.id = fr.form_field_id
+                    WHERE fs.is_deleted = FALSE
+                      AND fs.status = 'submitted'
+                      AND fs.form_template_id = ANY(%s::uuid[])
+                      AND fs.submitted_at >= %s
+                    LIMIT 200
+                    """,
+                    (list(tpl_ids), since),
                 )
-                po_submissions = po_res.data or []
                 if po_submissions:
                     items = []
                     reasons = []
                     total_cost = 0.0
+                    seen_costs: set = set()
                     for sub in po_submissions:
-                        ec = sub.get("estimated_cost")
-                        if ec is not None:
-                            try:
-                                total_cost += float(ec)
-                            except (ValueError, TypeError):
-                                pass
-                        for r in (sub.get("form_responses") or []):
-                            label = (r.get("form_fields") or {}).get("label", "").strip().lower()
-                            val = r.get("value") or ""
-                            if label == "item name" and val:
-                                items.append(val)
-                            elif label == "reason" and val:
-                                reasons.append(val)
+                        sub_key = (sub.get("submitted_at"), sub.get("location_id"))
+                        if sub_key not in seen_costs:
+                            seen_costs.add(sub_key)
+                            ec = sub.get("estimated_cost")
+                            if ec is not None:
+                                try:
+                                    total_cost += float(ec)
+                                except (ValueError, TypeError):
+                                    pass
+                        label = (sub.get("field_label") or "").strip().lower()
+                        val = sub.get("response_value") or ""
+                        if label == "item name" and val:
+                            items.append(val)
+                        elif label == "reason" and val:
+                            reasons.append(val)
+                    # deduplicate submission count by submitted_at + location_id
+                    num_submissions = len(seen_costs)
                     top_items = Counter(items).most_common(5)
                     top_reasons = Counter(reasons).most_common(5)
                     context_parts.append(
-                        f"Pull-out data (last 30 days): {len(po_submissions)} records, "
+                        f"Pull-out data (last 30 days): {num_submissions} records, "
                         f"total estimated cost ₱{total_cost:,.2f}. "
                         f"Top wasted items: {', '.join(f'{i} ({c})' for i, c in top_items)}. "
                         f"Top reasons: {', '.join(f'{r} ({c})' for r, c in top_reasons)}."
@@ -1207,31 +1224,36 @@ async def sidekick_chat(
     ]
     if any(kw in user_message_lower for kw in aging_keywords):
         try:
-            sb_aging = get_supabase()
             from datetime import datetime as _dt, timezone as _tz
 
             # SLA hours map
             task_sla = {"critical": 4, "high": 24, "medium": 72, "low": 168}
 
             # Open tasks
-            t_res = (
-                sb_aging.table("tasks")
-                .select("id, priority, status, created_at, completed_at")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .in_("status", ["pending", "in_progress", "overdue"])
-                .limit(200)
-                .execute()
+            open_tasks = rows(
+                conn,
+                """
+                SELECT id, priority, status, created_at, completed_at
+                FROM tasks
+                WHERE organisation_id = %s
+                  AND is_deleted = FALSE
+                  AND status = ANY(%s::text[])
+                LIMIT 200
+                """,
+                (org_id, ["pending", "in_progress", "overdue"]),
             )
-            open_tasks = t_res.data or []
             now_utc = _dt.now(_tz.utc)
             task_breaches = 0
             max_task_age_h = 0.0
             for task in open_tasks:
-                ca = task.get("created_at", "")
+                ca = task.get("created_at")
                 if not ca:
                     continue
-                age_h = (now_utc - _dt.fromisoformat(ca.replace("Z", "+00:00"))).total_seconds() / 3600
+                if hasattr(ca, "isoformat"):
+                    ca_dt = ca if ca.tzinfo else ca.replace(tzinfo=_tz.utc)
+                else:
+                    ca_dt = _dt.fromisoformat(str(ca).replace("Z", "+00:00"))
+                age_h = (now_utc - ca_dt).total_seconds() / 3600
                 sla = task_sla.get(task.get("priority", "medium"), 72)
                 if age_h > sla:
                     task_breaches += 1
@@ -1239,24 +1261,32 @@ async def sidekick_chat(
                     max_task_age_h = age_h
 
             # Open issues
-            i_res = (
-                sb_aging.table("issues")
-                .select("id, status, created_at, resolved_at, issue_categories(sla_hours)")
-                .eq("organisation_id", org_id)
-                .eq("is_deleted", False)
-                .in_("status", ["open", "in_progress", "pending_vendor"])
-                .limit(200)
-                .execute()
+            open_issues = rows(
+                conn,
+                """
+                SELECT i.id, i.status, i.created_at, i.resolved_at,
+                       ic.sla_hours
+                FROM issues i
+                LEFT JOIN issue_categories ic ON ic.id = i.category_id
+                WHERE i.organisation_id = %s
+                  AND i.is_deleted = FALSE
+                  AND i.status = ANY(%s::text[])
+                LIMIT 200
+                """,
+                (org_id, ["open", "in_progress", "pending_vendor"]),
             )
-            open_issues = i_res.data or []
             issue_breaches = 0
             max_issue_age_h = 0.0
             for issue in open_issues:
-                ca = issue.get("created_at", "")
+                ca = issue.get("created_at")
                 if not ca:
                     continue
-                age_h = (now_utc - _dt.fromisoformat(ca.replace("Z", "+00:00"))).total_seconds() / 3600
-                sla = (issue.get("issue_categories") or {}).get("sla_hours") or 24
+                if hasattr(ca, "isoformat"):
+                    ca_dt = ca if ca.tzinfo else ca.replace(tzinfo=_tz.utc)
+                else:
+                    ca_dt = _dt.fromisoformat(str(ca).replace("Z", "+00:00"))
+                age_h = (now_utc - ca_dt).total_seconds() / 3600
+                sla = issue.get("sla_hours") or 24
                 if age_h > sla:
                     issue_breaches += 1
                 if age_h > max_issue_age_h:

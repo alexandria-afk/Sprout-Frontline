@@ -6,6 +6,10 @@ from datetime import timedelta
 from fastapi import Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from config import settings
+from services.db import get_db_conn
+
+# Re-export get_db so route files can do: from dependencies import get_db
+get_db = get_db_conn
 
 security = HTTPBearer()
 
@@ -78,23 +82,26 @@ async def get_current_user(
         role = raw_role  # scalar fallback
 
     # Enrich with org / location / language from the profiles table.
-    # Uses a direct psycopg2 connection (no Supabase client dependency here).
     app_meta: dict = {"role": role}
     if user_id:
         try:
-            conn = psycopg2.connect(settings.database_url)
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT organisation_id, role, location_id, language
-                    FROM profiles
-                    WHERE id = %s AND is_deleted = false
-                    LIMIT 1
-                    """,
-                    (user_id,),
-                )
-                row = cur.fetchone()
-            conn.close()
+            from services.db import _get_pool
+            pool = _get_pool()
+            conn = pool.getconn()
+            try:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute(
+                        """
+                        SELECT organisation_id, role, location_id, language
+                        FROM profiles
+                        WHERE id = %s AND is_deleted = false
+                        LIMIT 1
+                        """,
+                        (user_id,),
+                    )
+                    row = cur.fetchone()
+            finally:
+                pool.putconn(conn)
             if row:
                 app_meta = {
                     "role": row["role"] or role,

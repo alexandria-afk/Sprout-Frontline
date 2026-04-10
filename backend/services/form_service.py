@@ -1,6 +1,10 @@
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
+
 from fastapi import HTTPException
+
 from services.audit_scoring_service import calculate_audit_score
 from models.forms import (
     CreateFormTemplateRequest,
@@ -15,178 +19,254 @@ from models.forms import (
     TemplateStatsResponse,
 )
 from models.base import PaginatedResponse
-from services.supabase_client import get_supabase
+from services.db import row, rows, execute, execute_returning, execute_many
+
+_log = logging.getLogger(__name__)
 
 
 class FormService:
     @staticmethod
     async def list_templates(
+        conn,
         org_id: str,
         type_filter: Optional[str] = None,
         is_active: Optional[bool] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> PaginatedResponse[FormTemplateResponse]:
-        supabase = get_supabase()
         offset = (page - 1) * page_size
 
-        try:
-            query = (
-                supabase.table("form_templates")
-                .select("*, form_sections(*, form_fields(*))", count="exact")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-            )
-            if type_filter:
-                query = query.eq("type", type_filter)
-            if is_active is not None:
-                query = query.eq("is_active", is_active)
+        where = ["organisation_id = %s", "is_deleted = FALSE"]
+        params: list = [str(org_id)]
 
-            response = query.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+        if type_filter:
+            where.append("type = %s")
+            params.append(type_filter)
+        if is_active is not None:
+            where.append("is_active = %s")
+            params.append(is_active)
+
+        where_sql = " AND ".join(where)
+
+        try:
+            count_r = row(
+                conn,
+                f"SELECT COUNT(*) AS cnt FROM form_templates WHERE {where_sql}",
+                tuple(params),
+            )
+            total_count = count_r["cnt"] if count_r else 0
+
+            template_rows = rows(
+                conn,
+                f"""
+                SELECT *
+                FROM form_templates
+                WHERE {where_sql}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
         items = []
-        for row in response.data:
-            raw_sections = row.pop("form_sections", []) or []
-            for section in raw_sections:
-                section["fields"] = section.pop("form_fields", []) or []
-            row["sections"] = raw_sections
-            items.append(FormTemplateResponse(**row))
-        total_count = response.count if response.count is not None else len(items)
+        for tmpl in template_rows:
+            tmpl = dict(tmpl)
+            tmpl_id = tmpl["id"]
+            try:
+                section_rows = rows(
+                    conn,
+                    """
+                    SELECT * FROM form_sections
+                    WHERE form_template_id = %s AND is_deleted = FALSE
+                    ORDER BY display_order
+                    """,
+                    (str(tmpl_id),),
+                )
+                sections_out = []
+                for sec in section_rows:
+                    sec = dict(sec)
+                    field_rows = rows(
+                        conn,
+                        """
+                        SELECT * FROM form_fields
+                        WHERE section_id = %s AND is_deleted = FALSE
+                        ORDER BY display_order
+                        """,
+                        (str(sec["id"]),),
+                    )
+                    sec["fields"] = [FormFieldResponse(**dict(f)) for f in field_rows]
+                    sections_out.append(FormSectionResponse(**sec))
+                tmpl["sections"] = sections_out
+            except Exception:
+                tmpl["sections"] = []
+            items.append(FormTemplateResponse(**tmpl))
 
         return PaginatedResponse(items=items, total_count=total_count, page=page, page_size=page_size)
 
     @staticmethod
     async def create_template(
-        body: CreateFormTemplateRequest, org_id: str, created_by: str
+        conn,
+        body: CreateFormTemplateRequest,
+        org_id: str,
+        created_by: str,
     ) -> FormTemplateResponse:
-        supabase = get_supabase()
-
-        template_data = {
-            "organisation_id": str(org_id),
-            "created_by": str(created_by),
-            "title": body.title,
-            "type": body.type,
-            "is_active": True,
-            "is_deleted": False,
-        }
-        if body.description is not None:
-            template_data["description"] = body.description
+        desc = body.description if body.description is not None else None
 
         try:
-            tmpl_resp = supabase.table("form_templates").insert(template_data).execute()
+            tmpl = execute_returning(
+                conn,
+                """
+                INSERT INTO form_templates
+                    (organisation_id, created_by, title, type, description, is_active, is_deleted)
+                VALUES (%s, %s, %s, %s, %s, TRUE, FALSE)
+                RETURNING *
+                """,
+                (str(org_id), str(created_by), body.title, body.type, desc),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        template_id = tmpl_resp.data[0]["id"]
+        template_id = str(tmpl["id"])
         sections_out = []
 
         for section_body in body.sections:
-            section_data = {
-                "form_template_id": template_id,
-                "title": section_body.title,
-                "display_order": section_body.display_order,
-            }
-            if section_body.id is not None:
-                section_data["id"] = str(section_body.id)
+            sec_id_override = str(section_body.id) if section_body.id is not None else None
             try:
-                sec_resp = supabase.table("form_sections").insert(section_data).execute()
+                if sec_id_override:
+                    sec = execute_returning(
+                        conn,
+                        """
+                        INSERT INTO form_sections (id, form_template_id, title, display_order)
+                        VALUES (%s, %s, %s, %s)
+                        RETURNING *
+                        """,
+                        (sec_id_override, template_id, section_body.title, section_body.display_order),
+                    )
+                else:
+                    sec = execute_returning(
+                        conn,
+                        """
+                        INSERT INTO form_sections (form_template_id, title, display_order)
+                        VALUES (%s, %s, %s)
+                        RETURNING *
+                        """,
+                        (template_id, section_body.title, section_body.display_order),
+                    )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Section creation failed: {e}")
 
-            section_id = sec_resp.data[0]["id"]
+            section_id = str(sec["id"])
             fields_out = []
 
             for field_body in section_body.fields:
-                field_data = {
-                    "section_id": section_id,
-                    "label": field_body.label,
-                    "field_type": field_body.field_type,
-                    "is_required": field_body.is_required,
-                    "display_order": field_body.display_order,
-                    "is_critical": field_body.is_critical,
-                }
-                if field_body.id is not None:
-                    field_data["id"] = str(field_body.id)
-                if field_body.options is not None:
-                    field_data["options"] = field_body.options
-                if field_body.conditional_logic is not None:
-                    field_data["conditional_logic"] = field_body.conditional_logic
-                if field_body.placeholder is not None:
-                    field_data["placeholder"] = field_body.placeholder
+                fld_id_override = str(field_body.id) if field_body.id is not None else None
+                options_json = json.dumps(field_body.options) if field_body.options is not None else None
+                cond_json = json.dumps(field_body.conditional_logic) if field_body.conditional_logic is not None else None
 
                 try:
-                    fld_resp = supabase.table("form_fields").insert(field_data).execute()
+                    if fld_id_override:
+                        fld = execute_returning(
+                            conn,
+                            """
+                            INSERT INTO form_fields
+                                (id, section_id, label, field_type, is_required, display_order,
+                                 is_critical, options, conditional_logic, placeholder)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING *
+                            """,
+                            (
+                                fld_id_override, section_id, field_body.label,
+                                field_body.field_type, field_body.is_required,
+                                field_body.display_order, field_body.is_critical,
+                                options_json, cond_json, field_body.placeholder,
+                            ),
+                        )
+                    else:
+                        fld = execute_returning(
+                            conn,
+                            """
+                            INSERT INTO form_fields
+                                (section_id, label, field_type, is_required, display_order,
+                                 is_critical, options, conditional_logic, placeholder)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING *
+                            """,
+                            (
+                                section_id, field_body.label, field_body.field_type,
+                                field_body.is_required, field_body.display_order,
+                                field_body.is_critical, options_json, cond_json,
+                                field_body.placeholder,
+                            ),
+                        )
                 except Exception as e:
                     raise HTTPException(status_code=400, detail=f"Field creation failed: {e}")
 
-                fields_out.append(FormFieldResponse(**fld_resp.data[0]))
+                fields_out.append(FormFieldResponse(**dict(fld)))
 
-            sections_out.append(
-                FormSectionResponse(**sec_resp.data[0], fields=fields_out)
-            )
+            sections_out.append(FormSectionResponse(**dict(sec), fields=fields_out))
 
-        return FormTemplateResponse(**tmpl_resp.data[0], sections=sections_out)
+        return FormTemplateResponse(**dict(tmpl), sections=sections_out)
 
     @staticmethod
-    async def get_template(template_id: str, org_id: str) -> FormTemplateResponse:
-        supabase = get_supabase()
-
+    async def get_template(conn, template_id: str, org_id: str) -> FormTemplateResponse:
         try:
-            tmpl_resp = (
-                supabase.table("form_templates")
-                .select("*")
-                .eq("id", str(template_id))
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .execute()
+            tmpl = row(
+                conn,
+                """
+                SELECT * FROM form_templates
+                WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+                """,
+                (str(template_id), str(org_id)),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        if not tmpl_resp.data:
+        if not tmpl:
             raise HTTPException(status_code=404, detail="Template not found")
 
-        template = tmpl_resp.data[0]
-
         try:
-            sec_resp = (
-                supabase.table("form_sections")
-                .select("*")
-                .eq("form_template_id", str(template_id))
-                .eq("is_deleted", False)
-                .order("display_order")
-                .execute()
+            section_rows = rows(
+                conn,
+                """
+                SELECT * FROM form_sections
+                WHERE form_template_id = %s AND is_deleted = FALSE
+                ORDER BY display_order
+                """,
+                (str(template_id),),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
         sections_out = []
-        for section in sec_resp.data:
+        for sec in section_rows:
+            sec = dict(sec)
             try:
-                fld_resp = (
-                    supabase.table("form_fields")
-                    .select("*")
-                    .eq("section_id", str(section["id"]))
-                    .eq("is_deleted", False)
-                    .order("display_order")
-                    .execute()
+                field_rows = rows(
+                    conn,
+                    """
+                    SELECT * FROM form_fields
+                    WHERE section_id = %s AND is_deleted = FALSE
+                    ORDER BY display_order
+                    """,
+                    (str(sec["id"]),),
                 )
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-            fields_out = [FormFieldResponse(**f) for f in fld_resp.data]
-            sections_out.append(FormSectionResponse(**section, fields=fields_out))
+            fields_out = [FormFieldResponse(**dict(f)) for f in field_rows]
+            sections_out.append(FormSectionResponse(**sec, fields=fields_out))
 
-        return FormTemplateResponse(**template, sections=sections_out)
+        return FormTemplateResponse(**dict(tmpl), sections=sections_out)
 
     @staticmethod
     async def update_template(
-        template_id: str, org_id: str, body: UpdateFormTemplateRequest
+        conn,
+        template_id: str,
+        org_id: str,
+        body: UpdateFormTemplateRequest,
     ) -> FormTemplateResponse:
-        supabase = get_supabase()
-
         updates = {}
         if body.title is not None:
             updates["title"] = body.title
@@ -198,138 +278,158 @@ class FormService:
             updates["is_active"] = body.is_active
 
         if updates:
+            set_clause = ", ".join(f"{k} = %s" for k in updates)
+            vals = list(updates.values()) + [str(template_id), str(org_id)]
             try:
-                supabase.table("form_templates").update(updates).eq(
-                    "id", str(template_id)
-                ).eq("organisation_id", str(org_id)).execute()
+                execute(
+                    conn,
+                    f"UPDATE form_templates SET {set_clause} WHERE id = %s AND organisation_id = %s",
+                    tuple(vals),
+                )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
         if body.sections is not None:
-            # Delete existing fields then sections, then recreate
+            # Soft-delete existing fields then sections, then recreate
             try:
-                existing_sections = (
-                    supabase.table("form_sections")
-                    .select("id")
-                    .eq("form_template_id", str(template_id))
-                    .eq("is_deleted", False)
-                    .execute()
+                existing_sections = rows(
+                    conn,
+                    "SELECT id FROM form_sections WHERE form_template_id = %s AND is_deleted = FALSE",
+                    (str(template_id),),
                 )
-                section_ids = [s["id"] for s in existing_sections.data]
+                section_ids = [str(s["id"]) for s in existing_sections]
                 if section_ids:
                     for sid in section_ids:
-                        supabase.table("form_fields").update({"is_deleted": True}).eq("section_id", sid).execute()
-                    supabase.table("form_sections").update({"is_deleted": True}).eq("form_template_id", str(template_id)).execute()
+                        execute(
+                            conn,
+                            "UPDATE form_fields SET is_deleted = TRUE WHERE section_id = %s",
+                            (sid,),
+                        )
+                    execute(
+                        conn,
+                        "UPDATE form_sections SET is_deleted = TRUE WHERE form_template_id = %s",
+                        (str(template_id),),
+                    )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Section cleanup failed: {e}")
 
             for section_body in body.sections:
-                section_data = {
-                    "form_template_id": str(template_id),
-                    "title": section_body.title,
-                    "display_order": section_body.display_order,
-                }
                 try:
-                    sec_resp = supabase.table("form_sections").insert(section_data).execute()
+                    sec = execute_returning(
+                        conn,
+                        """
+                        INSERT INTO form_sections (form_template_id, title, display_order)
+                        VALUES (%s, %s, %s)
+                        RETURNING *
+                        """,
+                        (str(template_id), section_body.title, section_body.display_order),
+                    )
                 except Exception as e:
                     raise HTTPException(status_code=400, detail=f"Section creation failed: {e}")
 
-                section_id = sec_resp.data[0]["id"]
+                section_id = str(sec["id"])
+
                 for field_body in section_body.fields:
-                    field_data = {
-                        "section_id": section_id,
-                        "label": field_body.label,
-                        "field_type": field_body.field_type,
-                        "is_required": field_body.is_required,
-                        "display_order": field_body.display_order,
-                        "is_critical": field_body.is_critical,
-                    }
-                    if field_body.options is not None:
-                        field_data["options"] = field_body.options
-                    if field_body.conditional_logic is not None:
-                        field_data["conditional_logic"] = field_body.conditional_logic
-                    if field_body.placeholder is not None:
-                        field_data["placeholder"] = field_body.placeholder
+                    options_json = json.dumps(field_body.options) if field_body.options is not None else None
+                    cond_json = json.dumps(field_body.conditional_logic) if field_body.conditional_logic is not None else None
                     try:
-                        supabase.table("form_fields").insert(field_data).execute()
+                        execute(
+                            conn,
+                            """
+                            INSERT INTO form_fields
+                                (section_id, label, field_type, is_required, display_order,
+                                 is_critical, options, conditional_logic, placeholder)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """,
+                            (
+                                section_id, field_body.label, field_body.field_type,
+                                field_body.is_required, field_body.display_order,
+                                field_body.is_critical, options_json, cond_json,
+                                field_body.placeholder,
+                            ),
+                        )
                     except Exception as e:
                         raise HTTPException(status_code=400, detail=f"Field creation failed: {e}")
 
-        return await FormService.get_template(template_id, org_id)
+        return await FormService.get_template(conn, template_id, org_id)
 
     @staticmethod
-    async def delete_template(template_id: str, org_id: str) -> dict:
-        supabase = get_supabase()
-
-        existing = (
-            supabase.table("form_templates")
-            .select("id")
-            .eq("id", str(template_id))
-            .eq("organisation_id", str(org_id))
-            .eq("is_deleted", False)
-            .execute()
+    async def delete_template(conn, template_id: str, org_id: str) -> dict:
+        existing = row(
+            conn,
+            "SELECT id FROM form_templates WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (str(template_id), str(org_id)),
         )
-        if not existing.data:
+        if not existing:
             raise HTTPException(status_code=404, detail="Template not found")
 
         try:
-            supabase.table("form_templates").update({"is_deleted": True}).eq(
-                "id", str(template_id)
-            ).execute()
+            execute(
+                conn,
+                "UPDATE form_templates SET is_deleted = TRUE WHERE id = %s",
+                (str(template_id),),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         return {"success": True, "message": "Template deleted"}
 
     @staticmethod
-    async def create_assignment(body: CreateAssignmentRequest, org_id: str) -> dict:
-        supabase = get_supabase()
-
+    async def create_assignment(conn, body: CreateAssignmentRequest, org_id: str) -> dict:
         # Audit templates require a location.
         # The org_id filter ensures a manager cannot assign a template from another org.
-        template_type_resp = (
-            supabase.table("form_templates")
-            .select("type")
-            .eq("id", str(body.form_template_id))
-            .eq("organisation_id", str(org_id))
-            .maybe_single()
-            .execute()
+        template_type_row = row(
+            conn,
+            "SELECT type FROM form_templates WHERE id = %s AND organisation_id = %s",
+            (str(body.form_template_id), str(org_id)),
         )
-        if template_type_resp.data and template_type_resp.data.get("type") == "audit":
+        if template_type_row and template_type_row.get("type") == "audit":
             if not body.assigned_to_location_id:
                 raise HTTPException(status_code=422, detail="A location is required when assigning an audit form.")
 
-        assignment_data = {
-            "form_template_id": str(body.form_template_id),
-            "organisation_id": str(org_id),
-            "recurrence": body.recurrence,
-            "due_at": body.due_at.isoformat(),
-            "is_active": True,
-            "is_deleted": False,
-        }
-        if body.assigned_to_user_id is not None:
-            assignment_data["assigned_to_user_id"] = str(body.assigned_to_user_id)
-        if body.assigned_to_location_id is not None:
-            assignment_data["assigned_to_location_id"] = str(body.assigned_to_location_id)
-        if body.cron_expression is not None:
-            assignment_data["cron_expression"] = body.cron_expression
+        assigned_to_user_id = str(body.assigned_to_user_id) if body.assigned_to_user_id is not None else None
+        assigned_to_location_id = str(body.assigned_to_location_id) if body.assigned_to_location_id is not None else None
+        cron_expression = body.cron_expression if body.cron_expression is not None else None
 
         try:
-            response = supabase.table("form_assignments").insert(assignment_data).execute()
+            assignment = execute_returning(
+                conn,
+                """
+                INSERT INTO form_assignments
+                    (form_template_id, organisation_id, recurrence, due_at,
+                     assigned_to_user_id, assigned_to_location_id, cron_expression,
+                     is_active, is_deleted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, FALSE)
+                RETURNING *
+                """,
+                (
+                    str(body.form_template_id), str(org_id), body.recurrence,
+                    body.due_at.isoformat(), assigned_to_user_id,
+                    assigned_to_location_id, cron_expression,
+                ),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        assignment = response.data[0]
+        assignment = dict(assignment)
 
         # Notify the assigned user
         if body.assigned_to_user_id:
             try:
-                tmpl_resp = supabase.table("form_templates").select("title").eq("id", str(body.form_template_id)).maybe_single().execute()
-                tmpl_title = (tmpl_resp.data or {}).get("title", "Form")
+                tmpl_row = row(
+                    conn,
+                    "SELECT title FROM form_templates WHERE id = %s",
+                    (str(body.form_template_id),),
+                )
+                tmpl_title = (tmpl_row or {}).get("title", "Form")
                 loc_name = ""
                 if body.assigned_to_location_id:
-                    loc_resp = supabase.table("locations").select("name").eq("id", str(body.assigned_to_location_id)).maybe_single().execute()
-                    loc_name = (loc_resp.data or {}).get("name", "")
+                    loc_row = row(
+                        conn,
+                        "SELECT name FROM locations WHERE id = %s",
+                        (str(body.assigned_to_location_id),),
+                    )
+                    loc_name = (loc_row or {}).get("name", "")
                 due_str = body.due_at.strftime("%b %-d") if body.due_at else ""
                 notif_body_parts = [p for p in [loc_name, f"Due {due_str}" if due_str else ""] if p]
                 notif_body = " \u00b7 ".join(notif_body_parts) or None
@@ -351,62 +451,67 @@ class FormService:
         return assignment
 
     @staticmethod
-    async def my_assignments(user_id: str, org_id: str) -> list:
-        supabase = get_supabase()
-
+    async def my_assignments(conn, user_id: str, org_id: str) -> list:
         # Get user's location
         try:
-            profile_resp = (
-                supabase.table("profiles")
-                .select("location_id")
-                .eq("id", str(user_id))
-                .eq("is_deleted", False)
-                .execute()
+            profile_r = row(
+                conn,
+                "SELECT location_id FROM profiles WHERE id = %s AND is_deleted = FALSE",
+                (str(user_id),),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        location_id = None
-        if profile_resp.data:
-            location_id = profile_resp.data[0].get("location_id")
+        location_id = (profile_r or {}).get("location_id")
 
         try:
-            ASSIGNMENT_SELECT = "*, form_templates(id, title, type, description, is_active, is_deleted)"
-
             # Assignments directly to the user
-            user_query = (
-                supabase.table("form_assignments")
-                .select(ASSIGNMENT_SELECT)
-                .eq("assigned_to_user_id", str(user_id))
-                .eq("is_deleted", False)
-                .eq("is_active", True)
-                .execute()
+            user_assignments = rows(
+                conn,
+                """
+                SELECT fa.*,
+                       row_to_json(ft) AS form_templates
+                FROM form_assignments fa
+                JOIN form_templates ft ON ft.id = fa.form_template_id
+                WHERE fa.assigned_to_user_id = %s
+                  AND fa.is_deleted = FALSE
+                  AND fa.is_active = TRUE
+                """,
+                (str(user_id),),
             )
-            assignments = list(user_query.data)
+            assignments = [dict(a) for a in user_assignments]
 
             # Assignments to user's location
             if location_id:
-                loc_query = (
-                    supabase.table("form_assignments")
-                    .select(ASSIGNMENT_SELECT)
-                    .eq("assigned_to_location_id", str(location_id))
-                    .eq("is_deleted", False)
-                    .eq("is_active", True)
-                    .execute()
+                loc_assignments = rows(
+                    conn,
+                    """
+                    SELECT fa.*,
+                           row_to_json(ft) AS form_templates
+                    FROM form_assignments fa
+                    JOIN form_templates ft ON ft.id = fa.form_template_id
+                    WHERE fa.assigned_to_location_id = %s
+                      AND fa.is_deleted = FALSE
+                      AND fa.is_active = TRUE
+                    """,
+                    (str(location_id),),
                 )
-                # Deduplicate
                 existing_ids = {a["id"] for a in assignments}
-                for a in loc_query.data:
+                for a in loc_assignments:
                     if a["id"] not in existing_ids:
-                        assignments.append(a)
+                        assignments.append(dict(a))
 
             # Filter out assignments whose template has been deleted or deactivated
-            assignments = [
-                a for a in assignments
-                if a.get("form_templates")
-                and not a["form_templates"].get("is_deleted")
-                and a["form_templates"].get("is_active", True)
-            ]
+            def _template_ok(a):
+                ft = a.get("form_templates")
+                if isinstance(ft, str):
+                    import json as _json
+                    ft = _json.loads(ft)
+                if not ft:
+                    return False
+                return not ft.get("is_deleted") and ft.get("is_active", True)
+
+            assignments = [a for a in assignments if _template_ok(a)]
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -414,24 +519,28 @@ class FormService:
         if assignments:
             assignment_ids = [a["id"] for a in assignments]
             try:
-                sub_resp = (
-                    supabase.table("form_submissions")
-                    .select("assignment_id, id, status, submitted_at")
-                    .in_("assignment_id", assignment_ids)
-                    .eq("submitted_by", str(user_id))
-                    .eq("is_deleted", False)
-                    .execute()
+                sub_rows = rows(
+                    conn,
+                    """
+                    SELECT assignment_id, id, status, submitted_at
+                    FROM form_submissions
+                    WHERE assignment_id = ANY(%s::uuid[])
+                      AND submitted_by = %s
+                      AND is_deleted = FALSE
+                    """,
+                    (list(assignment_ids), str(user_id)),
                 )
                 # Build map: assignment_id → best submission (submitted > draft)
                 sub_map: dict = {}
-                for s in (sub_resp.data or []):
-                    aid = s["assignment_id"]
+                for s in sub_rows:
+                    s = dict(s)
+                    aid = str(s["assignment_id"])
                     existing = sub_map.get(aid)
                     if not existing or s["status"] == "submitted":
                         sub_map[aid] = s
 
                 for a in assignments:
-                    sub = sub_map.get(a["id"])
+                    sub = sub_map.get(str(a["id"]))
                     a["completed"]     = bool(sub and sub["status"] == "submitted")
                     a["submitted_at"]  = sub["submitted_at"] if sub and sub["status"] == "submitted" else None
                     a["has_draft"]     = bool(sub and sub["status"] == "draft")
@@ -447,42 +556,38 @@ class FormService:
         return assignments
 
     @staticmethod
-    async def get_assignment_template(assignment_id: str, user_id: str, org_id: str) -> dict:
+    async def get_assignment_template(conn, assignment_id: str, user_id: str, org_id: str) -> dict:
         """Return the full template for an assignment, verifying the user is assigned to it."""
-        supabase = get_supabase()
-
-        # Fetch the assignment
         try:
-            resp = (
-                supabase.table("form_assignments")
-                .select("*")
-                .eq("id", assignment_id)
-                .eq("is_deleted", False)
-                .eq("is_active", True)
-                .execute()
+            assignment = row(
+                conn,
+                """
+                SELECT * FROM form_assignments
+                WHERE id = %s AND is_deleted = FALSE AND is_active = TRUE
+                """,
+                (str(assignment_id),),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        if not resp.data:
+        if not assignment:
             raise HTTPException(status_code=404, detail="Assignment not found")
 
-        assignment = resp.data[0]
+        assignment = dict(assignment)
 
         # Verify access: user must be directly assigned OR their location must match
-        profile_resp = (
-            supabase.table("profiles")
-            .select("location_id")
-            .eq("id", user_id)
-            .execute()
+        profile_r = row(
+            conn,
+            "SELECT location_id FROM profiles WHERE id = %s",
+            (str(user_id),),
         )
-        location_id = (profile_resp.data[0].get("location_id") if profile_resp.data else None)
+        location_id = (profile_r or {}).get("location_id")
 
-        is_user_assigned = assignment.get("assigned_to_user_id") == user_id
-        is_location_assigned = location_id and assignment.get("assigned_to_location_id") == location_id
+        is_user_assigned = str(assignment.get("assigned_to_user_id") or "") == str(user_id)
+        is_location_assigned = location_id and str(assignment.get("assigned_to_location_id") or "") == str(location_id)
 
         # Also allow managers/admins in the same org to access (for previewing)
-        is_org_member = assignment.get("organisation_id") == org_id
+        is_org_member = str(assignment.get("organisation_id") or "") == str(org_id)
 
         if not (is_user_assigned or is_location_assigned or is_org_member):
             raise HTTPException(status_code=403, detail="Not authorised to access this assignment")
@@ -491,71 +596,84 @@ class FormService:
         # this avoids a crash when org_id is None (invite token before first refresh).
         template_id = assignment["form_template_id"]
         assignment_org_id = assignment["organisation_id"]
-        return await FormService.get_template(template_id, assignment_org_id)
+        return await FormService.get_template(conn, template_id, assignment_org_id)
 
     @staticmethod
-    async def get_draft_for_assignment(assignment_id: str, user_id: str) -> Optional[dict]:
+    async def get_draft_for_assignment(conn, assignment_id: str, user_id: str) -> Optional[dict]:
         """Return the existing draft submission for an assignment, or None."""
-        supabase = get_supabase()
         try:
-            resp = (
-                supabase.table("form_submissions")
-                .select("*, form_responses(*)")
-                .eq("assignment_id", assignment_id)
-                .eq("submitted_by", user_id)
-                .eq("status", "draft")
-                .eq("is_deleted", False)
-                .limit(1)
-                .execute()
+            sub = row(
+                conn,
+                """
+                SELECT fs.*, json_agg(fr.*) FILTER (WHERE fr.id IS NOT NULL) AS form_responses
+                FROM form_submissions fs
+                LEFT JOIN form_responses fr ON fr.submission_id = fs.id
+                WHERE fs.assignment_id = %s
+                  AND fs.submitted_by = %s
+                  AND fs.status = 'draft'
+                  AND fs.is_deleted = FALSE
+                GROUP BY fs.id
+                LIMIT 1
+                """,
+                (str(assignment_id), str(user_id)),
             )
-            if resp.data:
-                return resp.data[0]
+            if sub:
+                sub = dict(sub)
+                # Normalise nested responses key to match Supabase shape
+                sub["form_responses"] = sub.get("form_responses") or []
+                return sub
             return None
         except Exception:
             return None
 
     @staticmethod
-    async def create_submission(body: CreateSubmissionRequest, user_id: str, org_id: Optional[str] = None) -> dict:
-        supabase = get_supabase()
-
+    async def create_submission(
+        conn, body: CreateSubmissionRequest, user_id: str, org_id: Optional[str] = None
+    ) -> dict:
         # ── Verify form template belongs to the org ──
         if org_id:
-            tpl = supabase.table("form_templates").select("id").eq("id", str(body.form_template_id)).eq("organisation_id", org_id).maybe_single().execute()
-            if not tpl.data:
+            tpl_check = row(
+                conn,
+                "SELECT id FROM form_templates WHERE id = %s AND organisation_id = %s",
+                (str(body.form_template_id), str(org_id)),
+            )
+            if not tpl_check:
                 raise HTTPException(status_code=404, detail="Form template not found")
 
         # ── Pull-out: validate estimated_cost is present and > 0 ──────────────
         if body.status == "submitted":
             try:
-                tpl_type_check = (
-                    supabase.table("form_templates")
-                    .select("type")
-                    .eq("id", str(body.form_template_id))
-                    .maybe_single()
-                    .execute()
+                tpl_type_row = row(
+                    conn,
+                    "SELECT type FROM form_templates WHERE id = %s",
+                    (str(body.form_template_id),),
                 )
-                if tpl_type_check.data and tpl_type_check.data.get("type") == "pull_out":
-                    # Find the "Estimated Cost" field for this template
-                    cost_field_resp = (
-                        supabase.table("form_fields")
-                        .select("id")
-                        .eq("is_deleted", False)
-                        .ilike("label", "%estimated cost%")
-                        .in_("section_id", [
-                            s["id"] for s in (
-                                supabase.table("form_sections")
-                                .select("id")
-                                .eq("form_template_id", str(body.form_template_id))
-                                .execute()
-                            ).data or []
-                        ])
-                        .execute()
-                    )
-                    cost_field_ids = {str(r["id"]) for r in (cost_field_resp.data or [])}
+                if tpl_type_row and tpl_type_row.get("type") == "pull_out":
+                    # Find section IDs for this template
+                    sec_ids = [
+                        str(s["id"]) for s in rows(
+                            conn,
+                            "SELECT id FROM form_sections WHERE form_template_id = %s",
+                            (str(body.form_template_id),),
+                        )
+                    ]
+                    cost_field_ids: set = set()
+                    if sec_ids:
+                        cost_field_rows = rows(
+                            conn,
+                            """
+                            SELECT id FROM form_fields
+                            WHERE is_deleted = FALSE
+                              AND LOWER(label) LIKE %s
+                              AND section_id = ANY(%s::uuid[])
+                            """,
+                            ("%estimated cost%", sec_ids),
+                        )
+                        cost_field_ids = {str(r["id"]) for r in cost_field_rows}
                     if cost_field_ids:
                         cost_response = next(
                             (r for r in body.responses if str(r.field_id) in cost_field_ids),
-                            None
+                            None,
                         )
                         if not cost_response or not cost_response.value:
                             raise HTTPException(status_code=422, detail="Estimated cost is required for pull-out submissions.")
@@ -574,132 +692,157 @@ class FormService:
         existing_id: Optional[str] = None
         if body.assignment_id:
             try:
-                existing_resp = (
-                    supabase.table("form_submissions")
-                    .select("id")
-                    .eq("assignment_id", str(body.assignment_id))
-                    .eq("submitted_by", str(user_id))
-                    .eq("status", "draft")
-                    .eq("is_deleted", False)
-                    .limit(1)
-                    .execute()
+                existing_r = row(
+                    conn,
+                    """
+                    SELECT id FROM form_submissions
+                    WHERE assignment_id = %s
+                      AND submitted_by = %s
+                      AND status = 'draft'
+                      AND is_deleted = FALSE
+                    LIMIT 1
+                    """,
+                    (str(body.assignment_id), str(user_id)),
                 )
-                if existing_resp.data:
-                    existing_id = existing_resp.data[0]["id"]
+                if existing_r:
+                    existing_id = str(existing_r["id"])
             except Exception:
                 pass
 
         if existing_id:
             # Update the existing draft
-            update_data: dict = {"status": body.status}
+            update_fields = {"status": body.status}
             if body.status == "submitted":
-                update_data["submitted_at"] = datetime.now(timezone.utc).isoformat()
+                update_fields["submitted_at"] = datetime.now(timezone.utc).isoformat()
+            set_clause = ", ".join(f"{k} = %s" for k in update_fields)
+            vals = list(update_fields.values()) + [existing_id]
             try:
-                supabase.table("form_submissions").update(update_data).eq("id", existing_id).execute()
+                execute(
+                    conn,
+                    f"UPDATE form_submissions SET {set_clause} WHERE id = %s",
+                    tuple(vals),
+                )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
-            # Replace responses using insert-then-delete so that a failed
-            # insert never leaves the draft with zero responses.
-            # The actual delete happens below, after body.responses are
-            # inserted successfully (see the response insertion block).
             submission_id = existing_id
         else:
             # Insert a new submission
-            submission_data = {
-                "assignment_id": str(body.assignment_id),
-                "form_template_id": str(body.form_template_id),
-                "submitted_by": str(user_id),
-                "status": body.status,
-            }
-            if body.status == "submitted":
-                submission_data["submitted_at"] = datetime.now(timezone.utc).isoformat()
+            submitted_at = datetime.now(timezone.utc).isoformat() if body.status == "submitted" else None
 
             try:
-                sub_resp = supabase.table("form_submissions").insert(submission_data).execute()
+                sub = execute_returning(
+                    conn,
+                    """
+                    INSERT INTO form_submissions
+                        (assignment_id, form_template_id, submitted_by, status, submitted_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        str(body.assignment_id) if body.assignment_id else None,
+                        str(body.form_template_id),
+                        str(user_id),
+                        body.status,
+                        submitted_at,
+                    ),
+                )
             except Exception as e:
                 raise HTTPException(status_code=400, detail=str(e))
 
-            submission_id = sub_resp.data[0]["id"]
+            submission_id = str(sub["id"])
 
         if body.responses:
-            response_rows = [
-                {
-                    "submission_id": submission_id,
-                    "field_id": str(item.field_id),
-                    "value": item.value,
-                    **({"comment": item.comment} if item.comment else {}),
-                }
-                for item in body.responses
-            ]
-
             # When updating a draft, collect the IDs of the existing response
             # rows BEFORE inserting so we can delete them only after the
             # insert succeeds.  This prevents data loss if the insert fails.
             old_response_ids: list = []
             if existing_id:
                 try:
-                    old_resp = supabase.table("form_responses") \
-                        .select("id") \
-                        .eq("submission_id", existing_id) \
-                        .execute()
-                    old_response_ids = [r["id"] for r in (old_resp.data or [])]
+                    old_rows = rows(
+                        conn,
+                        "SELECT id FROM form_responses WHERE submission_id = %s",
+                        (existing_id,),
+                    )
+                    old_response_ids = [str(r["id"]) for r in old_rows]
                 except Exception:
                     pass  # non-fatal; worst case old rows remain until next save
 
-            try:
-                supabase.table("form_responses").insert(response_rows).execute()
-            except Exception as e:
-                import logging as _logging
-                _logging.getLogger(__name__).error(
-                    "Response insertion failed for submission %s: %s", submission_id, e
+            response_params = [
+                (
+                    submission_id,
+                    str(item.field_id),
+                    item.value,
+                    item.comment if item.comment else None,
                 )
+                for item in body.responses
+            ]
+
+            try:
+                execute_many(
+                    conn,
+                    """
+                    INSERT INTO form_responses (submission_id, field_id, value, comment)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    response_params,
+                )
+            except Exception as e:
+                _log.error("Response insertion failed for submission %s: %s", submission_id, e)
                 raise HTTPException(status_code=400, detail=f"Response insertion failed: {e}")
 
             # Insert succeeded — now safe to remove the previous response rows
             if old_response_ids:
                 try:
-                    supabase.table("form_responses").delete().in_("id", old_response_ids).execute()
+                    execute(
+                        conn,
+                        "DELETE FROM form_responses WHERE id = ANY(%s::uuid[])",
+                        (old_response_ids,),
+                    )
                 except Exception:
                     pass  # old rows orphaned but new data is safe
 
         # ── Pull-out: persist estimated_cost to form_submissions ─────────────
         if body.status == "submitted":
             try:
-                tpl_type_po = (
-                    supabase.table("form_templates")
-                    .select("type")
-                    .eq("id", str(body.form_template_id))
-                    .maybe_single()
-                    .execute()
+                tpl_type_po = row(
+                    conn,
+                    "SELECT type FROM form_templates WHERE id = %s",
+                    (str(body.form_template_id),),
                 )
-                if tpl_type_po.data and tpl_type_po.data.get("type") == "pull_out":
-                    cost_field_resp2 = (
-                        supabase.table("form_fields")
-                        .select("id")
-                        .eq("is_deleted", False)
-                        .ilike("label", "%estimated cost%")
-                        .in_("section_id", [
-                            s["id"] for s in (
-                                supabase.table("form_sections")
-                                .select("id")
-                                .eq("form_template_id", str(body.form_template_id))
-                                .execute()
-                            ).data or []
-                        ])
-                        .execute()
-                    )
-                    cost_field_ids2 = {str(r["id"]) for r in (cost_field_resp2.data or [])}
+                if tpl_type_po and tpl_type_po.get("type") == "pull_out":
+                    sec_ids2 = [
+                        str(s["id"]) for s in rows(
+                            conn,
+                            "SELECT id FROM form_sections WHERE form_template_id = %s",
+                            (str(body.form_template_id),),
+                        )
+                    ]
+                    cost_field_ids2: set = set()
+                    if sec_ids2:
+                        cost_field_rows2 = rows(
+                            conn,
+                            """
+                            SELECT id FROM form_fields
+                            WHERE is_deleted = FALSE
+                              AND LOWER(label) LIKE %s
+                              AND section_id = ANY(%s::uuid[])
+                            """,
+                            ("%estimated cost%", sec_ids2),
+                        )
+                        cost_field_ids2 = {str(r["id"]) for r in cost_field_rows2}
                     if cost_field_ids2:
                         cost_resp_item = next(
                             (r for r in body.responses if str(r.field_id) in cost_field_ids2),
-                            None
+                            None,
                         )
                         if cost_resp_item:
                             try:
-                                supabase.table("form_submissions").update(
-                                    {"estimated_cost": float(cost_resp_item.value)}
-                                ).eq("id", submission_id).execute()
+                                execute(
+                                    conn,
+                                    "UPDATE form_submissions SET estimated_cost = %s WHERE id = %s",
+                                    (float(cost_resp_item.value), submission_id),
+                                )
                             except Exception:
                                 pass
             except Exception:
@@ -708,13 +851,12 @@ class FormService:
         # ── Audit scoring: calculate and persist score on final submission ──
         if body.status == "submitted":
             try:
-                template_type_resp = (
-                    supabase.table("form_templates")
-                    .select("type, organisation_id")
-                    .eq("id", str(body.form_template_id))
-                    .execute()
+                tpl_scoring = row(
+                    conn,
+                    "SELECT type, organisation_id FROM form_templates WHERE id = %s",
+                    (str(body.form_template_id),),
                 )
-                if template_type_resp.data and template_type_resp.data[0].get("type") == "audit":
+                if tpl_scoring and tpl_scoring.get("type") == "audit":
                     responses_as_dicts = [
                         {"field_id": str(item.field_id), "value": item.value}
                         for item in body.responses
@@ -723,31 +865,29 @@ class FormService:
                         submission_id=submission_id,
                         form_template_id=str(body.form_template_id),
                         responses=responses_as_dicts,
-                        org_id=template_type_resp.data[0].get("organisation_id", ""),
+                        org_id=tpl_scoring.get("organisation_id", ""),
                     )
-                    supabase.table("form_submissions").update({
-                        "overall_score": score_result.overall_score,
-                        "passed": score_result.passed,
-                    }).eq("id", submission_id).execute()
+                    execute(
+                        conn,
+                        "UPDATE form_submissions SET overall_score = %s, passed = %s WHERE id = %s",
+                        (score_result.overall_score, score_result.passed, submission_id),
+                    )
             except Exception as score_err:
                 # Scoring failure should not block submission persistence
-                import logging
-                logging.getLogger(__name__).error("Audit scoring failed: %s", score_err)
+                _log.error("Audit scoring failed: %s", score_err)
 
         # Auto-trigger form_submitted / audit_submitted workflows
         if body.status == "submitted":
             try:
                 from services.workflow_service import trigger_workflows_for_event
-                tpl_resp = (
-                    supabase.table("form_templates")
-                    .select("type, organisation_id")
-                    .eq("id", str(body.form_template_id))
-                    .execute()
+                tpl_wf = row(
+                    conn,
+                    "SELECT type, organisation_id FROM form_templates WHERE id = %s",
+                    (str(body.form_template_id),),
                 )
-                if tpl_resp.data:
-                    _tpl_org_id = tpl_resp.data[0].get("organisation_id", "")
-                    tpl_type = tpl_resp.data[0].get("type", "")
-                    # Trigger for all submitted forms
+                if tpl_wf:
+                    _tpl_org_id = tpl_wf.get("organisation_id", "")
+                    tpl_type = tpl_wf.get("type", "")
                     await trigger_workflows_for_event(
                         event_type="form_submitted",
                         org_id=_tpl_org_id,
@@ -755,7 +895,6 @@ class FormService:
                         triggered_by=user_id,
                         template_id=str(body.form_template_id),
                     )
-                    # Additionally trigger audit_submitted for audit-type forms
                     if tpl_type == "audit":
                         await trigger_workflows_for_event(
                             event_type="audit_submitted",
@@ -765,29 +904,41 @@ class FormService:
                             template_id=str(body.form_template_id),
                         )
             except Exception as _wf_exc:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "Workflow trigger failed for submission %s: %s", submission_id, _wf_exc
-                )
+                _log.warning("Workflow trigger failed for submission %s: %s", submission_id, _wf_exc)
 
         # Notify the assigning manager when a form is submitted for review
         if body.status == "submitted":
             try:
-                # Find the assignment to get assigned_by
-                assign_resp = supabase.table("form_assignments").select(
-                    "assigned_by, assigned_to_location_id, form_templates(title)"
-                ).eq("id", str(body.assignment_id)).maybe_single().execute()
-                assign_data = assign_resp.data or {}
+                assign_r = row(
+                    conn,
+                    """
+                    SELECT fa.assigned_by, fa.assigned_to_location_id,
+                           ft.title AS template_title, fa.organisation_id
+                    FROM form_assignments fa
+                    JOIN form_templates ft ON ft.id = fa.form_template_id
+                    WHERE fa.id = %s
+                    """,
+                    (str(body.assignment_id),),
+                )
+                assign_data = dict(assign_r) if assign_r else {}
                 assigned_by = assign_data.get("assigned_by")
-                tmpl_title = (assign_data.get("form_templates") or {}).get("title", "Form")
+                tmpl_title = assign_data.get("template_title", "Form")
                 if assigned_by:
-                    submitter_resp = supabase.table("profiles").select("full_name").eq("id", str(user_id)).maybe_single().execute()
-                    submitter_name = (submitter_resp.data or {}).get("full_name", "Someone")
+                    submitter_r = row(
+                        conn,
+                        "SELECT full_name FROM profiles WHERE id = %s",
+                        (str(user_id),),
+                    )
+                    submitter_name = (submitter_r or {}).get("full_name", "Someone")
                     loc_name = ""
                     loc_id = assign_data.get("assigned_to_location_id")
                     if loc_id:
-                        loc_resp2 = supabase.table("locations").select("name").eq("id", loc_id).maybe_single().execute()
-                        loc_name = (loc_resp2.data or {}).get("name", "")
+                        loc_r = row(
+                            conn,
+                            "SELECT name FROM locations WHERE id = %s",
+                            (str(loc_id),),
+                        )
+                        loc_name = (loc_r or {}).get("name", "")
                     import asyncio as _asyncio
                     from services import notification_service as _ns
                     _notify_org_id = org_id or assign_data.get("organisation_id", "")
@@ -803,46 +954,55 @@ class FormService:
             except Exception:
                 pass
 
-        # Fetch the freshly-created submission by ID alone — no org filter needed here
+        # Fetch the freshly-created submission — no org filter needed here
         # because the row was just inserted by this user in this request.
-        return await FormService.get_submission(submission_id, user_id)
+        return await FormService.get_submission(conn, submission_id, user_id)
 
     @staticmethod
-    async def get_submission(submission_id: str, user_id: str, org_id: Optional[str] = None) -> dict:
-        supabase = get_supabase()
-
+    async def get_submission(
+        conn, submission_id: str, user_id: str, org_id: Optional[str] = None
+    ) -> dict:
         try:
-            query = (
-                supabase.table("form_submissions")
-                .select("*, profiles!submitted_by(full_name), form_templates(title, type, organisation_id, audit_configs(passing_score))")
-                .eq("id", str(submission_id))
+            extra_filter = "AND ft.organisation_id = %s" if org_id else ""
+            params = (str(submission_id), str(org_id)) if org_id else (str(submission_id),)
+
+            sub = row(
+                conn,
+                f"""
+                SELECT fs.*,
+                       p.full_name AS submitted_by_full_name,
+                       row_to_json(ft) AS form_templates
+                FROM form_submissions fs
+                LEFT JOIN profiles p ON p.id = fs.submitted_by
+                LEFT JOIN form_templates ft ON ft.id = fs.form_template_id
+                WHERE fs.id = %s
+                {extra_filter}
+                """,
+                params,
             )
-            if org_id:
-                query = query.eq("organisation_id", org_id)
-            sub_resp = query.execute()
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        if not sub_resp.data:
+        if not sub:
             raise HTTPException(status_code=404, detail="Submission not found")
 
-        submission = sub_resp.data[0]
+        sub = dict(sub)
 
         try:
-            resp_resp = (
-                supabase.table("form_responses")
-                .select("*")
-                .eq("submission_id", str(submission_id))
-                .execute()
+            response_rows = rows(
+                conn,
+                "SELECT * FROM form_responses WHERE submission_id = %s",
+                (str(submission_id),),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        submission["responses"] = resp_resp.data
-        return submission
+        sub["responses"] = [dict(r) for r in response_rows]
+        return sub
 
     @staticmethod
     async def list_submissions(
+        conn,
         org_id: str,
         template_id: Optional[str] = None,
         user_id_filter: Optional[str] = None,
@@ -854,81 +1014,111 @@ class FormService:
         page_size: int = 20,
         team_user_ids: Optional[list] = None,
     ) -> PaginatedResponse[dict]:
-        supabase = get_supabase()
         offset = (page - 1) * page_size
 
-        try:
-            query = (
-                supabase.table("form_submissions")
-                .select(
-                    "*, profiles!submitted_by(full_name), form_templates!inner(title, type, organisation_id), "
-                    "workflow_stage_instances!form_submission_id(workflow_instance_id, workflow_instances(workflow_definitions(name)))",
-                    count="exact",
-                )
-                .eq("form_templates.organisation_id", str(org_id))
-            )
-            if template_id:
-                query = query.eq("form_template_id", str(template_id))
-            if team_user_ids:
-                query = query.in_("submitted_by", team_user_ids)
-            elif user_id_filter:
-                query = query.eq("submitted_by", str(user_id_filter))
-            if location_id:
-                query = query.eq("profiles.location_id", str(location_id))
-            if status:
-                query = query.eq("status", status)
-            if from_dt:
-                query = query.gte("created_at", from_dt.isoformat())
-            if to_dt:
-                query = query.lte("created_at", to_dt.isoformat())
+        where = ["ft.organisation_id = %s", "fs.is_deleted = FALSE"]
+        params: list = [str(org_id)]
 
-            response = query.range(offset, offset + page_size - 1).execute()
+        if template_id:
+            where.append("fs.form_template_id = %s")
+            params.append(str(template_id))
+        if team_user_ids:
+            where.append("fs.submitted_by = ANY(%s::uuid[])")
+            params.append(list(team_user_ids))
+        elif user_id_filter:
+            where.append("fs.submitted_by = %s")
+            params.append(str(user_id_filter))
+        if location_id:
+            where.append("p.location_id = %s")
+            params.append(str(location_id))
+        if status:
+            where.append("fs.status = %s")
+            params.append(status)
+        if from_dt:
+            where.append("fs.created_at >= %s")
+            params.append(from_dt.isoformat())
+        if to_dt:
+            where.append("fs.created_at <= %s")
+            params.append(to_dt.isoformat())
+
+        where_sql = " AND ".join(where)
+
+        try:
+            count_r = row(
+                conn,
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM form_submissions fs
+                JOIN form_templates ft ON ft.id = fs.form_template_id
+                LEFT JOIN profiles p ON p.id = fs.submitted_by
+                WHERE {where_sql}
+                """,
+                tuple(params),
+            )
+            total_count = count_r["cnt"] if count_r else 0
+
+            data_rows = rows(
+                conn,
+                f"""
+                SELECT fs.*,
+                       p.full_name AS submitted_by_full_name,
+                       row_to_json(ft) AS form_templates
+                FROM form_submissions fs
+                JOIN form_templates ft ON ft.id = fs.form_template_id
+                LEFT JOIN profiles p ON p.id = fs.submitted_by
+                WHERE {where_sql}
+                ORDER BY fs.created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [page_size, offset]),
+            )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        total_count = response.count if response.count is not None else len(response.data)
         return PaginatedResponse(
-            items=response.data,
+            items=[dict(r) for r in data_rows],
             total_count=total_count,
             page=page,
             page_size=page_size,
         )
 
     @staticmethod
-    async def get_template_stats(template_id: str, org_id: str) -> TemplateStatsResponse:
-        supabase = get_supabase()
+    async def get_template_stats(conn, template_id: str, org_id: str) -> TemplateStatsResponse:
         # Count active assignments for this template within the org
         try:
-            assign_resp = (
-                supabase.table("form_assignments")
-                .select("id", count="exact")
-                .eq("form_template_id", template_id)
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .execute()
+            assign_count_r = row(
+                conn,
+                """
+                SELECT COUNT(*) AS cnt
+                FROM form_assignments
+                WHERE form_template_id = %s
+                  AND organisation_id = %s
+                  AND is_deleted = FALSE
+                """,
+                (str(template_id), str(org_id)),
             )
-            assigned_count = assign_resp.count if assign_resp.count is not None else 0
+            assigned_count = assign_count_r["cnt"] if assign_count_r else 0
         except Exception:
             assigned_count = 0
 
         # Count submitted/approved submissions scoped to the org via assignments
         try:
-            sub_resp = (
-                supabase.table("form_submissions")
-                .select(
-                    "id, submitted_at, form_assignments!inner(organisation_id)",
-                    count="exact",
-                )
-                .eq("form_template_id", template_id)
-                .eq("form_assignments.organisation_id", str(org_id))
-                .in_("status", ["submitted", "approved"])
-                .execute()
+            sub_rows = rows(
+                conn,
+                """
+                SELECT fs.submitted_at
+                FROM form_submissions fs
+                JOIN form_assignments fa ON fa.id = fs.assignment_id
+                WHERE fs.form_template_id = %s
+                  AND fa.organisation_id = %s
+                  AND fs.status IN ('submitted', 'approved')
+                """,
+                (str(template_id), str(org_id)),
             )
-            completed_count = sub_resp.count if sub_resp.count is not None else 0
-            # Get latest submitted_at
+            completed_count = len(sub_rows)
             latest = None
-            for row in (sub_resp.data or []):
-                sat = row.get("submitted_at")
+            for r in sub_rows:
+                sat = r.get("submitted_at")
                 if sat and (latest is None or sat > latest):
                     latest = sat
         except Exception:
@@ -944,22 +1134,29 @@ class FormService:
 
     @staticmethod
     async def review_submission(
-        submission_id: str, body: ReviewSubmissionRequest, reviewer_id: str, org_id: str
+        conn,
+        submission_id: str,
+        body: ReviewSubmissionRequest,
+        reviewer_id: str,
+        org_id: str,
     ) -> dict:
-        supabase = get_supabase()
-
         # Fetch submission and verify it belongs to the reviewer's org via form template
-        existing = (
-            supabase.table("form_submissions")
-            .select("id, passed, form_template_id, form_templates(organisation_id)")
-            .eq("id", str(submission_id))
-            .execute()
+        existing = row(
+            conn,
+            """
+            SELECT fs.id, fs.passed, fs.form_template_id,
+                   ft.organisation_id AS template_org_id
+            FROM form_submissions fs
+            JOIN form_templates ft ON ft.id = fs.form_template_id
+            WHERE fs.id = %s
+            """,
+            (str(submission_id),),
         )
-        if not existing.data:
+        if not existing:
             raise HTTPException(status_code=404, detail="Submission not found")
 
-        template_org = (existing.data[0].get("form_templates") or {}).get("organisation_id")
-        if template_org != str(org_id):
+        existing = dict(existing)
+        if existing.get("template_org_id") != str(org_id):
             raise HTTPException(status_code=403, detail="Not authorised to review this submission")
 
         updates = {
@@ -970,36 +1167,53 @@ class FormService:
         if body.manager_comment is not None:
             updates["manager_comment"] = body.manager_comment
 
+        set_clause = ", ".join(f"{k} = %s" for k in updates)
+        vals = list(updates.values()) + [str(submission_id)]
+
         try:
-            response = (
-                supabase.table("form_submissions")
-                .update(updates)
-                .eq("id", str(submission_id))
-                .execute()
+            updated = execute_returning(
+                conn,
+                f"UPDATE form_submissions SET {set_clause} WHERE id = %s RETURNING *",
+                tuple(vals),
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         # ── CAP creation on approval of a failed audit ──────────────────────
         if body.status == "approved":
-            sub_data = existing.data[0]
-            passed = sub_data.get("passed")
-            form_template_id = sub_data.get("form_template_id")
-            location_id = (sub_data.get("form_assignments") or {}).get("assigned_to_location_id")
+            passed = existing.get("passed")
+            form_template_id = existing.get("form_template_id")
+            # location_id requires separate lookup via the assignment
+            location_id = None
+            try:
+                assign_loc = row(
+                    conn,
+                    """
+                    SELECT fa.assigned_to_location_id
+                    FROM form_assignments fa
+                    JOIN form_submissions fs ON fs.assignment_id = fa.id
+                    WHERE fs.id = %s
+                    LIMIT 1
+                    """,
+                    (str(submission_id),),
+                )
+                if assign_loc:
+                    location_id = assign_loc.get("assigned_to_location_id")
+            except Exception:
+                pass
 
             if passed is False and form_template_id and location_id:
                 try:
                     from services.audit_scoring_service import calculate_audit_score, create_corrective_actions
 
-                    resp_rows = (
-                        supabase.table("form_responses")
-                        .select("field_id, value")
-                        .eq("submission_id", str(submission_id))
-                        .execute()
+                    resp_rows = rows(
+                        conn,
+                        "SELECT field_id, value FROM form_responses WHERE submission_id = %s",
+                        (str(submission_id),),
                     )
                     responses_as_dicts = [
                         {"field_id": r["field_id"], "value": r["value"]}
-                        for r in (resp_rows.data or [])
+                        for r in resp_rows
                     ]
 
                     score_result = await calculate_audit_score(
@@ -1019,7 +1233,6 @@ class FormService:
                             responses=responses_as_dicts,
                         )
                 except Exception as cap_err:
-                    import logging
-                    logging.getLogger(__name__).error("CAP creation failed on approval: %s", cap_err)
+                    _log.error("CAP creation failed on approval: %s", cap_err)
 
-        return response.data[0]
+        return dict(updated)

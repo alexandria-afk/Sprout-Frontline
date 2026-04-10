@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import httpx
 import anthropic
-from services.supabase_client import get_supabase
+from services.db import row, rows, execute, execute_returning
 from services.industry_context import get_industry_context
 from models.lms import (
     CreateCourseRequest,
@@ -66,212 +66,359 @@ Rules:
 class LmsService:
 
     @staticmethod
-    async def list_published_courses(org_id: str, user_id: str, page: int = 1, page_size: int = 20):
+    async def list_published_courses(conn, org_id: str, user_id: str, page: int = 1, page_size: int = 20):
         """Courses available to a learner — published and not deleted."""
-        supabase = get_supabase()
         offset = (page - 1) * page_size
-        result = supabase.table("courses").select(
-            "*, course_modules(id, title, module_type, display_order, estimated_duration_mins)"
-        ).eq("organisation_id", org_id).eq("is_published", True).eq("is_deleted", False).eq("is_active", True).order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
 
-        # Attach enrollment status for this user
-        if result.data:
-            course_ids = [c["id"] for c in result.data]
-            enrollments = supabase.table("course_enrollments").select("course_id, status, score, completed_at").eq("user_id", user_id).eq("is_deleted", False).in_("course_id", course_ids).execute()
-            enroll_map = {e["course_id"]: e for e in (enrollments.data or [])}
-            for course in result.data:
-                course["enrollment"] = enroll_map.get(course["id"])
+        courses = rows(
+            conn,
+            """
+            SELECT c.*
+            FROM courses c
+            WHERE c.organisation_id = %s
+              AND c.is_published = TRUE
+              AND c.is_deleted = FALSE
+              AND c.is_active = TRUE
+            ORDER BY c.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (org_id, page_size, offset),
+        )
 
-        count_result = supabase.table("courses").select("id", count="exact").eq("organisation_id", org_id).eq("is_published", True).eq("is_deleted", False).execute()
-        return {"items": result.data or [], "total_count": count_result.count or 0, "page": page, "page_size": page_size}
+        if courses:
+            course_ids = [c["id"] for c in courses]
+            # Fetch modules for all courses in one query
+            all_modules = rows(
+                conn,
+                """
+                SELECT id, course_id, title, module_type, display_order, estimated_duration_mins
+                FROM course_modules
+                WHERE course_id = ANY(%s::uuid[]) AND is_deleted = FALSE
+                ORDER BY display_order
+                """,
+                (course_ids,),
+            )
+            mod_map: dict = {}
+            for m in all_modules:
+                mod_map.setdefault(str(m["course_id"]), []).append(dict(m))
+            for c in courses:
+                c = dict(c) if not isinstance(c, dict) else c
+                c["course_modules"] = mod_map.get(str(c["id"]), [])
+
+            # Attach enrollment status for this user
+            placeholders = ", ".join(["%s"] * len(course_ids))
+            enrollments = rows(
+                conn,
+                f"""
+                SELECT course_id, status, score, completed_at
+                FROM course_enrollments
+                WHERE user_id = %s AND is_deleted = FALSE AND course_id IN ({placeholders})
+                """,
+                tuple([user_id] + course_ids),
+            )
+            enroll_map = {str(e["course_id"]): e for e in enrollments}
+            for c in courses:
+                c["enrollment"] = enroll_map.get(str(c["id"]))
+
+        count_row = row(
+            conn,
+            "SELECT COUNT(*) AS total FROM courses WHERE organisation_id = %s AND is_published = TRUE AND is_deleted = FALSE",
+            (org_id,),
+        )
+        total_count = (count_row or {}).get("total", 0)
+        return {"items": courses, "total_count": total_count, "page": page, "page_size": page_size}
 
     @staticmethod
-    async def list_managed_courses(org_id: str, page: int = 1, page_size: int = 20, search: Optional[str] = None):
+    async def list_managed_courses(conn, org_id: str, page: int = 1, page_size: int = 20, search: Optional[str] = None):
         """All courses (including drafts) for managers."""
-        supabase = get_supabase()
         offset = (page - 1) * page_size
-        q = supabase.table("courses").select(
-            "*, course_modules(id, module_type)"
-        ).eq("organisation_id", org_id).eq("is_deleted", False).order("created_at", desc=True)
+
+        conditions = ["c.organisation_id = %s", "c.is_deleted = FALSE"]
+        params: list = [org_id]
         if search:
-            q = q.ilike("title", f"%{search}%")
-        result = q.range(offset, offset + page_size - 1).execute()
+            conditions.append("c.title ILIKE %s")
+            params.append(f"%{search}%")
 
-        count_q = supabase.table("courses").select("id", count="exact").eq("organisation_id", org_id).eq("is_deleted", False)
-        count_result = count_q.execute()
-        return {"items": result.data or [], "total_count": count_result.count or 0, "page": page, "page_size": page_size}
+        where_clause = " AND ".join(conditions)
+
+        courses = rows(
+            conn,
+            f"""
+            SELECT c.*
+            FROM courses c
+            WHERE {where_clause}
+            ORDER BY c.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params) + (page_size, offset),
+        )
+
+        if courses:
+            course_ids = [c["id"] for c in courses]
+            all_modules = rows(
+                conn,
+                "SELECT id, course_id, module_type FROM course_modules WHERE course_id = ANY(%s::uuid[])",
+                (course_ids,),
+            )
+            mod_map: dict = {}
+            for m in all_modules:
+                mod_map.setdefault(str(m["course_id"]), []).append(dict(m))
+            for c in courses:
+                c["course_modules"] = mod_map.get(str(c["id"]), [])
+
+        count_row = row(conn, f"SELECT COUNT(*) AS total FROM courses c WHERE {where_clause}", tuple(params))
+        total_count = (count_row or {}).get("total", 0)
+        return {"items": courses, "total_count": total_count, "page": page, "page_size": page_size}
 
     @staticmethod
-    async def get_course(course_id: str, org_id: str):
+    async def get_course(conn, course_id: str, org_id: str):
         """Get full course with all modules, slides, and questions (excluding soft-deleted)."""
-        supabase = get_supabase()
-        result = supabase.table("courses").select(
-            "*, course_modules(*, course_slides(*), quiz_questions(*))"
-        ).eq("id", course_id).eq("organisation_id", org_id).eq("is_deleted", False).single().execute()
-        data = result.data
-        if data:
-            # Filter out soft-deleted nested records (PostgREST doesn't filter nested is_deleted)
-            mods = [m for m in (data.get("course_modules") or []) if not m.get("is_deleted", False)]
-            for mod in mods:
-                mod["course_slides"] = [s for s in (mod.get("course_slides") or []) if not s.get("is_deleted", False)]
-                mod["quiz_questions"] = [q for q in (mod.get("quiz_questions") or []) if not q.get("is_deleted", False)]
-            data["course_modules"] = mods
-        return data
+        course = row(
+            conn,
+            "SELECT * FROM courses WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (course_id, org_id),
+        )
+        if not course:
+            return None
+        course = dict(course)
+
+        modules = rows(
+            conn,
+            "SELECT * FROM course_modules WHERE course_id = %s AND is_deleted = FALSE ORDER BY display_order",
+            (course_id,),
+        )
+
+        mod_ids = [m["id"] for m in modules]
+        slides_map: dict = {}
+        questions_map: dict = {}
+        if mod_ids:
+            all_slides = rows(
+                conn,
+                "SELECT * FROM course_slides WHERE module_id = ANY(%s::uuid[]) AND is_deleted = FALSE ORDER BY display_order",
+                (mod_ids,),
+            )
+            for s in all_slides:
+                slides_map.setdefault(str(s["module_id"]), []).append(dict(s))
+
+            all_questions = rows(
+                conn,
+                "SELECT * FROM quiz_questions WHERE module_id = ANY(%s::uuid[]) AND is_deleted = FALSE ORDER BY display_order",
+                (mod_ids,),
+            )
+            for q in all_questions:
+                questions_map.setdefault(str(q["module_id"]), []).append(dict(q))
+
+        for mod in modules:
+            mod = dict(mod)
+            mod["course_slides"] = slides_map.get(str(mod["id"]), [])
+            mod["quiz_questions"] = questions_map.get(str(mod["id"]), [])
+
+        course["course_modules"] = [dict(m) for m in modules]
+        # Re-attach enriched module dicts
+        enriched_mods = []
+        for mod in modules:
+            mod_dict = dict(mod)
+            mod_dict["course_slides"] = slides_map.get(str(mod_dict["id"]), [])
+            mod_dict["quiz_questions"] = questions_map.get(str(mod_dict["id"]), [])
+            enriched_mods.append(mod_dict)
+        course["course_modules"] = enriched_mods
+        return course
 
     @staticmethod
-    async def create_course(body: CreateCourseRequest, org_id: str, created_by: str):
+    async def create_course(conn, body: CreateCourseRequest, org_id: str, created_by: str):
         """Create course with optional modules."""
-        supabase = get_supabase()
-        course_data = {
-            "organisation_id": org_id,
-            "created_by": created_by,
-            "title": body.title,
-            "description": body.description,
-            "thumbnail_url": body.thumbnail_url,
-            "estimated_duration_mins": body.estimated_duration_mins,
-            "passing_score": body.passing_score,
-            "max_retakes": body.max_retakes,
-            "cert_validity_days": body.cert_validity_days,
-            "is_mandatory": body.is_mandatory,
-            "target_roles": body.target_roles,
-            "target_location_ids": body.target_location_ids,
-            "language": body.language,
-            "is_published": False,
-            "ai_generated": False,
-        }
-        course_result = supabase.table("courses").insert(course_data).execute()
-        course = course_result.data[0]
+        course = execute_returning(
+            conn,
+            """
+            INSERT INTO courses
+                (organisation_id, created_by, title, description, thumbnail_url,
+                 estimated_duration_mins, passing_score, max_retakes, cert_validity_days,
+                 is_mandatory, target_roles, target_location_ids, language,
+                 is_published, ai_generated)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, FALSE, FALSE)
+            RETURNING *
+            """,
+            (
+                org_id, created_by, body.title, body.description, body.thumbnail_url,
+                body.estimated_duration_mins, body.passing_score, body.max_retakes,
+                body.cert_validity_days, body.is_mandatory,
+                json.dumps(body.target_roles), json.dumps(body.target_location_ids),
+                body.language,
+            ),
+        )
         course_id = course["id"]
 
         # Insert modules
         for i, mod in enumerate(body.modules):
-            mod_data = {
-                "course_id": course_id,
-                "title": mod.title,
-                "module_type": mod.module_type,
-                "content_url": mod.content_url,
-                "display_order": mod.display_order or i,
-                "is_required": mod.is_required,
-                "estimated_duration_mins": mod.estimated_duration_mins,
-            }
-            mod_result = supabase.table("course_modules").insert(mod_data).execute()
-            mod_id = mod_result.data[0]["id"]
+            mod_row = execute_returning(
+                conn,
+                """
+                INSERT INTO course_modules
+                    (course_id, title, module_type, content_url, display_order, is_required, estimated_duration_mins)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    course_id, mod.title, mod.module_type, mod.content_url,
+                    mod.display_order if mod.display_order is not None else i,
+                    mod.is_required, mod.estimated_duration_mins,
+                ),
+            )
+            mod_id = mod_row["id"]
 
             if mod.module_type == "slides":
                 for j, slide in enumerate(mod.slides):
-                    supabase.table("course_slides").insert({
-                        "module_id": mod_id,
-                        "title": slide.title,
-                        "body": slide.body,
-                        "image_url": slide.image_url,
-                        "display_order": slide.display_order or j,
-                    }).execute()
+                    execute(
+                        conn,
+                        "INSERT INTO course_slides (module_id, title, body, image_url, display_order) VALUES (%s, %s, %s, %s, %s)",
+                        (mod_id, slide.title, slide.body, slide.image_url, slide.display_order if slide.display_order is not None else j),
+                    )
             elif mod.module_type == "quiz":
                 for j, q in enumerate(mod.questions):
-                    supabase.table("quiz_questions").insert({
-                        "module_id": mod_id,
-                        "question": q.question,
-                        "question_type": q.question_type,
-                        "image_url": q.image_url,
-                        "options": [o.model_dump() for o in q.options],
-                        "explanation": q.explanation,
-                        "display_order": q.display_order or j,
-                    }).execute()
+                    execute(
+                        conn,
+                        "INSERT INTO quiz_questions (module_id, question, question_type, image_url, options, explanation, display_order) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)",
+                        (
+                            mod_id, q.question, q.question_type, q.image_url,
+                            json.dumps([o.model_dump() for o in q.options]),
+                            q.explanation,
+                            q.display_order if q.display_order is not None else j,
+                        ),
+                    )
 
-        return await LmsService.get_course(course_id, org_id)
+        return await LmsService.get_course(conn, course_id, org_id)
 
     @staticmethod
-    async def update_course(course_id: str, body: UpdateCourseRequest, org_id: str):
-        supabase = get_supabase()
+    async def update_course(conn, course_id: str, body: UpdateCourseRequest, org_id: str):
         updates = {k: v for k, v in body.model_dump().items() if v is not None}
         if updates:
-            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-            supabase.table("courses").update(updates).eq("id", course_id).eq("organisation_id", org_id).execute()
-        return await LmsService.get_course(course_id, org_id)
+            set_parts = []
+            values = []
+            for k, v in updates.items():
+                if k in ("target_roles", "target_location_ids") and isinstance(v, list):
+                    set_parts.append(f"{k} = %s::jsonb")
+                    values.append(json.dumps(v))
+                else:
+                    set_parts.append(f"{k} = %s")
+                    values.append(v)
+            set_clause = ", ".join(set_parts)
+            values.extend([course_id, org_id])
+            execute(
+                conn,
+                f"UPDATE courses SET {set_clause}, updated_at = NOW() WHERE id = %s AND organisation_id = %s",
+                tuple(values),
+            )
+        return await LmsService.get_course(conn, course_id, org_id)
 
     @staticmethod
-    async def publish_course(course_id: str, org_id: str):
-        supabase = get_supabase()
-        supabase.table("courses").update({
-            "is_published": True,
-            "was_published": True,
-            "updated_at": "now()",
-        }).eq("id", course_id).eq("organisation_id", org_id).execute()
+    async def publish_course(conn, course_id: str, org_id: str):
+        execute(
+            conn,
+            "UPDATE courses SET is_published = TRUE, was_published = TRUE, updated_at = NOW() WHERE id = %s AND organisation_id = %s",
+            (course_id, org_id),
+        )
         return {"success": True}
 
     @staticmethod
-    async def get_enrollment_stats(course_id: str, org_id: str):
+    async def get_enrollment_stats(conn, course_id: str, org_id: str):
         """Return active (in-progress / not-started) and completed enrollment counts."""
-        supabase = get_supabase()
-        # Verify ownership
-        check = supabase.table("courses").select("id").eq("id", course_id).eq("organisation_id", org_id).maybe_single().execute()
-        if not check.data:
+        check = row(conn, "SELECT id FROM courses WHERE id = %s AND organisation_id = %s", (course_id, org_id))
+        if not check:
             return {"active_count": 0, "completed_count": 0}
 
-        active = supabase.table("course_enrollments").select("id", count="exact").eq("course_id", course_id).in_("status", ["in_progress", "not_started"]).eq("is_deleted", False).execute()
-        completed = supabase.table("course_enrollments").select("id", count="exact").eq("course_id", course_id).in_("status", ["passed", "failed"]).eq("is_deleted", False).execute()
+        active_row = row(
+            conn,
+            "SELECT COUNT(*) AS cnt FROM course_enrollments WHERE course_id = %s AND status IN ('in_progress', 'not_started') AND is_deleted = FALSE",
+            (course_id,),
+        )
+        completed_row = row(
+            conn,
+            "SELECT COUNT(*) AS cnt FROM course_enrollments WHERE course_id = %s AND status IN ('passed', 'failed') AND is_deleted = FALSE",
+            (course_id,),
+        )
         return {
-            "active_count": active.count or 0,
-            "completed_count": completed.count or 0,
+            "active_count": (active_row or {}).get("cnt", 0),
+            "completed_count": (completed_row or {}).get("cnt", 0),
         }
 
     @staticmethod
-    async def unpublish_course(course_id: str, org_id: str, cancel_enrollments: bool = False):
+    async def unpublish_course(conn, course_id: str, org_id: str, cancel_enrollments: bool = False):
         """Unpublish a course. Optionally cancel all pending enrollments."""
-        supabase = get_supabase()
-        supabase.table("courses").update({
-            "is_published": False,
-            "was_published": True,
-            "updated_at": "now()",
-        }).eq("id", course_id).eq("organisation_id", org_id).execute()
-
+        execute(
+            conn,
+            "UPDATE courses SET is_published = FALSE, was_published = TRUE, updated_at = NOW() WHERE id = %s AND organisation_id = %s",
+            (course_id, org_id),
+        )
         if cancel_enrollments:
-            supabase.table("course_enrollments").update({
-                "is_deleted": True,
-                "updated_at": "now()",
-            }).eq("course_id", course_id).in_("status", ["in_progress", "not_started"]).execute()
-
+            execute(
+                conn,
+                "UPDATE course_enrollments SET is_deleted = TRUE, updated_at = NOW() WHERE course_id = %s AND status IN ('in_progress', 'not_started')",
+                (course_id,),
+            )
         return {"success": True}
 
     @staticmethod
-    async def delete_course(course_id: str, org_id: str):
-        supabase = get_supabase()
-        supabase.table("courses").update({"is_deleted": True, "updated_at": "now()"}).eq("id", course_id).eq("organisation_id", org_id).execute()
+    async def delete_course(conn, course_id: str, org_id: str):
+        execute(
+            conn,
+            "UPDATE courses SET is_deleted = TRUE, updated_at = NOW() WHERE id = %s AND organisation_id = %s",
+            (course_id, org_id),
+        )
         return {"success": True}
 
     @staticmethod
-    async def start_ai_generation(body: GenerateCourseRequest, org_id: str, created_by: str):
+    async def start_ai_generation(conn, body: GenerateCourseRequest, org_id: str, created_by: str):
         """Queue an AI course generation job."""
-        supabase = get_supabase()
-        job = supabase.table("ai_course_jobs").insert({
-            "organisation_id": org_id,
-            "created_by": created_by,
-            "input_type": body.input_type,
-            "input_data": body.input_data,
-            "input_file_url": body.input_file_url,
-            "status": "queued",
-        }).execute()
-        return job.data[0]
+        job = execute_returning(
+            conn,
+            """
+            INSERT INTO ai_course_jobs (organisation_id, created_by, input_type, input_data, input_file_url, status)
+            VALUES (%s, %s, %s, %s, %s, 'queued')
+            RETURNING *
+            """,
+            (org_id, created_by, body.input_type, body.input_data, body.input_file_url),
+        )
+        return job
 
     @staticmethod
-    async def get_ai_job(job_id: str, org_id: str):
-        supabase = get_supabase()
-        result = supabase.table("ai_course_jobs").select("*").eq("id", job_id).eq("organisation_id", org_id).single().execute()
-        return result.data
+    async def get_ai_job(conn, job_id: str, org_id: str):
+        result = row(
+            conn,
+            "SELECT * FROM ai_course_jobs WHERE id = %s AND organisation_id = %s",
+            (job_id, org_id),
+        )
+        return result
 
     @staticmethod
     async def process_generation_job(job_id: str, body: GenerateCourseRequest, org_id: str, created_by: str):
-        """Background task — calls Claude to generate the course, then creates it in DB."""
+        """Background task — calls Claude to generate the course, then creates it in DB.
+
+        NOTE: This background task acquires its own connection since it runs outside
+        the request lifecycle. It uses get_db_conn directly.
+        """
         from config import settings
-        supabase = get_supabase()
+        from services.db import get_db_conn
+
+        with get_db_conn() as conn:  # type: ignore[attr-defined]
+            pass
+
+        # Re-implement using a raw pool connection for the background task
+        from services.db import _get_pool
+        pool = _get_pool()
+        bg_conn = pool.getconn()
 
         def _mark(status: str, course_id: str = None, error: str = None):
-            update = {"status": status}
+            update_parts = ["status = %s"]
+            vals: list = [status]
             if course_id:
-                update["result_course_id"] = course_id
+                update_parts.append("result_course_id = %s")
+                vals.append(course_id)
             if error:
-                update["error_message"] = error[:500]
-            supabase.table("ai_course_jobs").update(update).eq("id", job_id).execute()
+                update_parts.append("error_message = %s")
+                vals.append(error[:500])
+            vals.append(job_id)
+            execute(bg_conn, f"UPDATE ai_course_jobs SET {', '.join(update_parts)} WHERE id = %s", tuple(vals))
+            bg_conn.commit()
 
         try:
             _mark("processing")
@@ -350,40 +497,51 @@ class LmsService:
                 course_json = json.loads(raw)
 
             # ── Persist course ─────────────────────────────────────────────────
-            course_row = supabase.table("courses").insert({
-                "organisation_id": org_id,
-                "created_by": created_by,
-                "title": course_json.get("title", "AI Generated Course"),
-                "description": course_json.get("description"),
-                "is_published": False,
-                "ai_generated": True,
-                "language": body.language or "en",
-                "target_roles": [body.target_role] if body.target_role else [],
-                "target_location_ids": [],
-                "passing_score": 80,
-                "max_retakes": 3,
-            }).execute().data[0]
+            course_row = execute_returning(
+                bg_conn,
+                """
+                INSERT INTO courses
+                    (organisation_id, created_by, title, description, is_published, ai_generated,
+                     language, target_roles, target_location_ids, passing_score, max_retakes)
+                VALUES (%s, %s, %s, %s, FALSE, TRUE, %s, %s::jsonb, '[]'::jsonb, 80, 3)
+                RETURNING id
+                """,
+                (
+                    org_id, created_by,
+                    course_json.get("title", "AI Generated Course"),
+                    course_json.get("description"),
+                    body.language or "en",
+                    json.dumps([body.target_role] if body.target_role else []),
+                ),
+            )
             course_id = course_row["id"]
 
             for i, mod in enumerate(course_json.get("modules", [])):
-                mod_row = supabase.table("course_modules").insert({
-                    "course_id": course_id,
-                    "title": mod.get("title", f"Module {i+1}"),
-                    "module_type": mod.get("module_type", "slides"),
-                    "content_url": mod.get("content_url"),
-                    "display_order": i,
-                    "is_required": True,
-                }).execute().data[0]
+                mod_row = execute_returning(
+                    bg_conn,
+                    """
+                    INSERT INTO course_modules
+                        (course_id, title, module_type, content_url, display_order, is_required)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                    RETURNING id
+                    """,
+                    (
+                        course_id,
+                        mod.get("title", f"Module {i+1}"),
+                        mod.get("module_type", "slides"),
+                        mod.get("content_url"),
+                        i,
+                    ),
+                )
                 mod_id = mod_row["id"]
 
                 if mod.get("module_type") == "slides":
                     for j, slide in enumerate(mod.get("slides", [])):
-                        supabase.table("course_slides").insert({
-                            "module_id": mod_id,
-                            "title": slide.get("title"),
-                            "body": slide.get("body"),
-                            "display_order": slide.get("display_order", j),
-                        }).execute()
+                        execute(
+                            bg_conn,
+                            "INSERT INTO course_slides (module_id, title, body, display_order) VALUES (%s, %s, %s, %s)",
+                            (mod_id, slide.get("title"), slide.get("body"), slide.get("display_order", j)),
+                        )
 
                 elif mod.get("module_type") == "quiz":
                     for j, q in enumerate(mod.get("questions", [])):
@@ -391,54 +549,113 @@ class LmsService:
                             {"id": str(uuid.uuid4()), "text": opt.get("text", ""), "is_correct": opt.get("is_correct", False)}
                             for opt in q.get("options", [])
                         ]
-                        supabase.table("quiz_questions").insert({
-                            "module_id": mod_id,
-                            "question": q.get("question", ""),
-                            "question_type": q.get("question_type", "multiple_choice"),
-                            "options": options,
-                            "explanation": q.get("explanation"),
-                            "display_order": q.get("display_order", j),
-                        }).execute()
+                        execute(
+                            bg_conn,
+                            "INSERT INTO quiz_questions (module_id, question, question_type, options, explanation, display_order) VALUES (%s, %s, %s, %s::jsonb, %s, %s)",
+                            (
+                                mod_id,
+                                q.get("question", ""),
+                                q.get("question_type", "multiple_choice"),
+                                json.dumps(options),
+                                q.get("explanation"),
+                                q.get("display_order", j),
+                            ),
+                        )
 
+            bg_conn.commit()
             _mark("completed", course_id=course_id)
 
         except Exception as exc:
             logger.error("Course generation job %s failed: %s", job_id, exc, exc_info=True)
+            try:
+                bg_conn.rollback()
+            except Exception:
+                pass
             _mark("failed", error=str(exc))
+        finally:
+            try:
+                pool.putconn(bg_conn)
+            except Exception:
+                pass
 
     @staticmethod
-    async def my_enrollments(user_id: str, org_id: str):
+    async def my_enrollments(conn, user_id: str, org_id: str):
         """All enrollments for current user with course details."""
-        supabase = get_supabase()
-        result = supabase.table("course_enrollments").select(
-            "*, courses(id, title, description, thumbnail_url, estimated_duration_mins, passing_score, is_mandatory, course_modules(id, module_type))"
-        ).eq("user_id", user_id).eq("organisation_id", org_id).eq("is_deleted", False).order("created_at", desc=True).execute()
-        return result.data or []
+        enrollment_rows = rows(
+            conn,
+            """
+            SELECT e.*,
+                   c.id AS course_id_v, c.title AS course_title, c.description AS course_description,
+                   c.thumbnail_url AS course_thumbnail_url,
+                   c.estimated_duration_mins AS course_estimated_duration_mins,
+                   c.passing_score AS course_passing_score,
+                   c.is_mandatory AS course_is_mandatory
+            FROM course_enrollments e
+            JOIN courses c ON c.id = e.course_id
+            WHERE e.user_id = %s AND e.organisation_id = %s AND e.is_deleted = FALSE
+            ORDER BY e.created_at DESC
+            """,
+            (user_id, org_id),
+        )
+        if not enrollment_rows:
+            return []
+
+        # Fetch module type counts per course
+        course_ids = list({str(e["course_id"]) for e in enrollment_rows})
+        all_mods = rows(
+            conn,
+            "SELECT course_id, id, module_type FROM course_modules WHERE course_id = ANY(%s::uuid[])",
+            (course_ids,),
+        )
+        mod_map: dict = {}
+        for m in all_mods:
+            mod_map.setdefault(str(m["course_id"]), []).append({"id": m["id"], "module_type": m["module_type"]})
+
+        result = []
+        for e in enrollment_rows:
+            e_dict = dict(e)
+            e_dict["courses"] = {
+                "id": e_dict.get("course_id"),
+                "title": e_dict.pop("course_title", None),
+                "description": e_dict.pop("course_description", None),
+                "thumbnail_url": e_dict.pop("course_thumbnail_url", None),
+                "estimated_duration_mins": e_dict.pop("course_estimated_duration_mins", None),
+                "passing_score": e_dict.pop("course_passing_score", None),
+                "is_mandatory": e_dict.pop("course_is_mandatory", None),
+                "course_modules": mod_map.get(str(e_dict.get("course_id")), []),
+            }
+            e_dict.pop("course_id_v", None)
+            result.append(e_dict)
+        return result
 
     @staticmethod
-    async def list_org_locations(org_id: str):
+    async def list_org_locations(conn, org_id: str):
         """Return all active locations for the org."""
-        supabase = get_supabase()
-        result = supabase.table("locations").select("id, name").eq("organisation_id", org_id).eq("is_deleted", False).order("name").execute()
-        return result.data or []
+        return rows(
+            conn,
+            "SELECT id, name FROM locations WHERE organisation_id = %s AND is_deleted = FALSE ORDER BY name",
+            (org_id,),
+        )
 
     @staticmethod
-    async def list_enrollable_users(course_id: str, org_id: str):
+    async def list_enrollable_users(conn, course_id: str, org_id: str):
         """Return all org users with their enrollment status for this course."""
-        supabase = get_supabase()
-        profiles = supabase.table("profiles").select(
-            "id, full_name, role, location_id"
-        ).eq("organisation_id", org_id).eq("is_deleted", False).order("full_name").execute().data or []
-
+        profiles = rows(
+            conn,
+            "SELECT id, full_name, role, location_id FROM profiles WHERE organisation_id = %s AND is_deleted = FALSE ORDER BY full_name",
+            (org_id,),
+        )
         if not profiles:
             return []
 
-        # Fetch existing enrollments for this course in one query
         user_ids = [p["id"] for p in profiles]
-        enrollments = supabase.table("course_enrollments").select(
-            "user_id, status, is_mandatory"
-        ).eq("course_id", course_id).eq("is_deleted", False).in_("user_id", user_ids).execute()
-        enroll_map = {e["user_id"]: e for e in (enrollments.data or [])}
+        placeholders = ", ".join(["%s"] * len(user_ids))
+        enrollments = rows(
+            conn,
+            f"SELECT user_id, status, is_mandatory FROM course_enrollments WHERE course_id = %s AND is_deleted = FALSE AND user_id IN ({placeholders})",
+            tuple([course_id] + user_ids),
+        )
+        enroll_map = {str(e["user_id"]): e for e in enrollments}
 
         return [
             {
@@ -446,135 +663,214 @@ class LmsService:
                 "full_name": p["full_name"],
                 "role": p["role"],
                 "location_id": p.get("location_id"),
-                "enrollment_status": enroll_map[p["id"]]["status"] if p["id"] in enroll_map else None,
+                "enrollment_status": enroll_map[str(p["id"])]["status"] if str(p["id"]) in enroll_map else None,
             }
             for p in profiles
         ]
 
     @staticmethod
-    async def enroll_users(body: EnrollRequest, org_id: str, enrolled_by: str):
+    async def enroll_users(conn, body: EnrollRequest, org_id: str, enrolled_by: str):
         """Enroll one or more users in a course."""
-        supabase = get_supabase()
-        existing_result = supabase.table("course_enrollments").select("user_id").eq("course_id", body.course_id).eq("is_deleted", False).in_("user_id", body.user_ids).execute()
-        already_enrolled = {e["user_id"] for e in (existing_result.data or [])}
-        inserts = [
-            {
-                "course_id": body.course_id,
-                "user_id": uid,
-                "organisation_id": org_id,
-                "enrolled_by": enrolled_by,
-                "status": "not_started",
-                "is_mandatory": body.is_mandatory,
-            }
-            for uid in body.user_ids if uid not in already_enrolled
-        ]
-        if inserts:
-            ins_resp = supabase.table("course_enrollments").insert(inserts).execute()
-            inserted = ins_resp.data or []
+        placeholders = ", ".join(["%s"] * len(body.user_ids))
+        existing = rows(
+            conn,
+            f"SELECT user_id FROM course_enrollments WHERE course_id = %s AND is_deleted = FALSE AND user_id IN ({placeholders})",
+            tuple([body.course_id] + body.user_ids),
+        )
+        already_enrolled = {str(e["user_id"]) for e in existing}
 
+        inserted = []
+        for uid in body.user_ids:
+            if str(uid) in already_enrolled:
+                continue
+            new_enrollment = execute_returning(
+                conn,
+                """
+                INSERT INTO course_enrollments
+                    (course_id, user_id, organisation_id, enrolled_by, status, is_mandatory)
+                VALUES (%s, %s, %s, %s, 'not_started', %s)
+                RETURNING *
+                """,
+                (body.course_id, uid, org_id, enrolled_by, body.is_mandatory),
+            )
+            if new_enrollment:
+                inserted.append(new_enrollment)
+
+        if inserted:
             # Notify each enrolled user
             try:
-                course_resp = supabase.table("courses").select("title, estimated_duration").eq("id", body.course_id).maybe_single().execute()
-                course_data = course_resp.data or {}
+                course_data = row(
+                    conn,
+                    "SELECT title, estimated_duration FROM courses WHERE id = %s",
+                    (body.course_id,),
+                ) or {}
                 course_title = course_data.get("title", "Training course")
                 duration = course_data.get("estimated_duration")
                 notif_body = f"{duration} mins" if duration else None
                 import asyncio as _asyncio
                 from services import notification_service as _ns
-                for row in inserted:
+                for enrollment_row in inserted:
                     _asyncio.create_task(_ns.notify(
                         org_id=org_id,
-                        recipient_user_id=row["user_id"],
+                        recipient_user_id=str(enrollment_row["user_id"]),
                         type="course_enrolled",
                         title=f"New training: {course_title}",
                         body=notif_body,
                         entity_type="course_enrollment",
-                        entity_id=row["id"],
+                        entity_id=str(enrollment_row["id"]),
                     ))
             except Exception:
                 pass
-        return {"enrolled": len(inserts), "skipped": len(body.user_ids) - len(inserts)}
+
+        return {"enrolled": len(inserted), "skipped": len(body.user_ids) - len(inserted)}
 
     @staticmethod
-    async def update_progress(enrollment_id: str, body: UpdateProgressRequest, user_id: str):
+    async def update_progress(conn, enrollment_id: str, body: UpdateProgressRequest, user_id: str):
         """Update module progress for an enrollment."""
-        supabase = get_supabase()
-        # Verify ownership
-        enrollment = supabase.table("course_enrollments").select("id, user_id, status").eq("id", enrollment_id).single().execute()
-        if not enrollment.data or enrollment.data["user_id"] != user_id:
+        enrollment = row(
+            conn,
+            "SELECT id, user_id, status FROM course_enrollments WHERE id = %s",
+            (enrollment_id,),
+        )
+        if not enrollment or str(enrollment["user_id"]) != user_id:
             raise ValueError("Enrollment not found or access denied")
 
-        # Upsert module progress
-        existing = supabase.table("module_progress").select("id, time_spent_seconds").eq("enrollment_id", enrollment_id).eq("module_id", body.module_id).execute()
-        now_str = "now()"
-        if existing.data:
-            updates = {"status": body.status}
-            if body.status == "in_progress" and not existing.data[0].get("started_at"):
-                updates["started_at"] = now_str
+        existing_progress = row(
+            conn,
+            "SELECT id, time_spent_seconds, started_at FROM module_progress WHERE enrollment_id = %s AND module_id = %s",
+            (enrollment_id, body.module_id),
+        )
+
+        if existing_progress:
+            update_parts = ["status = %s"]
+            vals: list = [body.status]
+            if body.status == "in_progress" and not existing_progress.get("started_at"):
+                update_parts.append("started_at = NOW()")
             if body.status == "completed":
-                updates["completed_at"] = now_str
+                update_parts.append("completed_at = NOW()")
             if body.time_spent_seconds:
-                updates["time_spent_seconds"] = (existing.data[0].get("time_spent_seconds") or 0) + body.time_spent_seconds
-            supabase.table("module_progress").update(updates).eq("id", existing.data[0]["id"]).execute()
+                update_parts.append("time_spent_seconds = COALESCE(time_spent_seconds, 0) + %s")
+                vals.append(body.time_spent_seconds)
+            vals.append(existing_progress["id"])
+            execute(
+                conn,
+                f"UPDATE module_progress SET {', '.join(update_parts)} WHERE id = %s",
+                tuple(vals),
+            )
         else:
-            insert = {
-                "enrollment_id": enrollment_id,
-                "module_id": body.module_id,
-                "status": body.status,
-            }
+            insert_parts = ["enrollment_id", "module_id", "status"]
+            insert_vals: list = [enrollment_id, body.module_id, body.status]
             if body.status == "in_progress":
-                insert["started_at"] = now_str
+                insert_parts.append("started_at")
+                insert_vals.append("NOW()")  # handled inline below
             if body.status == "completed":
-                insert["completed_at"] = now_str
+                insert_parts.append("completed_at")
+                insert_vals.append("NOW()")
             if body.time_spent_seconds:
-                insert["time_spent_seconds"] = body.time_spent_seconds
-            supabase.table("module_progress").insert(insert).execute()
+                insert_parts.append("time_spent_seconds")
+                insert_vals.append(body.time_spent_seconds)
+
+            # Build parameterized insert
+            cols = "enrollment_id, module_id, status"
+            placeholders_list = ["%s", "%s", "%s"]
+            vals2: list = [enrollment_id, body.module_id, body.status]
+            if body.status == "in_progress":
+                cols += ", started_at"
+                placeholders_list.append("NOW()")
+            if body.status == "completed":
+                cols += ", completed_at"
+                placeholders_list.append("NOW()")
+            if body.time_spent_seconds:
+                cols += ", time_spent_seconds"
+                placeholders_list.append("%s")
+                vals2.append(body.time_spent_seconds)
+
+            execute(
+                conn,
+                f"INSERT INTO module_progress ({cols}) VALUES ({', '.join(placeholders_list)})",
+                tuple(vals2),
+            )
 
         # Update enrollment status to in_progress if not_started
-        if enrollment.data["status"] == "not_started":
-            supabase.table("course_enrollments").update({"status": "in_progress", "started_at": now_str, "current_module_id": body.module_id}).eq("id", enrollment_id).execute()
-        elif enrollment.data["status"] == "in_progress":
-            supabase.table("course_enrollments").update({"current_module_id": body.module_id}).eq("id", enrollment_id).execute()
+        if enrollment["status"] == "not_started":
+            execute(
+                conn,
+                "UPDATE course_enrollments SET status = 'in_progress', started_at = NOW(), current_module_id = %s WHERE id = %s",
+                (body.module_id, enrollment_id),
+            )
+        elif enrollment["status"] == "in_progress":
+            execute(
+                conn,
+                "UPDATE course_enrollments SET current_module_id = %s WHERE id = %s",
+                (body.module_id, enrollment_id),
+            )
 
         # Auto-pass: if all required modules are now completed, mark enrollment as passed
-        if body.status == "completed" and enrollment.data["status"] in ("not_started", "in_progress"):
-            enroll_info = supabase.table("course_enrollments").select("course_id").eq("id", enrollment_id).single().execute()
-            course_id = enroll_info.data["course_id"]
-            required = supabase.table("course_modules").select("id").eq("course_id", course_id).eq("is_required", True).eq("is_deleted", False).execute()
-            required_ids = {m["id"] for m in (required.data or [])}
-            if required_ids:
-                done = supabase.table("module_progress").select("module_id").eq("enrollment_id", enrollment_id).eq("status", "completed").execute()
-                done_ids = {m["module_id"] for m in (done.data or [])}
-                if required_ids.issubset(done_ids):
-                    supabase.table("course_enrollments").update({
-                        "status": "passed",
-                        "score": 100,
-                        "completed_at": "now()",
-                    }).eq("id", enrollment_id).execute()
+        if body.status == "completed" and enrollment["status"] in ("not_started", "in_progress"):
+            enroll_info = row(
+                conn,
+                "SELECT course_id FROM course_enrollments WHERE id = %s",
+                (enrollment_id,),
+            )
+            if enroll_info:
+                course_id = enroll_info["course_id"]
+                required_mods = rows(
+                    conn,
+                    "SELECT id FROM course_modules WHERE course_id = %s AND is_required = TRUE AND is_deleted = FALSE",
+                    (course_id,),
+                )
+                required_ids = {str(m["id"]) for m in required_mods}
+                if required_ids:
+                    done_mods = rows(
+                        conn,
+                        "SELECT module_id FROM module_progress WHERE enrollment_id = %s AND status = 'completed'",
+                        (enrollment_id,),
+                    )
+                    done_ids = {str(m["module_id"]) for m in done_mods}
+                    if required_ids.issubset(done_ids):
+                        execute(
+                            conn,
+                            "UPDATE course_enrollments SET status = 'passed', score = 100, completed_at = NOW() WHERE id = %s",
+                            (enrollment_id,),
+                        )
 
         return {"success": True}
 
     @staticmethod
-    async def submit_quiz(enrollment_id: str, body: SubmitQuizRequest, user_id: str):
+    async def submit_quiz(conn, enrollment_id: str, body: SubmitQuizRequest, user_id: str):
         """Score a quiz attempt and update enrollment."""
-        supabase = get_supabase()
-        # Verify ownership
-        enrollment = supabase.table("course_enrollments").select("*, courses(passing_score, max_retakes)").eq("id", enrollment_id).single().execute()
-        if not enrollment.data or enrollment.data["user_id"] != user_id:
+        enrollment = row(
+            conn,
+            """
+            SELECT e.*, c.passing_score, c.max_retakes
+            FROM course_enrollments e
+            JOIN courses c ON c.id = e.course_id
+            WHERE e.id = %s
+            """,
+            (enrollment_id,),
+        )
+        if not enrollment or str(enrollment["user_id"]) != user_id:
             raise ValueError("Enrollment not found or access denied")
 
         # Fetch questions for scoring
-        questions = supabase.table("quiz_questions").select("id, options").eq("module_id", body.module_id).eq("is_deleted", False).execute()
-        q_map = {q["id"]: q for q in (questions.data or [])}
+        questions = rows(
+            conn,
+            "SELECT id, options FROM quiz_questions WHERE module_id = %s AND is_deleted = FALSE",
+            (body.module_id,),
+        )
+        q_map = {str(q["id"]): q for q in questions}
 
         # Score answers
         scored = []
         correct = 0
         for ans in body.answers:
-            q = q_map.get(ans.question_id)
+            q = q_map.get(str(ans.question_id))
             is_correct = False
             if q:
-                for opt in q["options"]:
+                opts = q["options"]
+                if isinstance(opts, str):
+                    opts = json.loads(opts)
+                for opt in opts:
                     if opt["id"] == ans.selected_option and opt.get("is_correct"):
                         is_correct = True
                         break
@@ -584,59 +880,96 @@ class LmsService:
 
         total = len(body.answers)
         score_pct = round((correct / total) * 100) if total > 0 else 0
-        passing = enrollment.data["courses"]["passing_score"] or 80
+        passing = enrollment.get("passing_score") or 80
         passed = score_pct >= passing
 
-        attempt_num = (enrollment.data.get("attempt_count") or 0) + 1
-        supabase.table("quiz_attempts").insert({
-            "enrollment_id": enrollment_id,
-            "module_id": body.module_id,
-            "attempt_number": attempt_num,
-            "score": score_pct,
-            "passed": passed,
-            "answers": scored,
-            "completed_at": "now()",
-        }).execute()
+        attempt_num = (enrollment.get("attempt_count") or 0) + 1
+        execute(
+            conn,
+            """
+            INSERT INTO quiz_attempts
+                (enrollment_id, module_id, attempt_number, score, passed, answers, completed_at)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, NOW())
+            """,
+            (enrollment_id, body.module_id, attempt_num, score_pct, passed, json.dumps(scored)),
+        )
 
         # Update enrollment
-        updates = {"attempt_count": attempt_num, "score": score_pct}
+        update_parts = ["attempt_count = %s", "score = %s"]
+        update_vals: list = [attempt_num, score_pct]
         if passed:
-            updates["status"] = "passed"
-            updates["completed_at"] = "now()"
+            update_parts.extend(["status = 'passed'", "completed_at = NOW()"])
         else:
-            max_retakes = enrollment.data["courses"].get("max_retakes")
+            max_retakes = enrollment.get("max_retakes")
             if max_retakes is not None and attempt_num >= max_retakes:
-                updates["status"] = "failed"
-        supabase.table("course_enrollments").update(updates).eq("id", enrollment_id).execute()
+                update_parts.append("status = 'failed'")
+        update_vals.append(enrollment_id)
+        execute(
+            conn,
+            f"UPDATE course_enrollments SET {', '.join(update_parts)} WHERE id = %s",
+            tuple(update_vals),
+        )
 
         return {"score": score_pct, "passed": passed, "correct": correct, "total": total, "attempt_number": attempt_num}
 
     @staticmethod
-    async def list_enrollments(org_id: str, course_id: str = None, user_id_filter: str = None, status: str = None, page: int = 1, page_size: int = 20):
-        supabase = get_supabase()
+    async def list_enrollments(conn, org_id: str, course_id: str = None, user_id_filter: str = None, status: str = None, page: int = 1, page_size: int = 20):
         offset = (page - 1) * page_size
-        q = supabase.table("course_enrollments").select(
-            "*, courses(id, title), profiles(id, full_name, role)"
-        ).eq("organisation_id", org_id).eq("is_deleted", False)
+        conditions = ["e.organisation_id = %s", "e.is_deleted = FALSE"]
+        params: list = [org_id]
         if course_id:
-            q = q.eq("course_id", course_id)
+            conditions.append("e.course_id = %s")
+            params.append(course_id)
         if user_id_filter:
-            q = q.eq("user_id", user_id_filter)
+            conditions.append("e.user_id = %s")
+            params.append(user_id_filter)
         if status:
-            q = q.eq("status", status)
-        result = q.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
-        return {"items": result.data or [], "total_count": len(result.data or []), "page": page, "page_size": page_size}
+            conditions.append("e.status = %s")
+            params.append(status)
+        where_clause = " AND ".join(conditions)
+
+        result = rows(
+            conn,
+            f"""
+            SELECT e.*,
+                   c.id AS c_id, c.title AS c_title,
+                   p.id AS p_id, p.full_name AS p_full_name, p.role AS p_role
+            FROM course_enrollments e
+            LEFT JOIN courses c ON c.id = e.course_id
+            LEFT JOIN profiles p ON p.id = e.user_id
+            WHERE {where_clause}
+            ORDER BY e.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            tuple(params) + (page_size, offset),
+        )
+
+        items = []
+        for r in result:
+            r_dict = dict(r)
+            r_dict["courses"] = {"id": r_dict.pop("c_id", None), "title": r_dict.pop("c_title", None)}
+            r_dict["profiles"] = {"id": r_dict.pop("p_id", None), "full_name": r_dict.pop("p_full_name", None), "role": r_dict.pop("p_role", None)}
+            items.append(r_dict)
+
+        return {"items": items, "total_count": len(items), "page": page, "page_size": page_size}
 
     @staticmethod
-    async def get_analytics_completion(org_id: str):
-        supabase = get_supabase()
-        enrollments = supabase.table("course_enrollments").select("status, courses(title)").eq("organisation_id", org_id).eq("is_deleted", False).execute()
-        data = enrollments.data or []
-        total = len(data)
-        passed = sum(1 for e in data if e["status"] == "passed")
-        in_progress = sum(1 for e in data if e["status"] == "in_progress")
-        not_started = sum(1 for e in data if e["status"] == "not_started")
-        failed = sum(1 for e in data if e["status"] == "failed")
+    async def get_analytics_completion(conn, org_id: str):
+        enrollment_rows = rows(
+            conn,
+            """
+            SELECT e.status, c.title AS course_title
+            FROM course_enrollments e
+            JOIN courses c ON c.id = e.course_id
+            WHERE e.organisation_id = %s AND e.is_deleted = FALSE
+            """,
+            (org_id,),
+        )
+        total = len(enrollment_rows)
+        passed = sum(1 for e in enrollment_rows if e["status"] == "passed")
+        in_progress = sum(1 for e in enrollment_rows if e["status"] == "in_progress")
+        not_started = sum(1 for e in enrollment_rows if e["status"] == "not_started")
+        failed = sum(1 for e in enrollment_rows if e["status"] == "failed")
         return {
             "total_enrollments": total,
             "passed": passed,
@@ -647,163 +980,203 @@ class LmsService:
         }
 
     @staticmethod
-    async def save_course_structure(course_id: str, org_id: str, modules: list):
+    async def save_course_structure(conn, course_id: str, org_id: str, modules: list):
         """
         Replace all modules/slides/questions for a course with the provided structure.
         Soft-deletes existing modules, then inserts the new set.
         """
-        supabase = get_supabase()
-
-        # Verify course ownership
-        course = supabase.table("courses").select("id").eq("id", course_id).eq("organisation_id", org_id).eq("is_deleted", False).single().execute()
-        if not course.data:
+        course_check = row(
+            conn,
+            "SELECT id FROM courses WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (course_id, org_id),
+        )
+        if not course_check:
             raise ValueError("Course not found")
 
         # Soft-delete all existing modules (cascades to slides/questions via app logic)
-        existing_mods = supabase.table("course_modules").select("id").eq("course_id", course_id).eq("is_deleted", False).execute()
-        if existing_mods.data:
-            mod_ids = [m["id"] for m in existing_mods.data]
-            supabase.table("course_modules").update({"is_deleted": True}).in_("id", mod_ids).execute()
-            supabase.table("course_slides").update({"is_deleted": True}).in_("module_id", mod_ids).execute()
-            supabase.table("quiz_questions").update({"is_deleted": True}).in_("module_id", mod_ids).execute()
+        existing_mods = rows(
+            conn,
+            "SELECT id FROM course_modules WHERE course_id = %s AND is_deleted = FALSE",
+            (course_id,),
+        )
+        if existing_mods:
+            mod_ids = [m["id"] for m in existing_mods]
+            execute(conn, "UPDATE course_modules SET is_deleted = TRUE WHERE id = ANY(%s::uuid[])", (mod_ids,))
+            execute(conn, "UPDATE course_slides SET is_deleted = TRUE WHERE module_id = ANY(%s::uuid[])", (mod_ids,))
+            execute(conn, "UPDATE quiz_questions SET is_deleted = TRUE WHERE module_id = ANY(%s::uuid[])", (mod_ids,))
 
         # Insert new modules
         for i, mod in enumerate(modules):
-            mod_insert = {
-                "course_id": course_id,
-                "title": mod.get("title", "Untitled Module"),
-                "module_type": mod.get("module_type", "slides"),
-                "content_url": mod.get("content_url"),
-                "display_order": mod.get("display_order", i),
-                "is_required": mod.get("is_required", True),
-                "estimated_duration_mins": mod.get("estimated_duration_mins"),
-                "is_deleted": False,
-            }
-            mod_result = supabase.table("course_modules").insert(mod_insert).execute()
-            mod_id = mod_result.data[0]["id"]
+            new_mod = execute_returning(
+                conn,
+                """
+                INSERT INTO course_modules
+                    (course_id, title, module_type, content_url, display_order, is_required,
+                     estimated_duration_mins, is_deleted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+                RETURNING id
+                """,
+                (
+                    course_id,
+                    mod.get("title", "Untitled Module"),
+                    mod.get("module_type", "slides"),
+                    mod.get("content_url"),
+                    mod.get("display_order", i),
+                    mod.get("is_required", True),
+                    mod.get("estimated_duration_mins"),
+                ),
+            )
+            mod_id = new_mod["id"]
 
             if mod.get("module_type") == "slides":
-                slides = mod.get("slides", [])
-                for j, slide in enumerate(slides):
-                    supabase.table("course_slides").insert({
-                        "module_id": mod_id,
-                        "title": slide.get("title"),
-                        "body": slide.get("body"),
-                        "image_url": slide.get("image_url"),
-                        "display_order": slide.get("display_order", j),
-                        "is_deleted": False,
-                    }).execute()
+                for j, slide in enumerate(mod.get("slides", [])):
+                    execute(
+                        conn,
+                        "INSERT INTO course_slides (module_id, title, body, image_url, display_order, is_deleted) VALUES (%s, %s, %s, %s, %s, FALSE)",
+                        (mod_id, slide.get("title"), slide.get("body"), slide.get("image_url"), slide.get("display_order", j)),
+                    )
             elif mod.get("module_type") == "quiz":
-                questions = mod.get("questions", [])
-                for j, q in enumerate(questions):
-                    supabase.table("quiz_questions").insert({
-                        "module_id": mod_id,
-                        "question": q.get("question", ""),
-                        "question_type": q.get("question_type", "multiple_choice"),
-                        "image_url": q.get("image_url"),
-                        "options": q.get("options", []),
-                        "explanation": q.get("explanation"),
-                        "display_order": q.get("display_order", j),
-                        "is_deleted": False,
-                    }).execute()
+                for j, q in enumerate(mod.get("questions", [])):
+                    execute(
+                        conn,
+                        "INSERT INTO quiz_questions (module_id, question, question_type, image_url, options, explanation, display_order, is_deleted) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, FALSE)",
+                        (
+                            mod_id,
+                            q.get("question", ""),
+                            q.get("question_type", "multiple_choice"),
+                            q.get("image_url"),
+                            json.dumps(q.get("options", [])),
+                            q.get("explanation"),
+                            q.get("display_order", j),
+                        ),
+                    )
 
-        # Return the full updated course so the frontend can sync state
-        return await LmsService.get_course(course_id, org_id)
+        return await LmsService.get_course(conn, course_id, org_id)
 
     @staticmethod
-    async def get_enrollment_with_progress(enrollment_id: str, user_id: str):
+    async def get_enrollment_with_progress(conn, enrollment_id: str, user_id: str):
         """Get a single enrollment with full course structure + module progress."""
-        supabase = get_supabase()
-        enrollment = supabase.table("course_enrollments").select("*") \
-            .eq("id", enrollment_id).eq("user_id", user_id).eq("is_deleted", False) \
-            .single().execute()
-        if not enrollment.data:
+        enrollment = row(
+            conn,
+            "SELECT * FROM course_enrollments WHERE id = %s AND user_id = %s AND is_deleted = FALSE",
+            (enrollment_id, user_id),
+        )
+        if not enrollment:
             raise ValueError("Enrollment not found")
 
-        course = supabase.table("courses").select(
-            "*, course_modules(*, course_slides(*), quiz_questions(*))"
-        ).eq("id", enrollment.data["course_id"]).eq("is_deleted", False).single().execute()
+        course = await LmsService.get_course(conn, str(enrollment["course_id"]), None)
 
-        # Filter soft-deleted nested records
-        course_data = course.data
-        if course_data:
-            mods = [m for m in (course_data.get("course_modules") or []) if not m.get("is_deleted", False)]
-            for mod in mods:
-                mod["course_slides"] = [s for s in (mod.get("course_slides") or []) if not s.get("is_deleted", False)]
-                mod["quiz_questions"] = [q for q in (mod.get("quiz_questions") or []) if not q.get("is_deleted", False)]
-            course_data["course_modules"] = mods
-
-        progress = supabase.table("module_progress").select("*") \
-            .eq("enrollment_id", enrollment_id).execute()
+        progress = rows(
+            conn,
+            "SELECT * FROM module_progress WHERE enrollment_id = %s",
+            (enrollment_id,),
+        )
 
         return {
-            "enrollment": enrollment.data,
-            "course": course_data,
-            "module_progress": progress.data or [],
+            "enrollment": dict(enrollment),
+            "course": course,
+            "module_progress": progress,
         }
 
     @staticmethod
-    async def duplicate_course(course_id: str, org_id: str, created_by: str):
+    async def duplicate_course(conn, course_id: str, org_id: str, created_by: str):
         """Duplicate a course (all modules/slides/questions) as a new Draft."""
-        supabase = get_supabase()
-        original = supabase.table("courses").select(
-            "*, course_modules(*, course_slides(*), quiz_questions(*))"
-        ).eq("id", course_id).eq("organisation_id", org_id).eq("is_deleted", False).single().execute()
-        if not original.data:
+        src = row(
+            conn,
+            "SELECT * FROM courses WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE",
+            (course_id, org_id),
+        )
+        if not src:
             raise ValueError("Course not found")
-        src = original.data
+        src = dict(src)
 
-        new_course = supabase.table("courses").insert({
-            "organisation_id": org_id,
-            "created_by": created_by,
-            "title": f"{src['title']} (Copy)",
-            "description": src.get("description"),
-            "thumbnail_url": src.get("thumbnail_url"),
-            "estimated_duration_mins": src.get("estimated_duration_mins"),
-            "passing_score": src.get("passing_score", 80),
-            "max_retakes": src.get("max_retakes"),
-            "cert_validity_days": src.get("cert_validity_days"),
-            "is_mandatory": src.get("is_mandatory", False),
-            "target_roles": src.get("target_roles", []),
-            "target_location_ids": src.get("target_location_ids", []),
-            "language": src.get("language", "en"),
-            "is_published": False,
-            "was_published": False,
-            "ai_generated": src.get("ai_generated", False),
-            "parent_course_id": course_id,
-        }).execute()
-        new_id = new_course.data[0]["id"]
+        new_course = execute_returning(
+            conn,
+            """
+            INSERT INTO courses
+                (organisation_id, created_by, title, description, thumbnail_url,
+                 estimated_duration_mins, passing_score, max_retakes, cert_validity_days,
+                 is_mandatory, target_roles, target_location_ids, language,
+                 is_published, was_published, ai_generated, parent_course_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, FALSE, FALSE, %s, %s)
+            RETURNING id
+            """,
+            (
+                org_id, created_by,
+                f"{src['title']} (Copy)",
+                src.get("description"),
+                src.get("thumbnail_url"),
+                src.get("estimated_duration_mins"),
+                src.get("passing_score", 80),
+                src.get("max_retakes"),
+                src.get("cert_validity_days"),
+                src.get("is_mandatory", False),
+                json.dumps(src.get("target_roles", [])),
+                json.dumps(src.get("target_location_ids", [])),
+                src.get("language", "en"),
+                src.get("ai_generated", False),
+                course_id,
+            ),
+        )
+        new_id = new_course["id"]
 
-        for mod in [m for m in (src.get("course_modules") or []) if not m.get("is_deleted", False)]:
-            new_mod = supabase.table("course_modules").insert({
-                "course_id": new_id,
-                "title": mod["title"],
-                "module_type": mod["module_type"],
-                "content_url": mod.get("content_url"),
-                "display_order": mod.get("display_order", 0),
-                "is_required": mod.get("is_required", True),
-                "estimated_duration_mins": mod.get("estimated_duration_mins"),
-            }).execute()
-            new_mod_id = new_mod.data[0]["id"]
+        # Copy modules
+        orig_mods = rows(
+            conn,
+            "SELECT * FROM course_modules WHERE course_id = %s AND is_deleted = FALSE ORDER BY display_order",
+            (course_id,),
+        )
+        for mod in orig_mods:
+            new_mod = execute_returning(
+                conn,
+                """
+                INSERT INTO course_modules
+                    (course_id, title, module_type, content_url, display_order, is_required, estimated_duration_mins)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    new_id,
+                    mod["title"],
+                    mod["module_type"],
+                    mod.get("content_url"),
+                    mod.get("display_order", 0),
+                    mod.get("is_required", True),
+                    mod.get("estimated_duration_mins"),
+                ),
+            )
+            new_mod_id = new_mod["id"]
 
-            for slide in [s for s in (mod.get("course_slides") or []) if not s.get("is_deleted", False)]:
-                supabase.table("course_slides").insert({
-                    "module_id": new_mod_id,
-                    "title": slide.get("title"),
-                    "body": slide.get("body"),
-                    "image_url": slide.get("image_url"),
-                    "display_order": slide.get("display_order", 0),
-                }).execute()
+            orig_slides = rows(
+                conn,
+                "SELECT * FROM course_slides WHERE module_id = %s AND is_deleted = FALSE ORDER BY display_order",
+                (mod["id"],),
+            )
+            for slide in orig_slides:
+                execute(
+                    conn,
+                    "INSERT INTO course_slides (module_id, title, body, image_url, display_order) VALUES (%s, %s, %s, %s, %s)",
+                    (new_mod_id, slide.get("title"), slide.get("body"), slide.get("image_url"), slide.get("display_order", 0)),
+                )
 
-            for q in [q for q in (mod.get("quiz_questions") or []) if not q.get("is_deleted", False)]:
-                supabase.table("quiz_questions").insert({
-                    "module_id": new_mod_id,
-                    "question": q["question"],
-                    "question_type": q.get("question_type", "multiple_choice"),
-                    "image_url": q.get("image_url"),
-                    "options": q.get("options", []),
-                    "explanation": q.get("explanation"),
-                    "display_order": q.get("display_order", 0),
-                }).execute()
+            orig_questions = rows(
+                conn,
+                "SELECT * FROM quiz_questions WHERE module_id = %s AND is_deleted = FALSE ORDER BY display_order",
+                (mod["id"],),
+            )
+            for q in orig_questions:
+                execute(
+                    conn,
+                    "INSERT INTO quiz_questions (module_id, question, question_type, image_url, options, explanation, display_order) VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)",
+                    (
+                        new_mod_id,
+                        q["question"],
+                        q.get("question_type", "multiple_choice"),
+                        q.get("image_url"),
+                        json.dumps(q.get("options", [])) if isinstance(q.get("options"), list) else q.get("options", "[]"),
+                        q.get("explanation"),
+                        q.get("display_order", 0),
+                    ),
+                )
 
         return {"id": new_id}

@@ -1,6 +1,6 @@
 from uuid import UUID
 from fastapi import APIRouter, Depends
-from dependencies import get_current_user, require_manager_or_above, paginate
+from dependencies import get_current_user, require_manager_or_above, paginate, get_db
 from models.announcements import CreateAnnouncementRequest, UpdateAnnouncementRequest
 from services.announcement_service import AnnouncementService
 
@@ -11,10 +11,11 @@ router = APIRouter()
 async def create_announcement(
     body: CreateAnnouncementRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     created_by = current_user["sub"]
-    announcement = await AnnouncementService.create(body, org_id, created_by)
+    announcement = await AnnouncementService.create(body, org_id, created_by, conn)
 
     # Notify target users
     try:
@@ -80,12 +81,14 @@ async def create_announcement(
 async def list_announcements(
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await AnnouncementService.list_for_user(
         user_id=user_id,
         org_id=org_id,
+        conn=conn,
         page=pagination["page"],
         page_size=pagination["page_size"],
     )
@@ -95,9 +98,10 @@ async def list_announcements(
 async def get_announcement(
     announcement_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await AnnouncementService.get(str(announcement_id), org_id)
+    return await AnnouncementService.get(str(announcement_id), org_id, conn)
 
 
 @router.put("/{announcement_id}")
@@ -105,33 +109,37 @@ async def update_announcement(
     announcement_id: UUID,
     body: UpdateAnnouncementRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await AnnouncementService.update(str(announcement_id), org_id, body)
+    return await AnnouncementService.update(str(announcement_id), org_id, body, conn)
 
 
 @router.post("/{announcement_id}/read")
 async def mark_read(
     announcement_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     user_id = current_user["sub"]
-    return await AnnouncementService.mark_read(str(announcement_id), user_id)
+    return await AnnouncementService.mark_read(str(announcement_id), user_id, conn)
 
 
 @router.post("/{announcement_id}/acknowledge")
 async def acknowledge(
     announcement_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     user_id = current_user["sub"]
-    return await AnnouncementService.acknowledge(str(announcement_id), user_id)
+    return await AnnouncementService.acknowledge(str(announcement_id), user_id, conn)
 
 
 @router.get("/{announcement_id}/receipts")
 async def get_receipts(
     announcement_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await AnnouncementService.get_receipts(str(announcement_id), org_id)
+    return await AnnouncementService.get_receipts(str(announcement_id), org_id, conn)

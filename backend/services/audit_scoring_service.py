@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from services.supabase_client import get_admin_client
+from services.db import row, rows
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,7 @@ def _parse_response_value(value: Optional[str], field_type: str, max_score: floa
 
 
 async def calculate_audit_score(
+    conn,
     submission_id: str,
     form_template_id: str,
     responses: list[dict],   # [{"field_id": str, "value": str}]
@@ -143,50 +144,83 @@ async def calculate_audit_score(
     Fetches template structure, section weights, field scores, and audit config
     from the database — never trusts client-supplied scores.
     """
-    db = get_admin_client()
 
     # ── 1. Load audit config (passing score) ──────────────────────────────
-    cfg_res = db.table("audit_configs") \
-        .select("passing_score") \
-        .eq("form_template_id", form_template_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    passing_score = float(cfg_res.data["passing_score"]) if cfg_res.data else 80.0
+    cfg = row(
+        conn,
+        """
+        SELECT passing_score
+        FROM audit_configs
+        WHERE form_template_id = %s
+          AND is_deleted = FALSE
+        LIMIT 1
+        """,
+        (form_template_id,),
+    )
+    passing_score = float(cfg["passing_score"]) if cfg else 80.0
 
     # ── 2. Load sections + fields (include is_critical) ───────────────────
-    sections_res = db.table("form_sections") \
-        .select("id, title, display_order, form_fields(id, label, field_type, display_order, is_critical)") \
-        .eq("form_template_id", form_template_id) \
-        .eq("is_deleted", False) \
-        .order("display_order") \
-        .execute()
+    sections_data = rows(
+        conn,
+        """
+        SELECT id, title, display_order
+        FROM form_sections
+        WHERE form_template_id = %s
+          AND is_deleted = FALSE
+        ORDER BY display_order
+        """,
+        (form_template_id,),
+    )
+
+    section_ids = [str(s["id"]) for s in sections_data]
+
+    # Load all fields for these sections in one query
+    fields_by_section: dict[str, list[dict]] = {sid: [] for sid in section_ids}
+    if section_ids:
+        all_fields = rows(
+            conn,
+            """
+            SELECT id, form_section_id, label, field_type, display_order, is_critical
+            FROM form_fields
+            WHERE form_section_id = ANY(%s::uuid[])
+              AND is_deleted = FALSE
+            ORDER BY display_order
+            """,
+            (section_ids,),
+        )
+        for f in all_fields:
+            sec_key = str(f["form_section_id"])
+            if sec_key in fields_by_section:
+                fields_by_section[sec_key].append(f)
 
     # ── 3. Load section weights ────────────────────────────────────────────
-    section_ids = [s["id"] for s in sections_res.data]
-    sw_res = db.table("audit_section_weights") \
-        .select("section_id, weight") \
-        .in_("section_id", section_ids) \
-        .eq("is_deleted", False) \
-        .execute() if section_ids else type("R", (), {"data": []})()
-    section_weights: dict[str, float] = {
-        r["section_id"]: float(r["weight"]) for r in sw_res.data
-    }
+    section_weights: dict[str, float] = {}
+    if section_ids:
+        sw_rows = rows(
+            conn,
+            """
+            SELECT section_id, weight
+            FROM audit_section_weights
+            WHERE section_id = ANY(%s::uuid[])
+            """,
+            (section_ids,),
+        )
+        section_weights = {str(r["section_id"]): float(r["weight"]) for r in sw_rows}
 
     # ── 4. Load field max scores ───────────────────────────────────────────
-    all_field_ids = [
-        f["id"]
-        for s in sections_res.data
-        for f in (s.get("form_fields") or [])
-    ]
-    fs_res = db.table("audit_field_scores") \
-        .select("field_id, max_score") \
-        .in_("field_id", all_field_ids) \
-        .eq("is_deleted", False) \
-        .execute() if all_field_ids else type("R", (), {"data": []})()
-    field_max_scores: dict[str, float] = {
-        r["field_id"]: float(r["max_score"]) for r in fs_res.data
-    }
+    all_field_ids = [str(f["id"]) for flist in fields_by_section.values() for f in flist]
+    field_max_scores: dict[str, float] = {}
+    if all_field_ids:
+        fs_rows = rows(
+            conn,
+            """
+            SELECT field_id, max_score
+            FROM audit_field_scores
+            WHERE field_id = ANY(%s::uuid[])
+            """,
+            (all_field_ids,),
+        )
+        field_max_scores = {str(r["field_id"]): float(r["max_score"]) for r in fs_rows}
 
     # ── 5. Build response lookup ───────────────────────────────────────────
     response_map: dict[str, str] = {
@@ -198,17 +232,17 @@ async def calculate_audit_score(
     total_weighted_score = 0.0
     total_weight = 0.0
 
-    for section in sections_res.data:
-        sec_id = section["id"]
+    for section in sections_data:
+        sec_id = str(section["id"])
         sec_weight = section_weights.get(sec_id, 1.0)
-        fields = section.get("form_fields") or []
+        fields = fields_by_section.get(sec_id, [])
 
         field_results: list[FieldScoreResult] = []
         sec_max = 0.0
         sec_achieved = 0.0
 
         for field in sorted(fields, key=lambda f: f.get("display_order", 0)):
-            fid = field["id"]
+            fid = str(field["id"])
             ftype = field.get("field_type", "text")
             is_critical = bool(field.get("is_critical", False))
 
@@ -274,6 +308,7 @@ async def calculate_audit_score(
 
 
 async def create_corrective_actions(
+    conn,
     submission_id: str,
     failed_fields: list[FieldScoreResult],
     org_id: str,
@@ -284,10 +319,12 @@ async def create_corrective_actions(
     """
     Generate a Corrective Action Plan (CAP) with items for all failed fields.
     Called inside the submission transaction — if this fails, submission is rolled back.
+    ``conn`` is a psycopg2 connection passed explicitly by the caller.
     """
     from services.cap_service import CAPService
 
     return await CAPService.generate_cap(
+        conn,
         submission_id=submission_id,
         form_template_id=form_template_id,
         failed_fields=failed_fields,

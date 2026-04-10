@@ -18,8 +18,8 @@ import anthropic
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 
-from dependencies import get_current_user, require_admin
-from services.supabase_client import get_supabase
+from dependencies import get_db, get_current_user, require_admin
+from services.db import row, rows, execute, execute_returning, execute_many
 from models.onboarding import (
     CompanyProfile, CompanyDiscoveryRequest, CompanyDiscoveryFallbackRequest,
     OnboardingSessionResponse, IndustryPackageResponse, TemplateCategoryGroup,
@@ -79,12 +79,11 @@ def _get_org_id(current_user: dict) -> str:
     return org_id
 
 
-def _get_session(session_id: str, org_id: str) -> dict:
-    sb = get_supabase()
-    res = sb.table("onboarding_sessions").select("*").eq("id", session_id).eq("organisation_id", org_id).execute()
-    if not res.data:
+def _get_session(conn, session_id: str, org_id: str) -> dict:
+    r = row(conn, "SELECT * FROM onboarding_sessions WHERE id = %s AND organisation_id = %s", (session_id, org_id))
+    if not r:
         raise HTTPException(status_code=404, detail="Onboarding session not found.")
-    return res.data[0]
+    return dict(r)
 
 
 def _require_step(session: dict, expected_step: int):
@@ -101,10 +100,11 @@ def _require_step(session: dict, expected_step: int):
         )
 
 
-def _advance_step(session_id: str, to_step: int):
-    get_supabase().table("onboarding_sessions").update(
-        {"current_step": to_step, "updated_at": datetime.now(timezone.utc).isoformat()}
-    ).eq("id", session_id).execute()
+def _advance_step(conn, session_id: str, to_step: int):
+    execute(conn,
+        "UPDATE onboarding_sessions SET current_step = %s, updated_at = %s WHERE id = %s",
+        (to_step, datetime.now(timezone.utc).isoformat(), session_id),
+    )
 
 
 def _session_to_response(s: dict) -> OnboardingSessionResponse:
@@ -146,39 +146,55 @@ DISPLAY_CATEGORY_ORDER = [
 # ── Session management ─────────────────────────────────────────────────────────
 
 @router.post("/sessions", response_model=OnboardingSessionResponse)
-async def create_session(current_user: dict = Depends(require_admin)):
+async def create_session(
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Create a new onboarding session. Only one active session per org."""
     org_id = _get_org_id(current_user)
-    sb = get_supabase()
 
     # Check for existing active session
-    existing = sb.table("onboarding_sessions").select("*").eq("organisation_id", org_id).eq("status", "in_progress").execute()
-    if existing.data:
-        return _session_to_response(existing.data[0])
+    existing = row(conn,
+        "SELECT * FROM onboarding_sessions WHERE organisation_id = %s AND status = %s LIMIT 1",
+        (org_id, "in_progress"),
+    )
+    if existing:
+        return _session_to_response(dict(existing))
 
-    res = sb.table("onboarding_sessions").insert({
-        "organisation_id": org_id,
-        "current_step": 1,
-        "status": "in_progress",
-    }).execute()
-    return _session_to_response(res.data[0])
+    r = execute_returning(conn,
+        """INSERT INTO onboarding_sessions (organisation_id, current_step, status)
+           VALUES (%s, %s, %s) RETURNING *""",
+        (org_id, 1, "in_progress"),
+    )
+    return _session_to_response(dict(r))
 
 
 @router.get("/sessions/current", response_model=OnboardingSessionResponse)
-async def get_current_session(current_user: dict = Depends(get_current_user)):
+async def get_current_session(
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     """Get the active onboarding session for the user's org."""
     org_id = _get_org_id(current_user)
-    sb = get_supabase()
-    res = sb.table("onboarding_sessions").select("*").eq("organisation_id", org_id).in_("status", ["in_progress", "completed"]).order("created_at", desc=True).limit(1).execute()
-    if not res.data:
+    r = row(conn,
+        """SELECT * FROM onboarding_sessions
+           WHERE organisation_id = %s AND status IN ('in_progress', 'completed')
+           ORDER BY created_at DESC LIMIT 1""",
+        (org_id,),
+    )
+    if not r:
         raise HTTPException(status_code=404, detail="No active onboarding session.")
-    return _session_to_response(res.data[0])
+    return _session_to_response(dict(r))
 
 
 @router.get("/sessions/{session_id}", response_model=OnboardingSessionResponse)
-async def get_session(session_id: str, current_user: dict = Depends(get_current_user)):
+async def get_session(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    return _session_to_response(_get_session(session_id, org_id))
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Step 1: Company Discovery ─────────────────────────────────────────────────
@@ -239,18 +255,15 @@ async def _scrape_website(url: str) -> dict:
     scraped["text_sample"] = body_text[:3000]
 
     # Try to find and scrape a locations / store-locator sub-page.
-    # Large chains keep store listings on a separate page; the homepage is just marketing copy.
     _LOCATION_KEYWORDS = [
-        "/stores",  # exact top-level path — highest priority
+        "/stores",
         "store-locator", "store_locator", "find-a-store", "find-store",
         "store-finder", "storefinder", "branch", "branches",
         "our-stores", "our-locations", "locations", "outlets", "stores",
     ]
-    # Collect ALL candidates then pick the shortest href.
-    # Shortest = listing page (/stores) rather than individual page (/stores/branch-xyz).
     loc_candidates = []
     for a in soup.find_all("a", href=True):
-        href = a["href"].lower().split("?")[0]  # ignore query params for matching
+        href = a["href"].lower().split("?")[0]
         if any(kw in href for kw in _LOCATION_KEYWORDS):
             loc_candidates.append(a["href"])
     loc_link = min(loc_candidates, key=lambda h: len(h)) if loc_candidates else None
@@ -264,14 +277,13 @@ async def _scrape_website(url: str) -> dict:
                 loc_resp.raise_for_status()
                 loc_soup = BeautifulSoup(loc_resp.text, "html.parser")
                 loc_text = loc_soup.get_text(separator=" ", strip=True)
-                # Append sub-page content so Claude has real location data to work with
                 scraped["text_sample"] = (
                     scraped["text_sample"]
                     + "\n\n[Store Locator Page: " + loc_url + "]\n"
                     + loc_text[:6000]
                 )
         except Exception as e:
-            _log.debug("Sub-page fetch failed: %s", e)  # Non-fatal; homepage text is still available
+            _log.debug("Sub-page fetch failed: %s", e)
 
     return scraped
 
@@ -318,18 +330,15 @@ JSON schema:
     text = "".join(b.text for b in response.content if hasattr(b, "text"))
 
     try:
-        # Strip markdown fences if model wrapped the JSON
         cleaned = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # Fall back to title-derived name rather than erroring
         data = {
             "company_name": scrape.get("og", {}).get("site_name") or scrape.get("title", "Your Company"),
             "industry_code": "qsr",
             "confidence": 0.3,
         }
 
-    # Use logo from scrape if AI didn't find one
     if not data.get("logo_url") and scrape.get("logo_url"):
         data["logo_url"] = scrape["logo_url"]
 
@@ -348,27 +357,29 @@ JSON schema:
 async def discover_company(
     session_id: str,
     req: CompanyDiscoveryRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Step 1: Scrape website and classify company. Does not advance step."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 1)
 
     scrape = await _scrape_website(req.website_url)
     profile = await _classify_with_ai(scrape)
 
-    # Save to session (not confirmed yet)
-    get_supabase().table("onboarding_sessions").update({
-        "website_url": req.website_url,
-        "company_name": profile.company_name,
-        "industry_code": profile.industry_code,
-        "industry_subcategory": profile.industry_subcategory,
-        "estimated_locations": profile.estimated_locations,
-        "brand_color": profile.brand_color_hex,
-        "logo_url": profile.logo_url,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).eq("organisation_id", org_id).execute()
+    execute(conn,
+        """UPDATE onboarding_sessions
+           SET website_url = %s, company_name = %s, industry_code = %s,
+               industry_subcategory = %s, estimated_locations = %s,
+               brand_color = %s, logo_url = %s, updated_at = %s
+           WHERE id = %s AND organisation_id = %s""",
+        (req.website_url, profile.company_name, profile.industry_code,
+         profile.industry_subcategory, profile.estimated_locations,
+         profile.brand_color_hex, profile.logo_url,
+         datetime.now(timezone.utc).isoformat(),
+         session_id, org_id),
+    )
 
     return profile
 
@@ -377,20 +388,23 @@ async def discover_company(
 async def discover_company_fallback(
     session_id: str,
     req: CompanyDiscoveryFallbackRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Step 1 fallback: Manual entry when scrape fails."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 1)
 
-    get_supabase().table("onboarding_sessions").update({
-        "company_name": req.company_name,
-        "industry_code": req.industry_code,
-        "industry_subcategory": req.industry_subcategory,
-        "estimated_locations": req.estimated_locations,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).eq("organisation_id", org_id).execute()
+    execute(conn,
+        """UPDATE onboarding_sessions
+           SET company_name = %s, industry_code = %s, industry_subcategory = %s,
+               estimated_locations = %s, updated_at = %s
+           WHERE id = %s AND organisation_id = %s""",
+        (req.company_name, req.industry_code, req.industry_subcategory,
+         req.estimated_locations, datetime.now(timezone.utc).isoformat(),
+         session_id, org_id),
+    )
 
     return CompanyProfile(
         company_name=req.company_name,
@@ -405,45 +419,56 @@ async def discover_company_fallback(
 async def confirm_company(
     session_id: str,
     profile: CompanyProfile,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Confirm company profile. Advance to step 2. Pre-populate template selections."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
-
-    sb = get_supabase()
+    session = _get_session(conn, session_id, org_id)
 
     # Save confirmed profile
-    sb.table("onboarding_sessions").update({
-        "company_name": profile.company_name,
-        "industry_code": profile.industry_code,
-        "industry_subcategory": profile.industry_subcategory,
-        "estimated_locations": profile.estimated_locations,
-        "brand_color": profile.brand_color_hex,
-        "logo_url": profile.logo_url,
-        "current_step": 2,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).eq("organisation_id", org_id).execute()
+    execute(conn,
+        """UPDATE onboarding_sessions
+           SET company_name = %s, industry_code = %s, industry_subcategory = %s,
+               estimated_locations = %s, brand_color = %s, logo_url = %s,
+               current_step = 2, updated_at = %s
+           WHERE id = %s AND organisation_id = %s""",
+        (profile.company_name, profile.industry_code, profile.industry_subcategory,
+         profile.estimated_locations, profile.brand_color_hex, profile.logo_url,
+         datetime.now(timezone.utc).isoformat(),
+         session_id, org_id),
+    )
 
     # Pre-populate template selections from industry package
-    pkg_res = sb.table("industry_packages").select("id").eq("industry_code", profile.industry_code).eq("is_active", True).limit(1).execute()
-    if pkg_res.data:
-        package_id = pkg_res.data[0]["id"]
-        items_res = sb.table("template_items").select("id, is_recommended").eq("package_id", package_id).execute()
+    pkg = row(conn,
+        "SELECT id FROM industry_packages WHERE industry_code = %s AND is_active = true LIMIT 1",
+        (profile.industry_code,),
+    )
+    if pkg:
+        package_id = pkg["id"]
+        items = rows(conn,
+            "SELECT id, is_recommended FROM template_items WHERE package_id = %s",
+            (package_id,),
+        )
 
-        # Only insert if selections don't already exist
-        existing = sb.table("onboarding_selections").select("template_id").eq("session_id", session_id).execute()
-        existing_ids = {r["template_id"] for r in existing.data}
+        existing = rows(conn,
+            "SELECT template_id FROM onboarding_selections WHERE session_id = %s",
+            (session_id,),
+        )
+        existing_ids = {r["template_id"] for r in existing}
 
         to_insert = [
-            {"session_id": session_id, "template_id": item["id"], "is_selected": item["is_recommended"]}
-            for item in items_res.data
+            (session_id, item["id"], item["is_recommended"])
+            for item in items
             if item["id"] not in existing_ids
         ]
         if to_insert:
-            sb.table("onboarding_selections").insert(to_insert).execute()
+            execute_many(conn,
+                "INSERT INTO onboarding_selections (session_id, template_id, is_selected) VALUES (%s, %s, %s)",
+                to_insert,
+            )
 
-    updated = _get_session(session_id, org_id)
+    updated = _get_session(conn, session_id, org_id)
     return _session_to_response(updated)
 
 
@@ -525,34 +550,39 @@ def _build_content_preview(category: str, content: dict) -> dict:
 
 
 @router.get("/sessions/{session_id}/templates", response_model=IndustryPackageResponse)
-async def get_templates(session_id: str, current_user: dict = Depends(get_current_user)):
-    """Load industry package with current selections for this session.
-
-    Step 6 = template selection (the step where the user picks their templates).
-    Steps 7 (workspace preview) and 8 (launch) are downstream of step 6, so
-    sessions at those steps are also permitted to call this endpoint — hence
-    the guard uses >= 6 rather than == 6.
-    """
+async def get_templates(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Load industry package with current selections for this session."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 6)
 
     industry_code = session.get("industry_code", "qsr")
-    sb = get_supabase()
 
-    pkg_res = sb.table("industry_packages").select("*").eq("industry_code", industry_code).eq("is_active", True).limit(1).execute()
-    if not pkg_res.data:
+    package = row(conn,
+        "SELECT * FROM industry_packages WHERE industry_code = %s AND is_active = true LIMIT 1",
+        (industry_code,),
+    )
+    if not package:
         raise HTTPException(status_code=404, detail=f"No industry package found for '{industry_code}'.")
-    package = pkg_res.data[0]
 
-    items_res = sb.table("template_items").select("*").eq("package_id", package["id"]).order("sort_order").execute()
-    selections_res = sb.table("onboarding_selections").select("template_id, is_selected").eq("session_id", session_id).execute()
+    items_list = rows(conn,
+        "SELECT * FROM template_items WHERE package_id = %s ORDER BY sort_order",
+        (package["id"],),
+    )
+    selections_list = rows(conn,
+        "SELECT template_id, is_selected FROM onboarding_selections WHERE session_id = %s",
+        (session_id,),
+    )
 
-    selected_map = {r["template_id"]: r["is_selected"] for r in selections_res.data}
+    selected_map = {r["template_id"]: r["is_selected"] for r in selections_list}
 
     # Group by category
     by_category: dict[str, list] = {c: [] for c in DISPLAY_CATEGORY_ORDER}
-    for item in items_res.data:
+    for item in items_list:
         cat = item["category"]
         if cat not in by_category:
             by_category[cat] = []
@@ -599,37 +629,46 @@ async def get_templates(session_id: str, current_user: dict = Depends(get_curren
 async def update_selections(
     session_id: str,
     updates: list[SelectionUpdate],
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Batch update template selections (debounced from frontend)."""
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    sb = get_supabase()
+    _get_session(conn, session_id, org_id)
 
     for u in updates:
-        sb.table("onboarding_selections").upsert(
-            {"session_id": session_id, "template_id": u.template_id, "is_selected": u.is_selected},
-            on_conflict="session_id,template_id",
-        ).execute()
+        execute(conn,
+            """INSERT INTO onboarding_selections (session_id, template_id, is_selected)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (session_id, template_id) DO UPDATE SET is_selected = EXCLUDED.is_selected""",
+            (session_id, u.template_id, u.is_selected),
+        )
 
     return {"ok": True}
 
 
 @router.get("/sessions/{session_id}/selections/summary", response_model=SelectionSummary)
-async def get_selection_summary(session_id: str, current_user: dict = Depends(get_current_user)):
+async def get_selection_summary(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    sb = get_supabase()
+    _get_session(conn, session_id, org_id)
 
-    rows = sb.table("onboarding_selections").select(
-        "is_selected, template_items(category)"
-    ).eq("session_id", session_id).execute()
+    sel_rows = rows(conn,
+        """SELECT os.is_selected, ti.category
+           FROM onboarding_selections os
+           JOIN template_items ti ON ti.id = os.template_id
+           WHERE os.session_id = %s""",
+        (session_id,),
+    )
 
     counts: dict[str, int] = {}
     total_selected = 0
-    total_available = len(rows.data)
-    for r in rows.data:
-        cat = (r.get("template_items") or {}).get("category", "")
+    total_available = len(sel_rows)
+    for r in sel_rows:
+        cat = r.get("category", "")
         if r["is_selected"]:
             counts[cat] = counts.get(cat, 0) + 1
             total_selected += 1
@@ -650,13 +689,17 @@ async def get_selection_summary(session_id: str, current_user: dict = Depends(ge
 
 
 @router.post("/sessions/{session_id}/confirm-templates", response_model=OnboardingSessionResponse)
-async def confirm_templates(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_templates(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm template selections. Advance to step 7 (Preview)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 6)
-    _advance_step(session_id, 7)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 7)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Step 2: Team Setup ─────────────────────────────────────────────────────────
@@ -665,14 +708,16 @@ async def confirm_templates(session_id: str, current_user: dict = Depends(requir
 async def set_employee_source(
     session_id: str,
     req: EmployeeSourceRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
-    get_supabase().table("onboarding_sessions").update(
-        {"employee_source": req.source, "updated_at": datetime.now(timezone.utc).isoformat()}
-    ).eq("id", session_id).eq("organisation_id", org_id).execute()
+    execute(conn,
+        "UPDATE onboarding_sessions SET employee_source = %s, updated_at = %s WHERE id = %s AND organisation_id = %s",
+        (req.source, datetime.now(timezone.utc).isoformat(), session_id, org_id),
+    )
     return {"ok": True}
 
 
@@ -680,11 +725,12 @@ async def set_employee_source(
 async def upload_employee_csv(
     session_id: str,
     file: UploadFile = File(...),
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Upload CSV/XLSX, validate rows, AI-map roles."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
 
     try:
@@ -727,46 +773,46 @@ async def upload_employee_csv(
     errors = []
     valid_employees = []
 
-    for idx, row in df.iterrows():
+    for idx, csv_row in df.iterrows():
         line = idx + 2  # human-readable row number
 
         # Build full_name
-        if mapped.get("full_name") and pd.notna(row.get(mapped["full_name"], "")):
-            full_name = str(row[mapped["full_name"]]).strip()
+        if mapped.get("full_name") and pd.notna(csv_row.get(mapped["full_name"], "")):
+            full_name = str(csv_row[mapped["full_name"]]).strip()
         elif mapped.get("first_name") and mapped.get("last_name"):
-            fn = str(row.get(mapped["first_name"], "")).strip()
-            ln = str(row.get(mapped["last_name"], "")).strip()
+            fn = str(csv_row.get(mapped["first_name"], "")).strip()
+            ln = str(csv_row.get(mapped["last_name"], "")).strip()
             full_name = f"{fn} {ln}".strip()
         else:
             errors.append({"row": line, "error": "Missing name columns"})
             continue
 
         email_col = mapped.get("email")
-        email = str(row[email_col]).strip().lower() if email_col and pd.notna(row.get(email_col, "")) else ""
+        email = str(csv_row[email_col]).strip().lower() if email_col and pd.notna(csv_row.get(email_col, "")) else ""
         if not email or "@" not in email:
             errors.append({"row": line, "error": f"Invalid or missing email for {full_name}"})
             continue
 
         position = ""
-        if mapped.get("position") and pd.notna(row.get(mapped["position"], "")):
-            position = str(row[mapped["position"]]).strip()
+        if mapped.get("position") and pd.notna(csv_row.get(mapped["position"], "")):
+            position = str(csv_row[mapped["position"]]).strip()
 
         department = ""
-        if mapped.get("department") and pd.notna(row.get(mapped["department"], "")):
-            department = str(row[mapped["department"]]).strip()
+        if mapped.get("department") and pd.notna(csv_row.get(mapped["department"], "")):
+            department = str(csv_row[mapped["department"]]).strip()
 
         location_name = ""
-        if mapped.get("location") and pd.notna(row.get(mapped["location"], "")):
-            location_name = str(row[mapped["location"]]).strip()
+        if mapped.get("location") and pd.notna(csv_row.get(mapped["location"], "")):
+            location_name = str(csv_row[mapped["location"]]).strip()
 
         reports_to = ""
-        if mapped.get("reports_to") and pd.notna(row.get(mapped["reports_to"], "")):
-            reports_to = str(row[mapped["reports_to"]]).strip()
+        if mapped.get("reports_to") and pd.notna(csv_row.get(mapped["reports_to"], "")):
+            reports_to = str(csv_row[mapped["reports_to"]]).strip()
 
         valid_employees.append({
             "full_name": full_name,
             "email": email,
-            "phone": str(row.get(mapped["phone"] or "", "")).strip() if mapped.get("phone") else None,
+            "phone": str(csv_row.get(mapped["phone"] or "", "")).strip() if mapped.get("phone") else None,
             "position": position,
             "department": department,
             "location_name": location_name,
@@ -774,16 +820,12 @@ async def upload_employee_csv(
         })
 
     # AI role mapping for unique positions
-    sb = get_supabase()
-    job_res = sb.table("employee_import_jobs").insert({
-        "session_id": session_id,
-        "source_type": "csv",
-        "status": "processing",
-        "total_records": len(valid_employees) + len(errors),
-        "failed_records": len(errors),
-        "error_log": errors,
-    }).execute()
-    job_id = job_res.data[0]["id"]
+    job = execute_returning(conn,
+        """INSERT INTO employee_import_jobs (session_id, source_type, status, total_records, failed_records, error_log)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+        (session_id, "csv", "processing", len(valid_employees) + len(errors), len(errors), json.dumps(errors)),
+    )
+    job_id = job["id"]
 
     # Run AI role mapping for unique position+department combos
     if valid_employees:
@@ -794,7 +836,7 @@ async def upload_employee_csv(
                 unique_combos[key] = 0
             unique_combos[key] += 1
 
-        mappings = await _map_roles_with_ai(session_id, unique_combos, org_id)
+        mappings = await _map_roles_with_ai(conn, session_id, unique_combos, org_id)
         role_map = {(m["source_title"], m.get("source_department", "")): m["retail_role"] for m in mappings}
 
         # Insert employees
@@ -802,28 +844,29 @@ async def upload_employee_csv(
         for emp in valid_employees:
             role_key = (emp["position"], emp["department"])
             retail_role = role_map.get(role_key, "staff")
-            to_insert.append({
-                "session_id": session_id,
-                "full_name": emp["full_name"],
-                "email": emp["email"],
-                "phone": emp.get("phone"),
-                "position": emp["position"],
-                "department": emp["department"],
-                "location_name": emp["location_name"],
-                "reports_to": emp.get("reports_to"),
-                "retail_role": retail_role,
-                "status": "pending",
-            })
+            to_insert.append((
+                session_id, emp["full_name"], emp["email"], emp.get("phone"),
+                emp["position"], emp["department"], emp["location_name"],
+                emp.get("reports_to"), retail_role, "pending",
+            ))
 
         if to_insert:
-            sb.table("onboarding_employees").insert(to_insert).execute()
+            execute_many(conn,
+                """INSERT INTO onboarding_employees
+                   (session_id, full_name, email, phone, position, department,
+                    location_name, reports_to, retail_role, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                to_insert,
+            )
 
         # Update job
-        sb.table("employee_import_jobs").update({
-            "status": "completed" if not errors else "partial",
-            "processed_records": len(valid_employees),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", job_id).execute()
+        execute(conn,
+            """UPDATE employee_import_jobs
+               SET status = %s, processed_records = %s, updated_at = %s
+               WHERE id = %s""",
+            ("completed" if not errors else "partial", len(valid_employees),
+             datetime.now(timezone.utc).isoformat(), job_id),
+        )
 
     return CSVImportResult(
         total_rows=len(valid_employees) + len(errors),
@@ -834,10 +877,9 @@ async def upload_employee_csv(
     )
 
 
-async def _map_roles_with_ai(session_id: str, combos: dict, org_id: str) -> list[dict]:
+async def _map_roles_with_ai(conn, session_id: str, combos: dict, org_id: str) -> list[dict]:
     """AI role mapping for unique position+department combos."""
     client = _get_anthropic()
-    sb = get_supabase()
 
     system_prompt = """You are mapping retail HR position titles to app roles.
 
@@ -884,30 +926,34 @@ Schema: [{"source_title": "...", "source_department": "...", "retail_role": "...
                     for (t, d) in combos.keys()]
 
     # Save to role_mappings table (replace any existing mappings for this session).
-    # Fetch existing row IDs first, insert new rows, then delete the old ones
-    # only after the insert succeeds — so a failed insert never leaves the
-    # session with zero mappings.
-    existing_rows = sb.table("role_mappings").select("id").eq("session_id", session_id).eq("organisation_id", org_id).execute()
-    old_ids = [r["id"] for r in (existing_rows.data or [])]
+    existing_rows_list = rows(conn,
+        "SELECT id FROM role_mappings WHERE session_id = %s AND organisation_id = %s",
+        (session_id, org_id),
+    )
+    old_ids = [r["id"] for r in existing_rows_list]
 
     to_insert = []
     for m in mappings:
         count = combos.get((m.get("source_title", ""), m.get("source_department", "")), 1)
-        to_insert.append({
-            "session_id": session_id,
-            "organisation_id": org_id,
-            "source_title": m.get("source_title", ""),
-            "source_department": m.get("source_department"),
-            "retail_role": m.get("retail_role", "staff"),
-            "confidence_score": float(m.get("confidence", 0.5)),
-            "is_confirmed": False,
-            "employee_count": count,
-        })
+        to_insert.append((
+            session_id, org_id, m.get("source_title", ""),
+            m.get("source_department"), m.get("retail_role", "staff"),
+            float(m.get("confidence", 0.5)), False, count,
+        ))
     if to_insert:
-        sb.table("role_mappings").insert(to_insert).execute()
+        execute_many(conn,
+            """INSERT INTO role_mappings
+               (session_id, organisation_id, source_title, source_department,
+                retail_role, confidence_score, is_confirmed, employee_count)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            to_insert,
+        )
         # Insert succeeded — now safe to remove the previous mappings
         if old_ids:
-            sb.table("role_mappings").delete().eq("organisation_id", org_id).in_("id", old_ids).execute()
+            execute(conn,
+                "DELETE FROM role_mappings WHERE organisation_id = %s AND id = ANY(%s::uuid[])",
+                (org_id, old_ids),
+            )
 
     return mappings
 
@@ -931,45 +977,53 @@ async def download_csv_template(session_id: str, current_user: dict = Depends(ge
 async def add_employee_manual(
     session_id: str,
     employee: ManualEmployeeInput,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Manually add a single employee during onboarding."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
-    sb = get_supabase()
-    res = sb.table("onboarding_employees").insert({
-        "session_id": session_id,
-        "full_name": employee.full_name,
-        "email": employee.email,
-        "phone": employee.phone,
-        "position": employee.position,
-        "department": employee.department,
-        "retail_role": employee.retail_role,
-        "location_name": employee.location_name,
-        "reports_to": getattr(employee, "reports_to", None),
-        "status": "pending",
-    }).execute()
-    return res.data[0]
+    r = execute_returning(conn,
+        """INSERT INTO onboarding_employees
+           (session_id, full_name, email, phone, position, department,
+            retail_role, location_name, reports_to, status)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *""",
+        (session_id, employee.full_name, employee.email, employee.phone,
+         employee.position, employee.department, employee.retail_role,
+         employee.location_name, getattr(employee, "reports_to", None), "pending"),
+    )
+    return dict(r)
 
 
 @router.get("/sessions/{session_id}/employees")
-async def list_employees(session_id: str, current_user: dict = Depends(get_current_user)):
+async def list_employees(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    res = get_supabase().table("onboarding_employees").select("*").eq("session_id", session_id).order("created_at").execute()
-    return {"employees": res.data, "total": len(res.data)}
+    _get_session(conn, session_id, org_id)
+    emp_rows = rows(conn,
+        "SELECT * FROM onboarding_employees WHERE session_id = %s ORDER BY created_at",
+        (session_id,),
+    )
+    return {"employees": [dict(r) for r in emp_rows], "total": len(emp_rows)}
 
 
 @router.delete("/sessions/{session_id}/employees/{employee_id}")
 async def delete_employee(
     session_id: str,
     employee_id: str,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("onboarding_employees").update({"is_deleted": True}).eq("id", employee_id).eq("session_id", session_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        "UPDATE onboarding_employees SET is_deleted = true WHERE id = %s AND session_id = %s",
+        (employee_id, session_id),
+    )
     return {"ok": True}
 
 
@@ -977,23 +1031,26 @@ async def delete_employee(
 async def generate_invite_link(
     session_id: str,
     config: InviteConfig,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Generate invite URL + base64 QR code."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
 
     token = secrets.token_urlsafe(24)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.expiry_hours)).isoformat()
     invite_url = f"https://app.sprout.ph/join/{token}?role={config.default_role}"
-    get_supabase().table("onboarding_sessions").update({
-        "invite_token_hash": token_hash,
-        "invite_token_expires_at": expires_at,
-        "invite_default_role": config.default_role,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).eq("organisation_id", org_id).execute()
+    execute(conn,
+        """UPDATE onboarding_sessions
+           SET invite_token_hash = %s, invite_token_expires_at = %s,
+               invite_default_role = %s, updated_at = %s
+           WHERE id = %s AND organisation_id = %s""",
+        (token_hash, expires_at, config.default_role,
+         datetime.now(timezone.utc).isoformat(), session_id, org_id),
+    )
 
     # Generate real QR code as SVG
     try:
@@ -1020,10 +1077,17 @@ async def generate_invite_link(
 
 
 @router.get("/sessions/{session_id}/role-mappings", response_model=list[RoleMappingResponse])
-async def get_role_mappings(session_id: str, current_user: dict = Depends(get_current_user)):
+async def get_role_mappings(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    res = get_supabase().table("role_mappings").select("*").eq("session_id", session_id).order("employee_count", desc=True).execute()
+    _get_session(conn, session_id, org_id)
+    mapping_rows = rows(conn,
+        "SELECT * FROM role_mappings WHERE session_id = %s ORDER BY employee_count DESC",
+        (session_id,),
+    )
     return [
         RoleMappingResponse(
             id=r["id"],
@@ -1035,7 +1099,7 @@ async def get_role_mappings(session_id: str, current_user: dict = Depends(get_cu
             employee_count=r.get("employee_count", 0),
             low_confidence=r["confidence_score"] < 0.7,
         )
-        for r in res.data
+        for r in mapping_rows
     ]
 
 
@@ -1044,36 +1108,45 @@ async def update_role_mapping(
     session_id: str,
     mapping_id: str,
     update: RoleMappingUpdate,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("role_mappings").update({
-        "retail_role": update.retail_role,
-        "is_confirmed": True,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", mapping_id).eq("session_id", session_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        """UPDATE role_mappings SET retail_role = %s, is_confirmed = true, updated_at = %s
+           WHERE id = %s AND session_id = %s""",
+        (update.retail_role, datetime.now(timezone.utc).isoformat(), mapping_id, session_id),
+    )
     return {"ok": True}
 
 
 @router.post("/sessions/{session_id}/confirm-employees", response_model=OnboardingSessionResponse)
-async def confirm_employees(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_employees(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm employee setup. Advance to step 3 (Shift Settings)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
-    _advance_step(session_id, 3)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 3)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Step 1: Locations (part of Company step) ──────────────────────────────────
 
 
 @router.get("/sessions/{session_id}/suggest-locations")
-async def suggest_locations(session_id: str, current_user: dict = Depends(require_admin)):
+async def suggest_locations(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """AI extracts real branch/location names from the company website, or generates plausible ones as fallback."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
 
     company_name = session.get("company_name") or "the company"
@@ -1134,7 +1207,6 @@ async def suggest_locations(session_id: str, current_user: dict = Depends(requir
         suggestions = json.loads(text.strip())
         if not isinstance(suggestions, list):
             suggestions = []
-        # Normalise — ensure every item has name and address keys
         suggestions = [
             {"name": s.get("name", "").strip(), "address": (s.get("address") or "").strip()}
             for s in suggestions
@@ -1152,59 +1224,82 @@ async def suggest_locations(session_id: str, current_user: dict = Depends(requir
 async def add_location(
     session_id: str,
     loc: OnboardingLocation,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
-    sb = get_supabase()
-    res = sb.table("onboarding_locations").insert({
-        "session_id": session_id,
-        "name": loc.name,
-        "address": loc.address,
-    }).execute()
-    row = res.data[0]
-    return OnboardingLocation(id=row["id"], name=row["name"], address=row.get("address"))
+    r = execute_returning(conn,
+        "INSERT INTO onboarding_locations (session_id, name, address) VALUES (%s, %s, %s) RETURNING *",
+        (session_id, loc.name, loc.address),
+    )
+    return OnboardingLocation(id=r["id"], name=r["name"], address=r.get("address"))
 
 
 @router.get("/sessions/{session_id}/locations")
-async def list_locations(session_id: str, current_user: dict = Depends(get_current_user)):
+async def list_locations(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    res = get_supabase().table("onboarding_locations").select("*").eq("session_id", session_id).execute()
-    return res.data
+    _get_session(conn, session_id, org_id)
+    loc_rows = rows(conn,
+        "SELECT * FROM onboarding_locations WHERE session_id = %s",
+        (session_id,),
+    )
+    return [dict(r) for r in loc_rows]
 
 
 @router.delete("/sessions/{session_id}/locations/{loc_id}", status_code=204)
-async def delete_location(session_id: str, loc_id: str, current_user: dict = Depends(require_admin)):
+async def delete_location(
+    session_id: str,
+    loc_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("onboarding_locations").delete().eq("id", loc_id).eq("session_id", session_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        "DELETE FROM onboarding_locations WHERE id = %s AND session_id = %s",
+        (loc_id, session_id),
+    )
 
 
 @router.post("/sessions/{session_id}/confirm-locations", response_model=OnboardingSessionResponse)
-async def confirm_locations(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_locations(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm locations (part of Company & Locations step). No step advance."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 2)
-    # Locations are confirmed as part of Step 1; no step advance needed here.
-    return _session_to_response(_get_session(session_id, org_id))
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Steps 4–5: Assets & Vendors ───────────────────────────────────────────────
 
 
 @router.get("/sessions/{session_id}/suggest-assets")
-async def suggest_assets(session_id: str, current_user: dict = Depends(require_admin)):
+async def suggest_assets(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """AI suggests equipment/assets based on industry and location count."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 4)
 
     industry = INDUSTRY_DISPLAY.get(session.get("industry_code", ""), session.get("industry_code", "retail"))
-    loc_res = get_supabase().table("onboarding_locations").select("name").eq("session_id", session_id).execute()
-    locations = [r["name"] for r in loc_res.data] or ["Main Branch"]
+    loc_rows_list = rows(conn,
+        "SELECT name FROM onboarding_locations WHERE session_id = %s",
+        (session_id,),
+    )
+    locations = [r["name"] for r in loc_rows_list] or ["Main Branch"]
 
     client = _get_anthropic()
 
@@ -1239,132 +1334,194 @@ async def suggest_assets(session_id: str, current_user: dict = Depends(require_a
 
 
 @router.post("/sessions/{session_id}/assets", response_model=OnboardingAsset)
-async def add_asset(session_id: str, asset: OnboardingAsset, current_user: dict = Depends(require_admin)):
+async def add_asset(
+    session_id: str,
+    asset: OnboardingAsset,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    sb = get_supabase()
-    res = sb.table("onboarding_assets").insert({
-        "session_id": session_id,
-        "name": asset.name,
-        "category": asset.category,
-        "model": asset.model,
-        "manufacturer": asset.manufacturer,
-        "location_name": asset.location_name,
-    }).execute()
-    row = res.data[0]
-    return OnboardingAsset(**{k: row.get(k) for k in ["id", "name", "category", "model", "manufacturer", "location_name"]})
+    _get_session(conn, session_id, org_id)
+    r = execute_returning(conn,
+        """INSERT INTO onboarding_assets (session_id, name, category, model, manufacturer, location_name)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING *""",
+        (session_id, asset.name, asset.category, asset.model, asset.manufacturer, asset.location_name),
+    )
+    return OnboardingAsset(**{k: r.get(k) for k in ["id", "name", "category", "model", "manufacturer", "location_name"]})
 
 
 @router.get("/sessions/{session_id}/assets")
-async def list_assets(session_id: str, current_user: dict = Depends(get_current_user)):
+async def list_assets(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    res = get_supabase().table("onboarding_assets").select("*").eq("session_id", session_id).execute()
-    return res.data
+    _get_session(conn, session_id, org_id)
+    asset_rows = rows(conn,
+        "SELECT * FROM onboarding_assets WHERE session_id = %s",
+        (session_id,),
+    )
+    return [dict(r) for r in asset_rows]
 
 
 @router.delete("/sessions/{session_id}/assets/{asset_id}", status_code=204)
-async def delete_asset(session_id: str, asset_id: str, current_user: dict = Depends(require_admin)):
+async def delete_asset(
+    session_id: str,
+    asset_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("onboarding_assets").delete().eq("id", asset_id).eq("session_id", session_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        "DELETE FROM onboarding_assets WHERE id = %s AND session_id = %s",
+        (asset_id, session_id),
+    )
 
 
 @router.post("/sessions/{session_id}/vendors", response_model=OnboardingVendor)
-async def add_vendor(session_id: str, vendor: OnboardingVendor, current_user: dict = Depends(require_admin)):
+async def add_vendor(
+    session_id: str,
+    vendor: OnboardingVendor,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    sb = get_supabase()
-    res = sb.table("onboarding_vendors").insert({
-        "session_id": session_id,
-        "name": vendor.name,
-        "service_type": vendor.service_type,
-        "contact_email": vendor.contact_email,
-        "contact_phone": vendor.contact_phone,
-    }).execute()
-    row = res.data[0]
-    return OnboardingVendor(**{k: row.get(k) for k in ["id", "name", "service_type", "contact_email", "contact_phone"]})
+    _get_session(conn, session_id, org_id)
+    r = execute_returning(conn,
+        """INSERT INTO onboarding_vendors (session_id, name, service_type, contact_email, contact_phone)
+           VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+        (session_id, vendor.name, vendor.service_type, vendor.contact_email, vendor.contact_phone),
+    )
+    return OnboardingVendor(**{k: r.get(k) for k in ["id", "name", "service_type", "contact_email", "contact_phone"]})
 
 
 @router.get("/sessions/{session_id}/vendors")
-async def list_vendors(session_id: str, current_user: dict = Depends(get_current_user)):
+async def list_vendors(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    res = get_supabase().table("onboarding_vendors").select("*").eq("session_id", session_id).execute()
-    return res.data
+    _get_session(conn, session_id, org_id)
+    vendor_rows = rows(conn,
+        "SELECT * FROM onboarding_vendors WHERE session_id = %s",
+        (session_id,),
+    )
+    return [dict(r) for r in vendor_rows]
 
 
 @router.delete("/sessions/{session_id}/vendors/{vendor_id}", status_code=204)
-async def delete_vendor(session_id: str, vendor_id: str, current_user: dict = Depends(require_admin)):
+async def delete_vendor(
+    session_id: str,
+    vendor_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("onboarding_vendors").delete().eq("id", vendor_id).eq("session_id", session_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        "DELETE FROM onboarding_vendors WHERE id = %s AND session_id = %s",
+        (vendor_id, session_id),
+    )
 
 
 @router.post("/sessions/{session_id}/confirm-assets", response_model=OnboardingSessionResponse)
-async def confirm_assets(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_assets(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm assets (or skip). Advance to step 5 (Vendors)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 4)
-    _advance_step(session_id, 5)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 5)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 @router.post("/sessions/{session_id}/confirm-vendors", response_model=OnboardingSessionResponse)
-async def confirm_vendors(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_vendors(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm vendors (or skip). Advance to step 6 (Shift Settings)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 5)
-    _advance_step(session_id, 6)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 6)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 @router.post("/sessions/{session_id}/confirm-shift-settings", response_model=OnboardingSessionResponse)
-async def confirm_shift_settings(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_shift_settings(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Confirm shift settings (or skip). Advance to step 4 (Assets)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 3)
-    _advance_step(session_id, 4)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 4)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Step 7: Workspace Preview ──────────────────────────────────────────────────
 
 @router.get("/sessions/{session_id}/preview", response_model=WorkspacePreview)
-async def get_workspace_preview(session_id: str, current_user: dict = Depends(get_current_user)):
+async def get_workspace_preview(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     """Aggregate all onboarding data into a preview (read-only)."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 7)
-    sb = get_supabase()
 
     # Fetch selected templates with content
-    selected_res = sb.table("onboarding_selections").select(
-        "is_selected, customizations, template_items(*)"
-    ).eq("session_id", session_id).eq("is_selected", True).execute()
+    selected_rows = rows(conn,
+        """SELECT os.is_selected, os.customizations,
+                  ti.id AS ti_id, ti.name AS ti_name, ti.description AS ti_description,
+                  ti.category, ti.content
+           FROM onboarding_selections os
+           JOIN template_items ti ON ti.id = os.template_id
+           WHERE os.session_id = %s AND os.is_selected = true""",
+        (session_id,),
+    )
 
     by_cat: dict[str, list] = {}
-    for row in selected_res.data:
-        item = row.get("template_items") or {}
-        cat = item.get("category", "")
-        content = item.get("content", {})
-        if row.get("customizations"):
-            content = {**content, **row["customizations"]}
-        entry = {"id": item.get("id"), "name": item.get("name"), "description": item.get("description"), **content}
+    for r in selected_rows:
+        cat = r.get("category", "")
+        content = r.get("content") or {}
+        if isinstance(content, str):
+            content = json.loads(content)
+        customizations = r.get("customizations")
+        if customizations:
+            if isinstance(customizations, str):
+                customizations = json.loads(customizations)
+            content = {**content, **customizations}
+        entry = {"id": r.get("ti_id"), "name": r.get("ti_name"), "description": r.get("ti_description"), **content}
         by_cat.setdefault(cat, []).append(entry)
 
     # Employees
-    emp_res = sb.table("onboarding_employees").select("*").eq("session_id", session_id).execute()
+    emp_rows = rows(conn,
+        "SELECT * FROM onboarding_employees WHERE session_id = %s",
+        (session_id,),
+    )
     by_role: dict[str, int] = {}
-    for e in emp_res.data:
-        r = e.get("retail_role", "staff")
-        by_role[r] = by_role.get(r, 0) + 1
+    for e in emp_rows:
+        r_val = e.get("retail_role", "staff")
+        by_role[r_val] = by_role.get(r_val, 0) + 1
 
-    role_res = sb.table("role_mappings").select("*").eq("session_id", session_id).eq("is_confirmed", False).execute()
-    pending_review = len([r for r in role_res.data if r["confidence_score"] < 0.7])
+    role_rows = rows(conn,
+        "SELECT * FROM role_mappings WHERE session_id = %s AND is_confirmed = false",
+        (session_id,),
+    )
+    pending_review = len([r for r in role_rows if r["confidence_score"] < 0.7])
 
     summary = SelectionSummary(
         forms=len(by_cat.get("form", [])),
@@ -1376,26 +1533,26 @@ async def get_workspace_preview(session_id: str, current_user: dict = Depends(ge
         shift_templates=len(by_cat.get("shift_template", [])),
         repair_manuals=len(by_cat.get("repair_manual", [])),
         badges=len(by_cat.get("badge", [])),
-        total_selected=len(selected_res.data),
-        total_available=len(selected_res.data),
+        total_selected=len(selected_rows),
+        total_available=len(selected_rows),
     )
 
-    loc_res = sb.table("onboarding_locations").select("*").eq("session_id", session_id).execute()
-    asset_res = sb.table("onboarding_assets").select("*").eq("session_id", session_id).execute()
-    vendor_res = sb.table("onboarding_vendors").select("*").eq("session_id", session_id).execute()
+    loc_rows = rows(conn, "SELECT * FROM onboarding_locations WHERE session_id = %s", (session_id,))
+    asset_rows = rows(conn, "SELECT * FROM onboarding_assets WHERE session_id = %s", (session_id,))
+    vendor_rows = rows(conn, "SELECT * FROM onboarding_vendors WHERE session_id = %s", (session_id,))
 
     return WorkspacePreview(
         summary=summary,
-        locations=loc_res.data,
-        assets=asset_res.data,
-        vendors=vendor_res.data,
+        locations=[dict(r) for r in loc_rows],
+        assets=[dict(r) for r in asset_rows],
+        vendors=[dict(r) for r in vendor_rows],
         forms_and_checklists=by_cat.get("form", []) + by_cat.get("checklist", []) + by_cat.get("audit", []),
         issue_categories=by_cat.get("issue_category", []),
         workflows=by_cat.get("workflow", []),
         training_modules=by_cat.get("training_module", []),
         shift_templates=by_cat.get("shift_template", []),
         repair_manuals=by_cat.get("repair_manual", []),
-        employees={"total": len(emp_res.data), "by_role": by_role, "pending_review": pending_review},
+        employees={"total": len(emp_rows), "by_role": by_role, "pending_review": pending_review},
         company_name=session.get("company_name"),
         brand_color=session.get("brand_color"),
         logo_url=session.get("logo_url"),
@@ -1407,25 +1564,32 @@ async def edit_template_inline(
     session_id: str,
     template_id: str,
     updates: dict,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Inline edit template customizations during preview."""
     org_id = _get_org_id(current_user)
-    _get_session(session_id, org_id)
-    get_supabase().table("onboarding_selections").update(
-        {"customizations": updates}
-    ).eq("session_id", session_id).eq("template_id", template_id).execute()
+    _get_session(conn, session_id, org_id)
+    execute(conn,
+        """UPDATE onboarding_selections SET customizations = %s
+           WHERE session_id = %s AND template_id = %s""",
+        (json.dumps(updates), session_id, template_id),
+    )
     return {"ok": True}
 
 
 @router.post("/sessions/{session_id}/confirm-preview", response_model=OnboardingSessionResponse)
-async def confirm_preview(session_id: str, current_user: dict = Depends(require_admin)):
+async def confirm_preview(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(require_admin),
+):
     """Advance to step 8."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 7)
-    _advance_step(session_id, 8)
-    return _session_to_response(_get_session(session_id, org_id))
+    _advance_step(conn, session_id, 8)
+    return _session_to_response(_get_session(conn, session_id, org_id))
 
 
 # ── Step 8: Launch ─────────────────────────────────────────────────────────────
@@ -1448,135 +1612,154 @@ LAUNCH_STEPS = [
 
 
 async def _provision_workspace(session_id: str, org_id: str, created_by: str = ""):
-    """Background task: create live workspace entities from onboarding selections."""
-    sb = get_supabase()
+    """Background task: create live workspace entities from onboarding selections.
+
+    NOTE: This runs as a background task outside the request lifecycle, so it
+    obtains its own DB connection from the pool rather than using Depends(get_db).
+    """
+    from services.db import _get_pool
+    pool = _get_pool()
+    conn = pool.getconn()
+
     completed_steps = []
 
     def _update_progress(step: str, percent: int):
-        sb.table("onboarding_sessions").update({
-            "launch_progress": {
+        execute(conn,
+            """UPDATE onboarding_sessions
+               SET launch_progress = %s, updated_at = %s
+               WHERE id = %s AND organisation_id = %s""",
+            (json.dumps({
                 "status": "provisioning",
                 "current_step": step,
                 "progress_percent": percent,
                 "steps_completed": completed_steps,
                 "steps_remaining": [s for s in LAUNCH_STEPS if s not in completed_steps],
-            },
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).eq("organisation_id", org_id).execute()
+            }), datetime.now(timezone.utc).isoformat(), session_id, org_id),
+        )
+        conn.commit()
 
     try:
         # Clean up any previously partially-provisioned records so re-runs are idempotent
-        # Delete children first (no-cascade FKs), then parents
-        for tbl in ["workflow_stages", "course_modules"]:
-            # These don't have organisation_id — delete via parent join
-            pass  # handled by parent delete below via Supabase cascade on form_sections/fields
         # workflow_stages: join through workflow_definitions
-        wf_ids = [r["id"] for r in (sb.table("workflow_definitions").select("id").eq("organisation_id", org_id).execute().data or [])]
+        wf_id_rows = rows(conn, "SELECT id FROM workflow_definitions WHERE organisation_id = %s", (org_id,))
+        wf_ids = [r["id"] for r in wf_id_rows]
         if wf_ids:
-            sb.table("workflow_stages").delete().in_("workflow_definition_id", wf_ids).execute()
-            sb.table("workflow_routing_rules").delete().in_("workflow_definition_id", wf_ids).execute()
+            execute(conn, "DELETE FROM workflow_stages WHERE workflow_definition_id = ANY(%s::uuid[])", (wf_ids,))
+            execute(conn, "DELETE FROM workflow_routing_rules WHERE workflow_definition_id = ANY(%s::uuid[])", (wf_ids,))
+
         # course_modules + slides + quiz questions: join through courses
-        course_ids = [r["id"] for r in (sb.table("courses").select("id").eq("organisation_id", org_id).execute().data or [])]
+        course_id_rows = rows(conn, "SELECT id FROM courses WHERE organisation_id = %s", (org_id,))
+        course_ids = [r["id"] for r in course_id_rows]
         if course_ids:
-            mod_ids = [r["id"] for r in (sb.table("course_modules").select("id").in_("course_id", course_ids).execute().data or [])]
+            mod_id_rows = rows(conn, "SELECT id FROM course_modules WHERE course_id = ANY(%s::uuid[])", (course_ids,))
+            mod_ids = [r["id"] for r in mod_id_rows]
             if mod_ids:
-                sb.table("course_slides").delete().in_("module_id", mod_ids).execute()
-                sb.table("quiz_questions").delete().in_("module_id", mod_ids).execute()
-            sb.table("course_modules").delete().in_("course_id", course_ids).execute()
-        # Delete children that RESTRICT form_templates deletion (form_sections CASCADE, so skip)
-        ft_ids = [r["id"] for r in (sb.table("form_templates").select("id").eq("organisation_id", org_id).execute().data or [])]
+                execute(conn, "DELETE FROM course_slides WHERE module_id = ANY(%s::uuid[])", (mod_ids,))
+                execute(conn, "DELETE FROM quiz_questions WHERE module_id = ANY(%s::uuid[])", (mod_ids,))
+            execute(conn, "DELETE FROM course_modules WHERE course_id = ANY(%s::uuid[])", (course_ids,))
+
+        # Delete children that RESTRICT form_templates deletion
+        ft_id_rows = rows(conn, "SELECT id FROM form_templates WHERE organisation_id = %s", (org_id,))
+        ft_ids = [r["id"] for r in ft_id_rows]
         if ft_ids:
-            sb.table("form_assignments").delete().in_("form_template_id", ft_ids).execute()
-            sb.table("audit_configs").delete().in_("form_template_id", ft_ids).execute()
-            sb.table("form_submissions").delete().in_("form_template_id", ft_ids).execute()
+            execute(conn, "DELETE FROM form_assignments WHERE form_template_id = ANY(%s::uuid[])", (ft_ids,))
+            execute(conn, "DELETE FROM audit_configs WHERE form_template_id = ANY(%s::uuid[])", (ft_ids,))
+            execute(conn, "DELETE FROM form_submissions WHERE form_template_id = ANY(%s::uuid[])", (ft_ids,))
+
         # Order matters: delete children before parents (FK constraints)
         for tbl in [
             "repair_guides", "courses",
-            "assets", "vendors",          # reference locations
-            "shift_templates",            # cascades from locations but be explicit
-            "workflow_definitions",       # references form_templates
+            "assets", "vendors",
+            "shift_templates",
+            "workflow_definitions",
             "issue_categories",
             "form_templates",
             "badge_configs",
             "locations",
         ]:
-            sb.table(tbl).delete().eq("organisation_id", org_id).execute()
+            execute(conn, f"DELETE FROM {tbl} WHERE organisation_id = %s", (org_id,))
 
-        session = sb.table("onboarding_sessions").select("*").eq("id", session_id).execute().data[0]
+        conn.commit()
+
+        session = dict(row(conn, "SELECT * FROM onboarding_sessions WHERE id = %s", (session_id,)))
         industry = INDUSTRY_DISPLAY.get(session.get("industry_code", ""), session.get("industry_code", "retail"))
 
         # Stamp industry_code on the organisation so AI endpoints can use it post-onboarding
         if session.get("industry_code"):
-            sb.table("organisations").update({
-                "industry_code": session["industry_code"],
-            }).eq("id", org_id).execute()
+            execute(conn, "UPDATE organisations SET industry_code = %s WHERE id = %s",
+                    (session["industry_code"], org_id))
 
         # Fetch all selected templates
-        selected_res = sb.table("onboarding_selections").select(
-            "customizations, template_items(*)"
-        ).eq("session_id", session_id).eq("is_selected", True).execute()
+        selected_res = rows(conn,
+            """SELECT os.customizations,
+                      ti.name AS ti_name, ti.category, ti.content
+               FROM onboarding_selections os
+               JOIN template_items ti ON ti.id = os.template_id
+               WHERE os.session_id = %s AND os.is_selected = true""",
+            (session_id,),
+        )
 
         by_cat: dict[str, list] = {}
-        for row in selected_res.data:
-            item = row.get("template_items") or {}
-            cat = item.get("category", "")
-            content = {**(item.get("content") or {}), **(row.get("customizations") or {})}
-            by_cat.setdefault(cat, []).append({"name": item.get("name"), "content": content})
+        for sel_row in selected_res:
+            cat = sel_row.get("category", "")
+            content_val = sel_row.get("content") or {}
+            if isinstance(content_val, str):
+                content_val = json.loads(content_val)
+            cust = sel_row.get("customizations") or {}
+            if isinstance(cust, str):
+                cust = json.loads(cust)
+            content_val = {**content_val, **cust}
+            by_cat.setdefault(cat, []).append({"name": sel_row.get("ti_name"), "content": content_val})
 
         total = len(LAUNCH_STEPS)
 
         # Step 1: Locations
         _update_progress("Creating locations", int(1 / total * 100))
-        onb_locs = sb.table("onboarding_locations").select("*").eq("session_id", session_id).execute().data
-        location_id_map: dict[str, str] = {}  # name → real location id
+        onb_locs = rows(conn, "SELECT * FROM onboarding_locations WHERE session_id = %s", (session_id,))
+        location_id_map: dict[str, str] = {}  # name -> real location id
         first_location_id: str | None = None
         for loc in onb_locs:
-            res = sb.table("locations").insert({
-                "organisation_id": org_id,
-                "name": loc["name"],
-                "address": loc.get("address"),
-                "is_active": True,
-                "is_deleted": False,
-            }).execute()
-            real_id = res.data[0]["id"]
+            loc_row = execute_returning(conn,
+                """INSERT INTO locations (organisation_id, name, address, is_active, is_deleted)
+                   VALUES (%s, %s, %s, true, false) RETURNING *""",
+                (org_id, loc["name"], loc.get("address")),
+            )
+            real_id = loc_row["id"]
             location_id_map[loc["name"]] = real_id
             if first_location_id is None:
                 first_location_id = real_id
         completed_steps.append("Creating locations")
+        conn.commit()
 
         # Step 2: Assets
         _update_progress("Registering assets", int(2 / total * 100))
-        onb_assets = sb.table("onboarding_assets").select("*").eq("session_id", session_id).execute().data
+        onb_assets = rows(conn, "SELECT * FROM onboarding_assets WHERE session_id = %s", (session_id,))
         real_assets = []
         for asset in onb_assets:
             loc_id = location_id_map.get(asset.get("location_name", "")) or first_location_id
             if not loc_id:
-                continue  # skip if no locations were added
-            res = sb.table("assets").insert({
-                "organisation_id": org_id,
-                "location_id": loc_id,
-                "name": asset["name"],
-                "category": asset["category"],
-                "model": asset.get("model") or "",
-                "manufacturer": asset.get("manufacturer") or "",
-                "is_deleted": False,
-            }).execute()
-            real_assets.append(res.data[0])
+                continue
+            asset_row = execute_returning(conn,
+                """INSERT INTO assets (organisation_id, location_id, name, category, model, manufacturer, is_deleted)
+                   VALUES (%s, %s, %s, %s, %s, %s, false) RETURNING *""",
+                (org_id, loc_id, asset["name"], asset["category"],
+                 asset.get("model") or "", asset.get("manufacturer") or ""),
+            )
+            real_assets.append(dict(asset_row))
         completed_steps.append("Registering assets")
+        conn.commit()
 
         # Step 3: Vendors
         _update_progress("Setting up vendors", int(3 / total * 100))
-        onb_vendors = sb.table("onboarding_vendors").select("*").eq("session_id", session_id).execute().data
+        onb_vendors = rows(conn, "SELECT * FROM onboarding_vendors WHERE session_id = %s", (session_id,))
         for vendor in onb_vendors:
-            sb.table("vendors").insert({
-                "organisation_id": org_id,
-                "name": vendor["name"],
-                "contact_email": vendor.get("contact_email"),
-                "contact_phone": vendor.get("contact_phone"),
-                "is_active": True,
-                "is_deleted": False,
-            }).execute()
+            execute(conn,
+                """INSERT INTO vendors (organisation_id, name, contact_email, contact_phone, is_active, is_deleted)
+                   VALUES (%s, %s, %s, %s, true, false)""",
+                (org_id, vendor["name"], vendor.get("contact_email"), vendor.get("contact_phone")),
+            )
         completed_steps.append("Setting up vendors")
+        conn.commit()
 
         # Step 4: Forms / Checklists / Audits (with sections + fields)
         _update_progress("Creating forms & checklists", 5)
@@ -1595,90 +1778,81 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             c = item["content"]
             raw_type = c.get("type", "checklist")
             form_type = raw_type if raw_type in ("form", "checklist", "audit") else "checklist"
-            row: dict = {
-                "organisation_id": org_id,
-                "title": item["name"] or "Untitled Form",
-                "description": c.get("description", ""),
-                "type": form_type,
-                "is_active": True,
-                "is_deleted": False,
-            }
-            if created_by:
-                row["created_by"] = created_by
-            else:
+            if not created_by:
                 continue
-            tmpl_res = sb.table("form_templates").insert(row).execute()
-            tmpl_id = tmpl_res.data[0]["id"]
+            tmpl = execute_returning(conn,
+                """INSERT INTO form_templates (organisation_id, title, description, type, is_active, is_deleted, created_by)
+                   VALUES (%s, %s, %s, %s, true, false, %s) RETURNING *""",
+                (org_id, item["name"] or "Untitled Form", c.get("description", ""), form_type, created_by),
+            )
+            tmpl_id = tmpl["id"]
             form_name_to_id[item["name"]] = tmpl_id
 
             # Create sections + fields
             for s_order, section in enumerate(c.get("sections") or []):
-                sec_res = sb.table("form_sections").insert({
-                    "form_template_id": tmpl_id,
-                    "title": section.get("title", f"Section {s_order + 1}"),
-                    "display_order": s_order,
-                }).execute()
-                sec_id = sec_res.data[0]["id"]
+                sec = execute_returning(conn,
+                    """INSERT INTO form_sections (form_template_id, title, display_order)
+                       VALUES (%s, %s, %s) RETURNING *""",
+                    (tmpl_id, section.get("title", f"Section {s_order + 1}"), s_order),
+                )
+                sec_id = sec["id"]
                 for f_order, field in enumerate(section.get("fields") or []):
                     raw_ftype = field.get("type", "text")
                     ftype = _FIELD_TYPE_MAP.get(raw_ftype, raw_ftype if raw_ftype in _VALID_FIELD_TYPES else "text")
-                    sb.table("form_fields").insert({
-                        "section_id": sec_id,
-                        "label": field.get("label", f"Field {f_order + 1}"),
-                        "field_type": ftype,
-                        "is_required": bool(field.get("required", False)),
-                        "display_order": f_order,
-                        "is_critical": bool(field.get("is_critical", False)),
-                    }).execute()
+                    execute(conn,
+                        """INSERT INTO form_fields (section_id, label, field_type, is_required, display_order, is_critical)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (sec_id, field.get("label", f"Field {f_order + 1}"), ftype,
+                         bool(field.get("required", False)), f_order, bool(field.get("is_critical", False))),
+                    )
 
             # For audits: create audit_config with passing score
             if form_type == "audit":
                 scoring = c.get("scoring") or {}
                 passing = scoring.get("passing_threshold") or scoring.get("passing_score") or 80
-                sb.table("audit_configs").insert({
-                    "form_template_id": tmpl_id,
-                    "passing_score": int(passing),
-                }).execute()
+                execute(conn,
+                    "INSERT INTO audit_configs (form_template_id, passing_score) VALUES (%s, %s)",
+                    (tmpl_id, int(passing)),
+                )
+
         # Create a daily form_assignment for the Daily Store Opening Checklist
         daily_checklist_id = form_name_to_id.get("Daily Store Opening Checklist")
         if daily_checklist_id:
-            sb.table("form_assignments").insert({
-                "form_template_id": daily_checklist_id,
-                "organisation_id": org_id,
-                "recurrence": "daily",
-                "due_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-                "is_active": True,
-                "is_deleted": False,
-            }).execute()
+            execute(conn,
+                """INSERT INTO form_assignments (form_template_id, organisation_id, recurrence, due_at, is_active, is_deleted)
+                   VALUES (%s, %s, %s, %s, true, false)""",
+                (daily_checklist_id, org_id, "daily",
+                 (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()),
+            )
 
         completed_steps.append("Creating forms & checklists")
+        conn.commit()
         _update_progress("Setting up issue categories", 20)
 
-        # Step 2: Issue Categories
+        # Step 5: Issue Categories
         for item in by_cat.get("issue_category", []):
             c = item["content"]
             cat_name = c.get("category_name", item["name"]) or item["name"] or "Uncategorised"
             _MAINTENANCE_NAMES = ["equipment failure", "facility damage", "it / system issue", "it/system issue", "it system issue", "maintenance", "equipment repair"]
             is_maint = any(m in cat_name.lower() for m in _MAINTENANCE_NAMES)
 
-            sb.table("issue_categories").insert({
-                "organisation_id": org_id,
-                "name": cat_name,
-                "description": c.get("description", ""),
-                "default_priority": c.get("default_priority", "medium"),
-                "sla_hours": c.get("sla_hours"),
-                "icon": c.get("icon", ""),
-                "is_maintenance": is_maint,
-            }).execute()
+            execute(conn,
+                """INSERT INTO issue_categories
+                   (organisation_id, name, description, default_priority, sla_hours, icon, is_maintenance)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (org_id, cat_name, c.get("description", ""), c.get("default_priority", "medium"),
+                 c.get("sla_hours"), c.get("icon", ""), is_maint),
+            )
         completed_steps.append("Setting up issue categories")
+        conn.commit()
         _update_progress("Configuring workflows", 35)
 
-        # Build category name → id lookup for trigger_issue_category_ref resolution
+        # Build category name -> id lookup for trigger_issue_category_ref resolution
         cat_name_to_id: dict[str, str] = {}
-        for cat_row in (sb.table("issue_categories").select("id, name").eq("organisation_id", org_id).execute().data or []):
+        for cat_row in rows(conn, "SELECT id, name FROM issue_categories WHERE organisation_id = %s", (org_id,)):
             cat_name_to_id[cat_row["name"]] = cat_row["id"]
 
-        # Step 3: Workflows — definitions + stages
+        # Step 6: Workflows -- definitions + stages
         _VALID_TRIGGER_TYPES = {
             "manual", "audit_submitted", "issue_created", "incident_created",
             "scheduled", "form_submitted", "employee_created",
@@ -1713,20 +1887,18 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             issue_cat_ref = trigger.get("issue_category_ref")
             trigger_issue_category_id = cat_name_to_id.get(issue_cat_ref) if issue_cat_ref else None
 
-            wf_insert: dict = {
-                "organisation_id": org_id,
-                "name": c.get("workflow_name", item["name"]) or item["name"] or "Untitled Workflow",
-                "trigger_type": trigger_type,
-                "trigger_config": trigger,
-                "is_active": False,
-            }
-            if trigger_conditions:
-                wf_insert["trigger_conditions"] = trigger_conditions
-            if trigger_issue_category_id:
-                wf_insert["trigger_issue_category_id"] = trigger_issue_category_id
-
-            wf_res = sb.table("workflow_definitions").insert(wf_insert).execute()
-            wf_id = wf_res.data[0]["id"]
+            wf_row = execute_returning(conn,
+                """INSERT INTO workflow_definitions
+                   (organisation_id, name, trigger_type, trigger_config, is_active,
+                    trigger_conditions, trigger_issue_category_id)
+                   VALUES (%s, %s, %s, %s, false, %s, %s) RETURNING *""",
+                (org_id,
+                 c.get("workflow_name", item["name"]) or item["name"] or "Untitled Workflow",
+                 trigger_type, json.dumps(trigger),
+                 json.dumps(trigger_conditions) if trigger_conditions else None,
+                 trigger_issue_category_id),
+            )
+            wf_id = wf_row["id"]
 
             stages = c.get("stages") or []
             for s_order, stage in enumerate(stages):
@@ -1738,25 +1910,25 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 # Resolve form_ref to form_template_id for fill_form stages
                 resolved_form_id = form_name_to_id.get(stage["form_ref"]) if action_type == "fill_form" and stage.get("form_ref") else None
 
-                stage_row: dict = {
-                    "workflow_definition_id": wf_id,
-                    "name": stage.get("name") or stage.get("title") or f"Step {s_order + 1}",
-                    "stage_order": s_order,
-                    "action_type": action_type,
-                    "is_final": bool(stage.get("is_final", s_order == len(stages) - 1)),
-                    "config": {k: v for k, v in stage.items() if k not in _STAGE_EXCLUDE_KEYS},
-                }
-                if assigned_role:
-                    stage_row["assigned_role"] = assigned_role
-                if resolved_form_id:
-                    stage_row["form_template_id"] = resolved_form_id
-                if stage.get("sla_hours") or stage.get("due_hours"):
-                    stage_row["sla_hours"] = stage.get("sla_hours") or stage.get("due_hours")
-                sb.table("workflow_stages").insert(stage_row).execute()
+                sla_hours = stage.get("sla_hours") or stage.get("due_hours") or None
+
+                execute(conn,
+                    """INSERT INTO workflow_stages
+                       (workflow_definition_id, name, stage_order, action_type, is_final,
+                        config, assigned_role, form_template_id, sla_hours)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (wf_id,
+                     stage.get("name") or stage.get("title") or f"Step {s_order + 1}",
+                     s_order, action_type,
+                     bool(stage.get("is_final", s_order == len(stages) - 1)),
+                     json.dumps({k: v for k, v in stage.items() if k not in _STAGE_EXCLUDE_KEYS}),
+                     assigned_role, resolved_form_id, sla_hours),
+                )
         completed_steps.append("Configuring workflows")
+        conn.commit()
         _update_progress("Importing training modules", 50)
 
-        # Step 4: Training modules → courses + course_modules + AI content (parallel)
+        # Step 7: Training modules -> courses + course_modules + AI content (parallel)
         _MODULE_TYPE_MAP = {
             "text_with_images": "slides", "text": "slides", "slides": "slides",
             "video_with_quiz": "video", "video": "video",
@@ -1770,50 +1942,50 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             c = item["content"]
             if not created_by:
                 continue
-            course_row: dict = {
-                "organisation_id": org_id,
-                "created_by": created_by,
-                "title": c.get("module_name", item["name"]) or item["name"] or "Untitled Course",
-                "description": c.get("description", ""),
-                "passing_score": int(c.get("passing_score", 80)),
-                "is_mandatory": bool(c.get("auto_assign_on_hire", False)),
-                "target_roles": c.get("target_roles", []),
-                "estimated_duration_mins": c.get("estimated_minutes"),
-                "is_published": False,
-                "is_active": True,
-                "is_deleted": False,
-                "ai_generated": True,
-            }
-            if c.get("renewal_days"):
-                course_row["cert_validity_days"] = int(c["renewal_days"])
-            course_res = sb.table("courses").insert(course_row).execute()
-            course_id = course_res.data[0]["id"]
+
+            cert_validity_days = int(c["renewal_days"]) if c.get("renewal_days") else None
+            course_row = execute_returning(conn,
+                """INSERT INTO courses
+                   (organisation_id, created_by, title, description, passing_score,
+                    is_mandatory, target_roles, estimated_duration_mins, is_published,
+                    is_active, is_deleted, ai_generated, cert_validity_days)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, false, true, false, true, %s) RETURNING *""",
+                (org_id, created_by,
+                 c.get("module_name", item["name"]) or item["name"] or "Untitled Course",
+                 c.get("description", ""), int(c.get("passing_score", 80)),
+                 bool(c.get("auto_assign_on_hire", False)),
+                 c.get("target_roles", []),
+                 c.get("estimated_minutes"),
+                 cert_validity_days),
+            )
+            course_id = course_row["id"]
             course_title = course_row["title"]
 
             module_records: list[dict] = []
             for m_order, section in enumerate(c.get("sections") or []):
                 mtype = _MODULE_TYPE_MAP.get(section.get("content_type", "slides"), "slides")
-                mod_res = sb.table("course_modules").insert({
-                    "course_id": course_id,
-                    "title": section.get("title", f"Module {m_order + 1}"),
-                    "module_type": mtype,
-                    "display_order": m_order,
-                    "is_required": True,
-                    "estimated_duration_mins": c.get("estimated_minutes"),
-                }).execute()
+                mod = execute_returning(conn,
+                    """INSERT INTO course_modules
+                       (course_id, title, module_type, display_order, is_required, estimated_duration_mins)
+                       VALUES (%s, %s, %s, %s, true, %s) RETURNING *""",
+                    (course_id, section.get("title", f"Module {m_order + 1}"), mtype, m_order,
+                     c.get("estimated_minutes")),
+                )
                 module_records.append({
-                    "id": mod_res.data[0]["id"],
+                    "id": mod["id"],
                     "title": section.get("title", f"Module {m_order + 1}"),
                     "type": mtype,
                 })
             pending_ai.append({"course_title": course_title, "module_records": module_records})
 
+        conn.commit()
+
         # Phase 4b: Fire all AI content calls in parallel
         async def _generate_course_content(course_title: str, module_records: list[dict]) -> tuple[str, list]:
             module_outline = [{"title": m["title"], "type": m["type"]} for m in module_records]
-            client = _get_anthropic()
+            ai_client = _get_anthropic()
             def _call():
-                return client.messages.create(
+                return ai_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=4000,
                     messages=[{"role": "user", "content": (
@@ -1836,8 +2008,8 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         )
 
         # Phase 4c: Batch-insert slides and quiz questions
-        slide_rows: list[dict] = []
-        quiz_rows: list[dict] = []
+        slide_insert_rows: list[tuple] = []
+        quiz_insert_rows: list[tuple] = []
         for pending, result in zip(pending_ai, ai_results):
             if isinstance(result, Exception):
                 _log.warning("Course content generation failed for '%s': %s", pending["course_title"], result)
@@ -1849,34 +2021,42 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 mod_content = content_list[idx]
                 if mod["type"] == "slides":
                     for s_order, slide in enumerate(mod_content.get("slides") or []):
-                        slide_rows.append({
-                            "module_id": mod["id"],
-                            "title": slide.get("title", f"Slide {s_order + 1}"),
-                            "body": slide.get("body") or slide.get("content") or slide.get("text") or slide.get("description") or "",
-                            "display_order": s_order,
-                        })
+                        slide_insert_rows.append((
+                            mod["id"],
+                            slide.get("title", f"Slide {s_order + 1}"),
+                            slide.get("body") or slide.get("content") or slide.get("text") or slide.get("description") or "",
+                            s_order,
+                        ))
                 else:
                     for q_order, q in enumerate(mod_content.get("questions") or []):
                         qtype = q.get("question_type", "multiple_choice")
                         if qtype not in ("multiple_choice", "true_false", "image_based"):
                             qtype = "multiple_choice"
-                        quiz_rows.append({
-                            "module_id": mod["id"],
-                            "question": q.get("question", "Question"),
-                            "question_type": qtype,
-                            "options": q.get("options", []),
-                            "explanation": q.get("explanation", ""),
-                            "display_order": q_order,
-                        })
-        if slide_rows:
-            sb.table("course_slides").insert(slide_rows).execute()
-        if quiz_rows:
-            sb.table("quiz_questions").insert(quiz_rows).execute()
+                        quiz_insert_rows.append((
+                            mod["id"],
+                            q.get("question", "Question"),
+                            qtype,
+                            json.dumps(q.get("options", [])),
+                            q.get("explanation", ""),
+                            q_order,
+                        ))
+        if slide_insert_rows:
+            execute_many(conn,
+                "INSERT INTO course_slides (module_id, title, body, display_order) VALUES (%s, %s, %s, %s)",
+                slide_insert_rows,
+            )
+        if quiz_insert_rows:
+            execute_many(conn,
+                """INSERT INTO quiz_questions (module_id, question, question_type, options, explanation, display_order)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                quiz_insert_rows,
+            )
 
         completed_steps.append("Importing training modules")
+        conn.commit()
         _update_progress("Creating shift templates", 65)
 
-        # Step 5: Shift templates
+        # Step 8: Shift templates
         for item in by_cat.get("shift_template", []):
             c = item["content"]
             start = c.get("start_time") or c.get("start") or "08:00"
@@ -1884,20 +2064,18 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             days  = _normalize_days(c.get("days_of_week") or c.get("days"))
             if not created_by:
                 continue
-            sb.table("shift_templates").insert({
-                "organisation_id": org_id,
-                "name": c.get("shift_name", item["name"]) or item["name"] or "Untitled Shift",
-                "role": c.get("role", ""),
-                "start_time": start,
-                "end_time": end,
-                "days_of_week": days,
-                "is_active": True,
-                "created_by": created_by,
-            }).execute()
+            execute(conn,
+                """INSERT INTO shift_templates
+                   (organisation_id, name, role, start_time, end_time, days_of_week, is_active, created_by)
+                   VALUES (%s, %s, %s, %s, %s, %s, true, %s)""",
+                (org_id, c.get("shift_name", item["name"]) or item["name"] or "Untitled Shift",
+                 c.get("role", ""), start, end, days, created_by),
+            )
         completed_steps.append("Creating shift templates")
+        conn.commit()
         _update_progress("Loading repair manuals", 73)
 
-        # Step 9: Repair manuals — asset-specific if assets exist, else generic
+        # Step 9: Repair manuals -- asset-specific if assets exist, else generic
         _VALID_GUIDE_TYPES = {"pdf", "video", "audio", "text"}
         if real_assets:
             # Generate asset-specific repair guides via AI
@@ -1905,7 +2083,7 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 {"name": a["name"], "category": a["category"], "model": a.get("model") or ""}
                 for a in real_assets
             ]
-            # Deduplicate by category so we don't generate 10 guides for 10 fridges
+            # Deduplicate by category
             seen_cats: set[str] = set()
             unique_assets = []
             for a in asset_summary:
@@ -1915,9 +2093,9 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                     unique_assets.append(a)
 
             try:
-                client = _get_anthropic()
+                ai_client = _get_anthropic()
                 def _repair_call():
-                    return client.messages.create(
+                    return ai_client.messages.create(
                         model="claude-haiku-4-5-20251001",
                         max_tokens=2048,
                         messages=[{"role": "user", "content": (
@@ -1933,13 +2111,11 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 repair_text = _strip_code_fence(repair_text)
                 repair_guides = json.loads(repair_text)
                 for g in repair_guides:
-                    sb.table("repair_guides").insert({
-                        "organisation_id": org_id,
-                        "title": g.get("title", "Maintenance Guide"),
-                        "guide_type": "text",
-                        "content": g.get("content", ""),
-                        "is_deleted": False,
-                    }).execute()
+                    execute(conn,
+                        """INSERT INTO repair_guides (organisation_id, title, guide_type, content, is_deleted)
+                           VALUES (%s, %s, %s, %s, false)""",
+                        (org_id, g.get("title", "Maintenance Guide"), "text", g.get("content", "")),
+                    )
             except Exception:
                 pass  # don't fail provisioning if AI guide generation fails
         else:
@@ -1949,16 +2125,16 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 guide_type = c.get("guide_type", "text")
                 if guide_type not in _VALID_GUIDE_TYPES:
                     guide_type = "text"
-                sb.table("repair_guides").insert({
-                    "organisation_id": org_id,
-                    "title": c.get("title", item["name"]) or item["name"] or "Untitled Guide",
-                    "guide_type": guide_type,
-                    "content": c.get("content", c.get("steps", "")),
-                    "is_deleted": False,
-                }).execute()
+                execute(conn,
+                    """INSERT INTO repair_guides (organisation_id, title, guide_type, content, is_deleted)
+                       VALUES (%s, %s, %s, %s, false)""",
+                    (org_id, c.get("title", item["name"]) or item["name"] or "Untitled Guide",
+                     guide_type, c.get("content", c.get("steps", ""))),
+                )
         completed_steps.append("Loading repair manuals")
+        conn.commit()
 
-        # Step 10: Badges — use package templates when available, else AI
+        # Step 10: Badges -- use package templates when available, else AI
         _update_progress("Setting up badges", 88)
         valid_criteria = {
             "issues_reported", "issues_resolved", "checklists_completed",
@@ -1968,25 +2144,29 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
         try:
             badge_templates = by_cat.get("badge", [])
             if badge_templates:
-                badge_rows = []
+                badge_insert_rows = []
                 for item in badge_templates:
                     c = item.get("content", {})
                     criteria = c.get("criteria_type", "manual")
                     if criteria not in valid_criteria:
                         criteria = "manual"
-                    badge_rows.append({
-                        "organisation_id": org_id,
-                        "name": c.get("badge_name", item.get("name", "Badge")),
-                        "description": c.get("description", ""),
-                        "points_awarded": int(c.get("points_awarded", 50)),
-                        "criteria_type": criteria,
-                    })
-                if badge_rows:
-                    sb.table("badge_configs").insert(badge_rows).execute()
+                    badge_insert_rows.append((
+                        org_id,
+                        c.get("badge_name", item.get("name", "Badge")),
+                        c.get("description", ""),
+                        int(c.get("points_awarded", 50)),
+                        criteria,
+                    ))
+                if badge_insert_rows:
+                    execute_many(conn,
+                        """INSERT INTO badge_configs (organisation_id, name, description, points_awarded, criteria_type)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        badge_insert_rows,
+                    )
             else:
-                client = _get_anthropic()
+                ai_client = _get_anthropic()
                 def _badge_call():
-                    return client.messages.create(
+                    return ai_client.messages.create(
                         model="claude-haiku-4-5-20251001",
                         max_tokens=512,
                         messages=[{"role": "user", "content": (
@@ -2001,29 +2181,34 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
                 badge_text = "".join(b.text for b in badge_resp.content if hasattr(b, "text"))
                 badge_text = _strip_code_fence(badge_text)
                 badges = json.loads(badge_text)
-                badge_rows = []
+                badge_insert_rows = []
                 for b in badges:
                     criteria = b.get("criteria_type", "manual")
                     if criteria not in valid_criteria:
                         criteria = "manual"
-                    badge_rows.append({
-                        "organisation_id": org_id,
-                        "name": b.get("name", "Badge"),
-                        "description": b.get("description", ""),
-                        "points_awarded": int(b.get("points", 50)),
-                        "criteria_type": criteria,
-                    })
-                if badge_rows:
-                    sb.table("badge_configs").insert(badge_rows).execute()
+                    badge_insert_rows.append((
+                        org_id,
+                        b.get("name", "Badge"),
+                        b.get("description", ""),
+                        int(b.get("points", 50)),
+                        criteria,
+                    ))
+                if badge_insert_rows:
+                    execute_many(conn,
+                        """INSERT INTO badge_configs (organisation_id, name, description, points_awarded, criteria_type)
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        badge_insert_rows,
+                    )
         except Exception:
             pass  # don't fail provisioning if badge generation fails
         completed_steps.append("Setting up badges")
+        conn.commit()
 
         # Step 11: Create employee accounts (auth users + profiles)
         _update_progress("Activating employee accounts", 85)
-        emp_res = sb.table("onboarding_employees").select("*").eq("session_id", session_id).execute()
+        emp_rows = rows(conn, "SELECT * FROM onboarding_employees WHERE session_id = %s", (session_id,))
         role_map = {"admin": "admin", "manager": "manager", "staff": "staff"}
-        for emp in emp_res.data:
+        for emp in emp_rows:
             email = emp.get("email", "").strip()
             if not email:
                 continue
@@ -2032,105 +2217,100 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             location_name = emp.get("location_name")
             loc_id = location_id_map.get(location_name) if location_name else None
 
-            # 1. Create auth user; if the email already exists (re-provision),
-            #    fall back to finding the existing user's ID via admin list.
+            # TODO: integrate Keycloak admin API
+            # Previously used supabase.auth.admin.create_user() / list_users() to create
+            # auth users. Replace with Keycloak admin API calls to create users in the
+            # Keycloak realm and retrieve their IDs.
             new_user_id = None
-            try:
-                auth_resp = sb.auth.admin.create_user({
-                    "email": email,
-                    "email_confirm": True,
-                    "app_metadata": {"organisation_id": org_id, "role": role},
-                    "user_metadata": {"full_name": full_name},
-                })
-                new_user_id = str(auth_resp.user.id)
-            except Exception:
-                # Auth user likely already exists — find them by email
-                try:
-                    users_resp = sb.auth.admin.list_users()
-                    user_list = getattr(users_resp, "users", users_resp) or []
-                    for u in user_list:
-                        if getattr(u, "email", None) == email:
-                            new_user_id = str(u.id)
-                            break
-                except Exception:
-                    pass
+            _log.warning("Skipping auth user creation for %s — Keycloak admin API not yet integrated", email)
 
             if not new_user_id:
                 continue
 
-            # 2. Upsert profile so re-provisioning never fails on duplicate id.
-            profile_data = {
-                "id": new_user_id,
-                "organisation_id": org_id,
-                "full_name": full_name,
-                "role": role,
-                "language": "en",
-                "is_active": True,
-                "is_deleted": False,
-            }
-            if loc_id:
-                profile_data["location_id"] = loc_id
-            if emp.get("phone"):
-                profile_data["phone_number"] = emp["phone"]
-            if emp.get("position"):
-                profile_data["position"] = emp["position"]
-
-            try:
-                sb.table("profiles").upsert(profile_data, on_conflict="id").execute()
-                sb.table("onboarding_employees").update({"status": "invited"}).eq("id", emp["id"]).execute()
-            except Exception:
-                pass
+            # Upsert profile so re-provisioning never fails on duplicate id.
+            execute(conn,
+                """INSERT INTO profiles (id, organisation_id, full_name, role, language, is_active, is_deleted, location_id, phone_number, position)
+                   VALUES (%s, %s, %s, %s, %s, true, false, %s, %s, %s)
+                   ON CONFLICT (id) DO UPDATE SET
+                       organisation_id = EXCLUDED.organisation_id,
+                       full_name = EXCLUDED.full_name,
+                       role = EXCLUDED.role,
+                       language = EXCLUDED.language,
+                       is_active = EXCLUDED.is_active,
+                       is_deleted = EXCLUDED.is_deleted,
+                       location_id = EXCLUDED.location_id,
+                       phone_number = EXCLUDED.phone_number,
+                       position = EXCLUDED.position""",
+                (new_user_id, org_id, full_name, role, "en",
+                 loc_id, emp.get("phone"), emp.get("position")),
+            )
+            execute(conn,
+                "UPDATE onboarding_employees SET status = %s WHERE id = %s",
+                ("invited", emp["id"]),
+            )
         completed_steps.append("Activating employee accounts")
+        conn.commit()
 
-        # Step 8-9: Permissions + finalize
+        # Step 12-13: Permissions + finalize
         _update_progress("Applying permissions", 93)
         completed_steps.append("Applying permissions")
         _update_progress("Finalizing workspace", 99)
         completed_steps.append("Finalizing workspace")
 
         # Mark session complete
-        sb.table("onboarding_sessions").update({
-            "status": "completed",
-            "current_step": 8,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "launch_progress": {
-                "status": "completed",
-                "progress_percent": 100,
-                "steps_completed": completed_steps,
-                "steps_remaining": [],
-            },
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).eq("organisation_id", org_id).execute()
+        execute(conn,
+            """UPDATE onboarding_sessions
+               SET status = %s, current_step = 8, completed_at = %s,
+                   launch_progress = %s, updated_at = %s
+               WHERE id = %s AND organisation_id = %s""",
+            ("completed", datetime.now(timezone.utc).isoformat(),
+             json.dumps({
+                 "status": "completed",
+                 "progress_percent": 100,
+                 "steps_completed": completed_steps,
+                 "steps_remaining": [],
+             }),
+             datetime.now(timezone.utc).isoformat(),
+             session_id, org_id),
+        )
+        conn.commit()
 
     except Exception as e:
-        sb.table("onboarding_sessions").update({
-            "launch_progress": {
+        conn.rollback()
+        execute(conn,
+            """UPDATE onboarding_sessions
+               SET launch_progress = %s, updated_at = %s
+               WHERE id = %s AND organisation_id = %s""",
+            (json.dumps({
                 "status": "failed",
                 "error": str(e),
                 "steps_completed": completed_steps,
                 "steps_remaining": [s for s in LAUNCH_STEPS if s not in completed_steps],
-            },
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", session_id).eq("organisation_id", org_id).execute()
+            }),
+             datetime.now(timezone.utc).isoformat(),
+             session_id, org_id),
+        )
+        conn.commit()
+    finally:
+        pool.putconn(conn)
 
 
 @router.post("/sessions/{session_id}/launch")
 async def launch_workspace(
     session_id: str,
     background_tasks: BackgroundTasks,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_admin),
 ):
     """Kick off workspace provisioning as a background task."""
     org_id = _get_org_id(current_user)
-    session = _get_session(session_id, org_id)
+    session = _get_session(conn, session_id, org_id)
     _require_step(session, 7)
 
     existing_progress = session.get("launch_progress") or {}
     if session.get("status") == "completed":
         raise HTTPException(status_code=400, detail="This workspace has already been launched.")
     if existing_progress.get("status") == "provisioning":
-        # Allow re-launch if the progress hasn't been updated in the last 10 minutes
-        # (handles server restarts killing the background task mid-provisioning)
         updated_at_str = session.get("updated_at") or ""
         try:
             updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
@@ -2141,16 +2321,20 @@ async def launch_workspace(
             raise HTTPException(status_code=400, detail="Workspace provisioning is already in progress.")
 
     # Set initial progress
-    get_supabase().table("onboarding_sessions").update({
-        "launch_progress": {
+    execute(conn,
+        """UPDATE onboarding_sessions
+           SET launch_progress = %s, updated_at = %s
+           WHERE id = %s AND organisation_id = %s""",
+        (json.dumps({
             "status": "provisioning",
             "progress_percent": 0,
             "current_step": "Starting...",
             "steps_completed": [],
             "steps_remaining": LAUNCH_STEPS,
-        },
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).eq("organisation_id", org_id).execute()
+        }),
+         datetime.now(timezone.utc).isoformat(),
+         session_id, org_id),
+    )
 
     user_id = current_user.get("sub", "")
     background_tasks.add_task(_provision_workspace, session_id, org_id, user_id)
@@ -2158,34 +2342,31 @@ async def launch_workspace(
 
 
 @router.get("/sessions/{session_id}/launch-progress", response_model=LaunchProgress)
-async def get_launch_progress(session_id: str, current_user: dict = Depends(get_current_user)):
+async def get_launch_progress(
+    session_id: str,
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     # Look up by session_id alone to avoid false 404s caused by JWT token refresh
-    # changing app_metadata.organisation_id between the createSession call and polling.
-    sb = get_supabase()
-    res = sb.table("onboarding_sessions").select("*").eq("id", session_id).execute()
-    if not res.data:
+    session = row(conn, "SELECT * FROM onboarding_sessions WHERE id = %s", (session_id,))
+    if not session:
         raise HTTPException(status_code=404, detail="Onboarding session not found.")
-    session = res.data[0]
-    # Verify ownership — check that the authenticated user belongs to the session's org.
-    # We query the profiles table directly instead of comparing cached org_id values,
-    # because the JWT's app_metadata can be stale (e.g. after multiple demo-start runs
-    # that create new orgs) causing false 403s even for the legitimate session owner.
+    session = dict(session)
+
+    # Verify ownership
     user_id = current_user.get("sub")
     session_org_id = session.get("organisation_id")
     if user_id and session_org_id:
-        _sb = get_supabase()
-        membership = (
-            _sb.table("profiles")
-            .select("id")
-            .eq("id", user_id)
-            .eq("organisation_id", session_org_id)
-            .eq("is_deleted", False)
-            .maybe_single()
-            .execute()
+        membership = row(conn,
+            "SELECT id FROM profiles WHERE id = %s AND organisation_id = %s AND is_deleted = false LIMIT 1",
+            (user_id, session_org_id),
         )
-        if not membership.data:
+        if not membership:
             raise HTTPException(status_code=403, detail="Access denied.")
+
     progress = session.get("launch_progress") or {}
+    if isinstance(progress, str):
+        progress = json.loads(progress)
 
     if session.get("status") == "completed":
         return LaunchProgress(status="completed", progress_percent=100, steps_completed=LAUNCH_STEPS, steps_remaining=[])
@@ -2203,6 +2384,7 @@ async def get_launch_progress(session_id: str, current_user: dict = Depends(get_
 @router.get("/package-templates")
 async def get_package_templates(
     category: Optional[str] = None,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Return template items for the authenticated org's industry package.
@@ -2210,33 +2392,20 @@ async def get_package_templates(
     Falls back to QSR if the org has no industry_code or the package isn't seeded.
     Optionally filter by ``category`` (e.g. badge, workflow, form, checklist).
     """
-    sb = get_supabase()
-
     # 1. Infer industry_code from the org
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     industry_code: Optional[str] = None
     if org_id:
-        org_res = (
-            sb.table("organisations")
-            .select("industry_code")
-            .eq("id", org_id)
-            .maybe_single()
-            .execute()
-        )
-        if org_res.data:
-            industry_code = (org_res.data.get("industry_code") or "").strip() or None
+        org_row = row(conn, "SELECT industry_code FROM organisations WHERE id = %s", (org_id,))
+        if org_row:
+            industry_code = (org_row.get("industry_code") or "").strip() or None
 
-    # 2. Find the matching package — fallback to QSR
+    # 2. Find the matching package -- fallback to QSR
     def _find_package(code: str):
-        res = (
-            sb.table("industry_packages")
-            .select("id")
-            .eq("industry_code", code)
-            .eq("is_active", True)
-            .limit(1)
-            .execute()
+        return row(conn,
+            "SELECT id FROM industry_packages WHERE industry_code = %s AND is_active = true LIMIT 1",
+            (code,),
         )
-        return res.data[0] if res.data else None
 
     pkg = _find_package(industry_code) if industry_code else None
     if not pkg:
@@ -2247,17 +2416,21 @@ async def get_package_templates(
         return {"items": [], "industry_code": industry_code}
 
     # 3. Fetch items (optionally filtered by category)
-    q = (
-        sb.table("template_items")
-        .select("id, name, description, category, content, sort_order")
-        .eq("package_id", pkg["id"])
-    )
     if category:
-        q = q.eq("category", category)
-    items_res = q.order("sort_order").execute()
+        items_data = rows(conn,
+            """SELECT id, name, description, category, content, sort_order
+               FROM template_items WHERE package_id = %s AND category = %s ORDER BY sort_order""",
+            (pkg["id"], category),
+        )
+    else:
+        items_data = rows(conn,
+            """SELECT id, name, description, category, content, sort_order
+               FROM template_items WHERE package_id = %s ORDER BY sort_order""",
+            (pkg["id"],),
+        )
 
     return {
-        "items": items_res.data or [],
+        "items": [dict(r) for r in items_data],
         "industry_code": industry_code,
     }
 

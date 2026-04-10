@@ -2,7 +2,8 @@ from uuid import UUID
 from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query
-from dependencies import get_current_user, require_manager_or_above, paginate
+from dependencies import get_db, get_current_user, require_manager_or_above, paginate
+from services.db import row, rows, execute, execute_returning, execute_many
 from models.forms import (
     CreateFormTemplateRequest,
     UpdateFormTemplateRequest,
@@ -30,6 +31,7 @@ async def generate_form_template(
 
 @router.get("/templates")
 async def list_templates(
+    conn=Depends(get_db),
     pagination: dict = Depends(paginate),
     type: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
@@ -37,6 +39,7 @@ async def list_templates(
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await FormService.list_templates(
+        conn,
         org_id=org_id,
         type_filter=type,
         is_active=is_active,
@@ -48,100 +51,113 @@ async def list_templates(
 @router.post("/templates")
 async def create_template(
     body: CreateFormTemplateRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     created_by = current_user["sub"]
-    return await FormService.create_template(body, org_id, created_by)
+    return await FormService.create_template(conn, body, org_id, created_by)
 
 
 @router.get("/templates/{template_id}")
 async def get_template(
     template_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.get_template(str(template_id), org_id)
+    return await FormService.get_template(conn, str(template_id), org_id)
 
 
 @router.put("/templates/{template_id}")
 async def update_template(
     template_id: UUID,
     body: UpdateFormTemplateRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.update_template(str(template_id), org_id, body)
+    return await FormService.update_template(conn, str(template_id), org_id, body)
 
 
 @router.get("/templates/{template_id}/stats")
 async def get_template_stats(
     template_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.get_template_stats(str(template_id), org_id)
+    return await FormService.get_template_stats(conn, str(template_id), org_id)
 
 
 @router.delete("/templates/{template_id}")
 async def delete_template(
     template_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.delete_template(str(template_id), org_id)
+    return await FormService.delete_template(conn, str(template_id), org_id)
 
 
 @router.post("/assignments")
 async def create_assignment(
     body: CreateAssignmentRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.create_assignment(body, org_id)
+    return await FormService.create_assignment(conn, body, org_id)
 
 
 @router.get("/assignments/my")
-async def my_assignments(current_user: dict = Depends(get_current_user)):
+async def my_assignments(
+    conn=Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.my_assignments(user_id, org_id)
+    return await FormService.my_assignments(conn, user_id, org_id)
 
 
 @router.get("/assignments/{assignment_id}/template")
 async def get_assignment_template(
     assignment_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Return the full template for an assignment the current user is assigned to."""
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.get_assignment_template(str(assignment_id), user_id, org_id)
+    return await FormService.get_assignment_template(conn, str(assignment_id), user_id, org_id)
 
 
 @router.get("/assignments/{assignment_id}/draft")
 async def get_assignment_draft(
     assignment_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """Return the current user's draft submission for an assignment, or null."""
     user_id = current_user["sub"]
-    draft = await FormService.get_draft_for_assignment(str(assignment_id), user_id)
+    draft = await FormService.get_draft_for_assignment(conn, str(assignment_id), user_id)
     return draft or {}
 
 
 @router.post("/submissions")
 async def create_submission(
     body: CreateSubmissionRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.create_submission(body, user_id, org_id=org_id)
+    return await FormService.create_submission(conn, body, user_id, org_id=org_id)
 
 
 @router.get("/submissions")
 async def list_submissions(
+    conn=Depends(get_db),
     pagination: dict = Depends(paginate),
     template_id: Optional[UUID] = Query(None),
     user_id: Optional[UUID] = Query(None),
@@ -163,12 +179,15 @@ async def list_submissions(
     # Resolve team member IDs for manager-scoped view
     team_user_ids: Optional[list] = None
     if my_team and not user_id:
-        from services.supabase_client import get_supabase
-        db = get_supabase()
-        dr = db.table("profiles").select("id").eq("reports_to", caller_id).eq("is_deleted", False).execute()
-        team_user_ids = [r["id"] for r in (dr.data or [])] + [caller_id]
+        team_rows = rows(
+            conn,
+            "SELECT id FROM profiles WHERE reports_to = %s AND is_deleted = FALSE",
+            (str(caller_id),),
+        )
+        team_user_ids = [str(r["id"]) for r in team_rows] + [caller_id]
 
     return await FormService.list_submissions(
+        conn,
         org_id=org_id,
         template_id=str(template_id) if template_id else None,
         user_id_filter=str(user_id) if user_id else None,
@@ -185,19 +204,21 @@ async def list_submissions(
 @router.get("/submissions/{submission_id}")
 async def get_submission(
     submission_id: UUID,
+    conn=Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     user_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.get_submission(str(submission_id), user_id, org_id=org_id)
+    return await FormService.get_submission(conn, str(submission_id), user_id, org_id=org_id)
 
 
 @router.put("/submissions/{submission_id}/review")
 async def review_submission(
     submission_id: UUID,
     body: ReviewSubmissionRequest,
+    conn=Depends(get_db),
     current_user: dict = Depends(require_manager_or_above),
 ):
     reviewer_id = current_user["sub"]
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await FormService.review_submission(str(submission_id), body, reviewer_id, org_id)
+    return await FormService.review_submission(conn, str(submission_id), body, reviewer_id, org_id)

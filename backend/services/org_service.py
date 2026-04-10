@@ -1,38 +1,37 @@
+import json
 from fastapi import HTTPException
+from psycopg2.extensions import connection as PgConn
 from models.organisations import (
     OrganisationResponse,
     UpdateOrganisationRequest,
-    UpdateFeatureFlagsRequest,
     LocationResponse,
     CreateLocationRequest,
     UpdateLocationRequest,
 )
-from services.supabase_client import get_supabase
+from services.db import row, rows, execute_returning
 
 
 class OrgService:
     @staticmethod
-    async def get_org(org_id: str) -> OrganisationResponse:
-        supabase = get_supabase()
+    async def get_org(org_id: str, conn: PgConn) -> OrganisationResponse:
         try:
-            response = (
-                supabase.table("organisations")
-                .select("*")
-                .eq("id", str(org_id))
-                .execute()
+            result = row(
+                conn,
+                "SELECT * FROM organisations WHERE id = %s",
+                (org_id,),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        if not response.data:
+        if result is None:
             raise HTTPException(status_code=404, detail="Organisation not found")
 
-        return OrganisationResponse(**response.data[0])
+        return OrganisationResponse(**result)
 
     @staticmethod
-    async def update_org(org_id: str, body: UpdateOrganisationRequest) -> OrganisationResponse:
-        supabase = get_supabase()
-
+    async def update_org(
+        org_id: str, body: UpdateOrganisationRequest, conn: PgConn
+    ) -> OrganisationResponse:
         updates = {}
         if body.name is not None:
             updates["name"] = body.name
@@ -40,88 +39,91 @@ class OrgService:
             updates["logo_url"] = body.logo_url
 
         if not updates:
-            return await OrgService.get_org(org_id)
+            return await OrgService.get_org(org_id, conn)
+
+        set_clause = ", ".join(f"{col} = %s" for col in updates)
+        params = tuple(updates.values()) + (org_id,)
 
         try:
-            response = (
-                supabase.table("organisations")
-                .update(updates)
-                .eq("id", str(org_id))
-                .execute()
+            result = execute_returning(
+                conn,
+                f"UPDATE organisations SET {set_clause} WHERE id = %s RETURNING *",
+                params,
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        if not response.data:
+        if result is None:
             raise HTTPException(status_code=404, detail="Organisation not found")
 
-        return OrganisationResponse(**response.data[0])
+        return OrganisationResponse(**result)
 
     @staticmethod
-    async def update_feature_flags(org_id: str, feature_flags: dict) -> OrganisationResponse:
-        supabase = get_supabase()
+    async def update_feature_flags(
+        org_id: str, feature_flags: dict, conn: PgConn
+    ) -> OrganisationResponse:
         try:
-            response = (
-                supabase.table("organisations")
-                .update({"feature_flags": feature_flags})
-                .eq("id", str(org_id))
-                .execute()
+            result = execute_returning(
+                conn,
+                "UPDATE organisations SET feature_flags = %s WHERE id = %s RETURNING *",
+                (json.dumps(feature_flags), org_id),
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        if not response.data:
+        if result is None:
             raise HTTPException(status_code=404, detail="Organisation not found")
 
-        return OrganisationResponse(**response.data[0])
+        return OrganisationResponse(**result)
 
     @staticmethod
-    async def list_locations(org_id: str) -> list[LocationResponse]:
-        supabase = get_supabase()
+    async def list_locations(org_id: str, conn: PgConn) -> list[LocationResponse]:
         try:
-            response = (
-                supabase.table("locations")
-                .select("*")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .execute()
+            result = rows(
+                conn,
+                "SELECT * FROM locations WHERE organisation_id = %s AND is_deleted = false",
+                (org_id,),
             )
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        return [LocationResponse(**row) for row in response.data]
+        return [LocationResponse(**r) for r in result]
 
     @staticmethod
-    async def create_location(org_id: str, body: CreateLocationRequest) -> LocationResponse:
-        supabase = get_supabase()
+    async def create_location(
+        org_id: str, body: CreateLocationRequest, conn: PgConn
+    ) -> LocationResponse:
+        columns = ["organisation_id", "name", "geo_fence_radius_meters", "is_active", "is_deleted"]
+        values: list = [org_id, body.name, body.geo_fence_radius_meters, True, False]
 
-        location_data = {
-            "organisation_id": str(org_id),
-            "name": body.name,
-            "geo_fence_radius_meters": body.geo_fence_radius_meters,
-            "is_active": True,
-            "is_deleted": False,
-        }
         if body.address is not None:
-            location_data["address"] = body.address
+            columns.append("address")
+            values.append(body.address)
         if body.latitude is not None:
-            location_data["latitude"] = body.latitude
+            columns.append("latitude")
+            values.append(body.latitude)
         if body.longitude is not None:
-            location_data["longitude"] = body.longitude
+            columns.append("longitude")
+            values.append(body.longitude)
+
+        col_clause = ", ".join(columns)
+        placeholder_clause = ", ".join(["%s"] * len(columns))
 
         try:
-            response = supabase.table("locations").insert(location_data).execute()
+            result = execute_returning(
+                conn,
+                f"INSERT INTO locations ({col_clause}) VALUES ({placeholder_clause}) RETURNING *",
+                tuple(values),
+            )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        return LocationResponse(**response.data[0])
+        return LocationResponse(**result)
 
     @staticmethod
     async def update_location(
-        org_id: str, loc_id: str, body: UpdateLocationRequest
+        org_id: str, loc_id: str, body: UpdateLocationRequest, conn: PgConn
     ) -> LocationResponse:
-        supabase = get_supabase()
-
         updates = {}
         if body.name is not None:
             updates["name"] = body.name
@@ -137,29 +139,28 @@ class OrgService:
             updates["is_active"] = body.is_active
 
         if not updates:
-            existing = (
-                supabase.table("locations")
-                .select("*")
-                .eq("id", str(loc_id))
-                .eq("organisation_id", str(org_id))
-                .execute()
+            result = row(
+                conn,
+                "SELECT * FROM locations WHERE id = %s AND organisation_id = %s",
+                (loc_id, org_id),
             )
-            if not existing.data:
+            if result is None:
                 raise HTTPException(status_code=404, detail="Location not found")
-            return LocationResponse(**existing.data[0])
+            return LocationResponse(**result)
+
+        set_clause = ", ".join(f"{col} = %s" for col in updates)
+        params = tuple(updates.values()) + (loc_id, org_id)
 
         try:
-            response = (
-                supabase.table("locations")
-                .update(updates)
-                .eq("id", str(loc_id))
-                .eq("organisation_id", str(org_id))
-                .execute()
+            result = execute_returning(
+                conn,
+                f"UPDATE locations SET {set_clause} WHERE id = %s AND organisation_id = %s RETURNING *",
+                params,
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        if not response.data:
+        if result is None:
             raise HTTPException(status_code=404, detail="Location not found")
 
-        return LocationResponse(**response.data[0])
+        return LocationResponse(**result)

@@ -1,7 +1,7 @@
 from uuid import UUID
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from dependencies import get_current_user, require_admin, require_manager_or_above, paginate
+from dependencies import get_current_user, require_admin, require_manager_or_above, paginate, get_db
 from models.users import CreateUserRequest, UpdateUserRequest, PositionSuggestion
 from services.user_service import UserService
 
@@ -9,9 +9,12 @@ router = APIRouter()
 
 
 @router.get("/me")
-async def get_me(current_user: dict = Depends(get_current_user)):
+async def get_me(
+    current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
+):
     user_id = current_user["sub"]
-    return await UserService.get_me(user_id)
+    return await UserService.get_me(conn, user_id)
 
 
 @router.get("/")
@@ -21,9 +24,11 @@ async def list_users(
     role: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await UserService.list_users(
+        conn,
         org_id=org_id,
         location_id=str(location_id) if location_id else None,
         role=role,
@@ -37,6 +42,7 @@ async def list_users(
 async def bulk_import(
     file: UploadFile = File(...),
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     content = await file.read()
@@ -45,16 +51,17 @@ async def bulk_import(
     if file.content_type not in ("text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"):
         raise HTTPException(status_code=415, detail="Invalid file type. Please upload a CSV file.")
     csv_content = content.decode("utf-8", errors="replace")
-    return await UserService.bulk_import(csv_content, org_id)
+    return await UserService.bulk_import(conn, csv_content, org_id)
 
 
 @router.post("/")
 async def create_user(
     body: CreateUserRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    profile = await UserService.create_user(body, org_id)
+    profile = await UserService.create_user(conn, body, org_id)
 
     # Auto-trigger employee_created workflows
     try:
@@ -78,15 +85,20 @@ async def create_user(
 async def list_positions(
     search: str = Query(default=""),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await UserService.get_distinct_positions(org_id=org_id, search=search)
+    return await UserService.get_distinct_positions(conn, org_id=org_id, search=search)
 
 
 @router.get("/{user_id}")
-async def get_user(user_id: UUID, current_user: dict = Depends(require_admin)):
+async def get_user(
+    user_id: UUID,
+    current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
+):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await UserService.get_user(str(user_id), org_id)
+    return await UserService.get_user(conn, str(user_id), org_id)
 
 
 @router.patch("/{user_id}")
@@ -94,12 +106,17 @@ async def update_user(
     user_id: UUID,
     body: UpdateUserRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await UserService.update_user(str(user_id), body, org_id)
+    return await UserService.update_user(conn, str(user_id), body, org_id)
 
 
 @router.delete("/{user_id}")
-async def delete_user(user_id: UUID, current_user: dict = Depends(require_admin)):
+async def delete_user(
+    user_id: UUID,
+    current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
+):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await UserService.delete_user(str(user_id), org_id)
+    return await UserService.delete_user(conn, str(user_id), org_id)

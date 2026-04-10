@@ -1,6 +1,7 @@
 from uuid import UUID
 from typing import Optional
-from services.supabase_client import get_supabase
+
+from services.db import row, rows, execute, execute_returning
 
 BADGE_TEMPLATES = [
     # Safety & Issues
@@ -43,55 +44,116 @@ METRIC_POINT_VALUES = {
     "critical_issue_reported": 50,
 }
 
+# Map metric_type → user_points column name (used in get_leaderboard_scores)
+METRIC_COLUMN = {
+    "points_total":           "total_points",
+    "issues_reported":        "issues_reported",
+    "issues_resolved":        "issues_resolved",
+    "checklists_completed":   "checklists_completed",
+    "checklist_streak_days":  "checklist_longest_streak",
+    "audit_perfect_scores":   "audit_perfect_scores",
+    "tasks_completed":        "tasks_completed",
+    "attendance_punctuality": "attendance_longest_streak",
+}
+
 
 class GamificationService:
 
     @staticmethod
-    async def list_leaderboards(org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("leaderboard_configs").select("*").eq("organisation_id", str(org_id)).eq("is_active", True).eq("is_deleted", False).order("name").execute()
-        return res.data or []
-
-    @staticmethod
-    async def list_badges(org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("badge_configs").select("*").eq("organisation_id", str(org_id)).eq("is_active", True).eq("is_deleted", False).order("name").execute()
-        return res.data or []
-
-    @staticmethod
-    async def list_my_badges(user_id: UUID, org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("user_badge_awards").select("*, badge_configs(*)").eq("user_id", str(user_id)).eq("organisation_id", str(org_id)).eq("is_deleted", False).order("awarded_at", desc=True).execute()
-        return res.data or []
-
-    @staticmethod
-    async def get_my_points(user_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("user_points").select("*").eq("user_id", str(user_id)).maybe_single().execute()
-        return res.data
-
-    @staticmethod
-    async def get_org_leaderboard(org_id: UUID):
-        """Return all users ranked by total_points for the org (no config needed)."""
-        supabase = get_supabase()
-        rows = (
-            supabase.table("user_points")
-            .select("user_id, total_points, profiles(full_name, role, location_id)")
-            .eq("organisation_id", str(org_id))
-            .order("total_points", desc=True)
-            .limit(50)
-            .execute()
+    async def list_leaderboards(org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT * FROM leaderboard_configs
+            WHERE organisation_id = %s
+              AND is_active = TRUE
+              AND is_deleted = FALSE
+            ORDER BY name
+            """,
+            (str(org_id),),
         )
+
+    @staticmethod
+    async def list_badges(org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT * FROM badge_configs
+            WHERE organisation_id = %s
+              AND is_active = TRUE
+              AND is_deleted = FALSE
+            ORDER BY name
+            """,
+            (str(org_id),),
+        )
+
+    @staticmethod
+    async def list_my_badges(user_id, org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT
+                uba.*,
+                bc.name        AS badge_name,
+                bc.description AS badge_description,
+                bc.icon        AS badge_icon,
+                bc.points_awarded,
+                bc.criteria_type,
+                bc.criteria_value,
+                bc.criteria_window,
+                bc.scope,
+                bc.is_active,
+                bc.is_template
+            FROM user_badge_awards uba
+            JOIN badge_configs bc ON bc.id = uba.badge_id
+            WHERE uba.user_id = %s
+              AND uba.organisation_id = %s
+              AND uba.is_deleted = FALSE
+            ORDER BY uba.awarded_at DESC
+            """,
+            (str(user_id), str(org_id)),
+        )
+
+    @staticmethod
+    async def get_my_points(user_id, conn):
+        return row(
+            conn,
+            "SELECT * FROM user_points WHERE user_id = %s",
+            (str(user_id),),
+        )
+
+    @staticmethod
+    async def get_org_leaderboard(org_id, conn):
+        """Return all users ranked by total_points for the org (no config needed)."""
+        raw = rows(
+            conn,
+            """
+            SELECT
+                up.user_id,
+                up.total_points,
+                p.full_name,
+                p.role,
+                p.location_id
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            WHERE up.organisation_id = %s
+            ORDER BY up.total_points DESC
+            LIMIT 50
+            """,
+            (str(org_id),),
+        )
+
         entries = [
             {
                 "user_id":   r["user_id"],
-                "full_name": (r.get("profiles") or {}).get("full_name"),
-                "role":      (r.get("profiles") or {}).get("role"),
+                "full_name": r.get("full_name"),
+                "role":      r.get("role"),
                 "score":     r.get("total_points") or 0,
             }
-            for r in (rows.data or [])
+            for r in raw
             if (r.get("total_points") or 0) > 0
         ]
+
         # Add rank with tie support
         ranked, rank = [], 1
         for i, e in enumerate(entries):
@@ -102,65 +164,73 @@ class GamificationService:
         # Attach each user's earned badges
         if ranked:
             user_ids = [e["user_id"] for e in ranked]
-            badge_rows = (
-                supabase.table("user_badge_awards")
-                .select("user_id, badge_configs(icon, name)")
-                .in_("user_id", user_ids)
-                .eq("is_deleted", False)
-                .execute()
+            badge_rows = rows(
+                conn,
+                """
+                SELECT uba.user_id, bc.icon, bc.name AS badge_name
+                FROM user_badge_awards uba
+                JOIN badge_configs bc ON bc.id = uba.badge_id
+                WHERE uba.user_id = ANY(%s)
+                  AND uba.is_deleted = FALSE
+                """,
+                (user_ids,),
             )
             badge_map: dict[str, list] = {}
-            for row in (badge_rows.data or []):
-                uid = row["user_id"]
-                bc = row.get("badge_configs") or {}
+            for br in badge_rows:
+                uid = br["user_id"]
                 if uid not in badge_map:
                     badge_map[uid] = []
-                if bc and bc.get("name"):
-                    badge_map[uid].append({"icon": bc.get("icon"), "name": bc["name"]})
+                if br.get("badge_name"):
+                    badge_map[uid].append({"icon": br.get("icon"), "name": br["badge_name"]})
             for e in ranked:
                 e["badges"] = badge_map.get(e["user_id"], [])
 
         return ranked
 
     @staticmethod
-    async def get_leaderboard_scores(config_id: UUID, org_id: UUID):
+    async def get_leaderboard_scores(config_id: UUID, org_id, conn):
         """Compute leaderboard scores from the pre-aggregated user_points table."""
-        supabase = get_supabase()
-        config_res = supabase.table("leaderboard_configs").select("*").eq("id", str(config_id)).eq("organisation_id", str(org_id)).maybe_single().execute()
-        if not config_res.data:
+        config = row(
+            conn,
+            """
+            SELECT * FROM leaderboard_configs
+            WHERE id = %s AND organisation_id = %s
+            """,
+            (str(config_id), str(org_id)),
+        )
+        if not config:
             return None, []
-        config = config_res.data
-        metric = config["metric_type"]
 
-        # Map metric_type → user_points column name
-        METRIC_COLUMN = {
-            "points_total":          "total_points",
-            "issues_reported":       "issues_reported",
-            "issues_resolved":       "issues_resolved",
-            "checklists_completed":  "checklists_completed",
-            "checklist_streak_days": "checklist_longest_streak",
-            "audit_perfect_scores":  "audit_perfect_scores",
-            "tasks_completed":       "tasks_completed",
-            "attendance_punctuality":"attendance_longest_streak",
-        }
+        metric = config["metric_type"]
         col = METRIC_COLUMN.get(metric, "total_points")
 
-        rows = (
-            supabase.table("user_points")
-            .select(f"user_id, {col}, profiles(full_name, role, location_id)")
-            .eq("organisation_id", str(org_id))
-            .order(col, desc=True)
-            .limit(50)
-            .execute()
+        # col is a trusted internal constant, safe to interpolate
+        raw = rows(
+            conn,
+            f"""
+            SELECT
+                up.user_id,
+                up.{col},
+                p.full_name,
+                p.role,
+                p.location_id
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            WHERE up.organisation_id = %s
+            ORDER BY up.{col} DESC
+            LIMIT 50
+            """,
+            (str(org_id),),
         )
+
         entries = [
             {
                 "user_id":   r["user_id"],
-                "full_name": (r.get("profiles") or {}).get("full_name"),
-                "role":      (r.get("profiles") or {}).get("role"),
+                "full_name": r.get("full_name"),
+                "role":      r.get("role"),
                 "score":     r.get(col) or 0,
             }
-            for r in (rows.data or [])
+            for r in raw
             if (r.get(col) or 0) > 0
         ]
         entries.sort(key=lambda x: x["score"], reverse=True)
@@ -179,76 +249,230 @@ class GamificationService:
         return config, ranked
 
     @staticmethod
-    async def create_badge(org_id: UUID, data: dict):
-        supabase = get_supabase()
-        res = supabase.table("badge_configs").insert({**data, "organisation_id": str(org_id)}).execute()
-        return res.data[0] if res.data else None
-
-    @staticmethod
-    async def award_badge(badge_id: UUID, user_id: UUID, org_id: UUID, awarded_by: UUID):
-        supabase = get_supabase()
-        # Check not already awarded
-        existing = supabase.table("user_badge_awards").select("id").eq("badge_id", str(badge_id)).eq("user_id", str(user_id)).eq("is_deleted", False).execute()
-        if existing.data:
-            raise ValueError("Badge already awarded to this user")
-        res = supabase.table("user_badge_awards").insert({"badge_id": str(badge_id), "user_id": str(user_id), "organisation_id": str(org_id), "awarded_by": str(awarded_by)}).execute()
-        return res.data[0] if res.data else None
-
-    @staticmethod
-    async def seed_templates(org_id: UUID):
-        """Seed all badge and leaderboard templates for a new org."""
-        supabase = get_supabase()
-        badge_rows = [{**t, "organisation_id": str(org_id)} for t in BADGE_TEMPLATES]
-        lb_rows = [{**t, "organisation_id": str(org_id)} for t in LEADERBOARD_TEMPLATES]
-        supabase.table("badge_configs").insert(badge_rows).execute()
-        supabase.table("leaderboard_configs").insert(lb_rows).execute()
-
-    @staticmethod
-    async def list_badge_templates(org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("badge_configs").select("*").eq("organisation_id", str(org_id)).eq("is_template", True).eq("is_deleted", False).execute()
-        return res.data or []
-
-    @staticmethod
-    async def list_leaderboard_templates(org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("leaderboard_configs").select("*").eq("organisation_id", str(org_id)).eq("is_template", True).eq("is_deleted", False).execute()
-        return res.data or []
-
-    @staticmethod
-    async def activate_template(template_id: UUID, org_id: UUID):
-        supabase = get_supabase()
-        supabase.table("badge_configs").update({"is_active": True}).eq("id", str(template_id)).eq("organisation_id", str(org_id)).execute()
-        supabase.table("leaderboard_configs").update({"is_active": True}).eq("id", str(template_id)).eq("organisation_id", str(org_id)).execute()
-
-    @staticmethod
-    async def update_badge(badge_id: UUID, org_id: UUID, data: dict):
-        supabase = get_supabase()
-        update_data = {k: v for k, v in data.items() if k not in ("id", "organisation_id", "is_deleted", "is_template")}
-        res = (
-            supabase.table("badge_configs")
-            .update(update_data)
-            .eq("id", str(badge_id))
-            .eq("organisation_id", str(org_id))
-            .eq("is_deleted", False)
-            .execute()
+    async def create_badge(org_id, data: dict, conn):
+        return execute_returning(
+            conn,
+            """
+            INSERT INTO badge_configs (
+                organisation_id, name, description, icon,
+                points_awarded, criteria_type, criteria_value,
+                criteria_window, scope, is_active, is_template
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      COALESCE(%s, TRUE), COALESCE(%s, FALSE))
+            RETURNING *
+            """,
+            (
+                str(org_id),
+                data.get("name"),
+                data.get("description"),
+                data.get("icon"),
+                data.get("points_awarded", 0),
+                data.get("criteria_type"),
+                data.get("criteria_value"),
+                data.get("criteria_window", "all_time"),
+                data.get("scope", "individual"),
+                data.get("is_active"),
+                data.get("is_template"),
+            ),
         )
-        return res.data[0] if res.data else None
 
     @staticmethod
-    async def delete_badge(badge_id: UUID, org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("badge_configs").update({"is_deleted": True}).eq("id", str(badge_id)).eq("organisation_id", str(org_id)).execute()
-        return res.data[0] if res.data else None
+    async def award_badge(badge_id: UUID, user_id: UUID, org_id, awarded_by, conn):
+        # Check not already awarded
+        existing = row(
+            conn,
+            """
+            SELECT id FROM user_badge_awards
+            WHERE badge_id = %s AND user_id = %s AND is_deleted = FALSE
+            """,
+            (str(badge_id), str(user_id)),
+        )
+        if existing:
+            raise ValueError("Badge already awarded to this user")
+
+        return execute_returning(
+            conn,
+            """
+            INSERT INTO user_badge_awards (badge_id, user_id, organisation_id, awarded_by)
+            VALUES (%s, %s, %s, %s)
+            RETURNING *
+            """,
+            (str(badge_id), str(user_id), str(org_id), str(awarded_by)),
+        )
 
     @staticmethod
-    async def get_points_summary(org_id: UUID):
-        supabase = get_supabase()
-        res = supabase.table("user_points").select("*, profiles(full_name, role, location_id)").eq("organisation_id", str(org_id)).order("total_points", desc=True).execute()
-        return res.data or []
+    async def seed_templates(org_id, conn):
+        """Seed all badge and leaderboard templates for a new org."""
+        for t in BADGE_TEMPLATES:
+            execute(
+                conn,
+                """
+                INSERT INTO badge_configs (
+                    organisation_id, name, icon, description,
+                    criteria_type, criteria_value, points_awarded, is_template
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    str(org_id),
+                    t["name"],
+                    t.get("icon"),
+                    t.get("description"),
+                    t["criteria_type"],
+                    t["criteria_value"],
+                    t["points_awarded"],
+                    t["is_template"],
+                ),
+            )
+        for t in LEADERBOARD_TEMPLATES:
+            execute(
+                conn,
+                """
+                INSERT INTO leaderboard_configs (
+                    organisation_id, name, metric_type, scope, time_window, is_template
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    str(org_id),
+                    t["name"],
+                    t["metric_type"],
+                    t["scope"],
+                    t["time_window"],
+                    t["is_template"],
+                ),
+            )
 
     @staticmethod
-    async def create_leaderboard(org_id: UUID, data: dict):
-        supabase = get_supabase()
-        res = supabase.table("leaderboard_configs").insert({**data, "organisation_id": str(org_id)}).execute()
-        return res.data[0] if res.data else None
+    async def list_badge_templates(org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT * FROM badge_configs
+            WHERE organisation_id = %s
+              AND is_template = TRUE
+              AND is_deleted = FALSE
+            """,
+            (str(org_id),),
+        )
+
+    @staticmethod
+    async def list_leaderboard_templates(org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT * FROM leaderboard_configs
+            WHERE organisation_id = %s
+              AND is_template = TRUE
+              AND is_deleted = FALSE
+            """,
+            (str(org_id),),
+        )
+
+    @staticmethod
+    async def activate_template(template_id: UUID, org_id, conn):
+        execute(
+            conn,
+            """
+            UPDATE badge_configs SET is_active = TRUE
+            WHERE id = %s AND organisation_id = %s
+            """,
+            (str(template_id), str(org_id)),
+        )
+        execute(
+            conn,
+            """
+            UPDATE leaderboard_configs SET is_active = TRUE
+            WHERE id = %s AND organisation_id = %s
+            """,
+            (str(template_id), str(org_id)),
+        )
+
+    @staticmethod
+    async def update_badge(badge_id: UUID, org_id, data: dict, conn):
+        update_data = {k: v for k, v in data.items() if k not in ("id", "organisation_id", "is_deleted", "is_template")}
+        return execute_returning(
+            conn,
+            """
+            UPDATE badge_configs SET
+                name             = %s,
+                description      = %s,
+                icon             = %s,
+                points_awarded   = %s,
+                criteria_type    = %s,
+                criteria_value   = %s,
+                criteria_window  = %s,
+                scope            = %s,
+                is_active        = %s
+            WHERE id = %s
+              AND organisation_id = %s
+              AND is_deleted = FALSE
+            RETURNING *
+            """,
+            (
+                update_data.get("name"),
+                update_data.get("description"),
+                update_data.get("icon"),
+                update_data.get("points_awarded", 0),
+                update_data.get("criteria_type"),
+                update_data.get("criteria_value"),
+                update_data.get("criteria_window", "all_time"),
+                update_data.get("scope", "individual"),
+                update_data.get("is_active", True),
+                str(badge_id),
+                str(org_id),
+            ),
+        )
+
+    @staticmethod
+    async def delete_badge(badge_id: UUID, org_id, conn):
+        return execute_returning(
+            conn,
+            """
+            UPDATE badge_configs SET is_deleted = TRUE
+            WHERE id = %s AND organisation_id = %s
+            RETURNING *
+            """,
+            (str(badge_id), str(org_id)),
+        )
+
+    @staticmethod
+    async def get_points_summary(org_id, conn):
+        return rows(
+            conn,
+            """
+            SELECT
+                up.*,
+                p.full_name,
+                p.role,
+                p.location_id
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            WHERE up.organisation_id = %s
+            ORDER BY up.total_points DESC
+            """,
+            (str(org_id),),
+        )
+
+    @staticmethod
+    async def create_leaderboard(org_id, data: dict, conn):
+        return execute_returning(
+            conn,
+            """
+            INSERT INTO leaderboard_configs (
+                organisation_id, name, description, metric_type,
+                scope, time_window, is_active, is_template
+            ) VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, TRUE), COALESCE(%s, FALSE))
+            RETURNING *
+            """,
+            (
+                str(org_id),
+                data.get("name"),
+                data.get("description"),
+                data.get("metric_type"),
+                data.get("scope", "location"),
+                data.get("time_window", "monthly"),
+                data.get("is_active"),
+                data.get("is_template"),
+            ),
+        )

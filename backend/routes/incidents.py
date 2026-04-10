@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_manager_or_above
+from dependencies import get_current_user, require_manager_or_above, get_db
+from services.db import row, rows
 from services.incident_service import IncidentService
-from services.supabase_client import get_supabase
 
 router = APIRouter()
 
@@ -57,6 +57,7 @@ async def list_incidents(
     limit: int = Query(100, ge=1, le=500),
     my_team: Optional[bool] = Query(None),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
@@ -64,12 +65,15 @@ async def list_incidents(
     # Resolve team member IDs for manager view
     team_user_ids: Optional[list] = None
     if my_team:
-        from services.supabase_client import get_supabase
-        db = get_supabase()
-        dr = db.table("profiles").select("id").eq("reports_to", user_id).eq("is_deleted", False).execute()
-        team_user_ids = [r["id"] for r in (dr.data or [])] + [user_id]
+        team_rows = rows(
+            conn,
+            "SELECT id FROM profiles WHERE reports_to = %s AND is_deleted = FALSE",
+            (user_id,),
+        )
+        team_user_ids = [r["id"] for r in team_rows] + [user_id]
 
     return await IncidentService.list_incidents(
+        conn=conn,
         org_id=org_id,
         status=status,
         severity=severity,
@@ -82,10 +86,12 @@ async def list_incidents(
 async def create_incident(
     body: CreateIncidentBody,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     incident = await IncidentService.create_incident(
+        conn=conn,
         org_id=org_id,
         user_id=user_id,
         body=body,
@@ -112,9 +118,11 @@ async def create_incident(
 async def get_incident(
     incident_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await IncidentService.get_incident(
+        conn=conn,
         incident_id=str(incident_id),
         org_id=org_id,
     )
@@ -125,9 +133,11 @@ async def update_incident(
     incident_id: UUID,
     body: UpdateIncidentBody,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await IncidentService.update_incident(
+        conn=conn,
         incident_id=str(incident_id),
         org_id=org_id,
         body=body,
@@ -139,10 +149,12 @@ async def update_incident_status(
     incident_id: UUID,
     body: UpdateIncidentStatusBody,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     return await IncidentService.update_incident_status(
+        conn=conn,
         incident_id=str(incident_id),
         org_id=org_id,
         user_id=user_id,
@@ -156,10 +168,12 @@ async def add_incident_attachment(
     incident_id: UUID,
     body: AddIncidentAttachmentBody,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
     return await IncidentService.add_attachment(
+        conn=conn,
         incident_id=str(incident_id),
         org_id=org_id,
         user_id=user_id,
@@ -174,35 +188,42 @@ async def add_incident_attachment(
 async def export_incident_pdf(
     incident_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Stream a PDF incident report generated on-demand via reportlab."""
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     if not org_id:
         raise HTTPException(status_code=403, detail="No organisation found for user")
-    db = get_supabase()
 
-    # Fetch incident with reporter (location_description is a plain text field, no join needed)
-    resp = (
-        db.table("incidents")
-        .select("*, profiles!reported_by(full_name)")
-        .eq("id", str(incident_id))
-        .eq("org_id", org_id)
-        .execute()
+    # Fetch incident with reporter
+    incident = row(
+        conn,
+        """
+        SELECT i.*, json_build_object('full_name', p.full_name) AS profiles
+        FROM incidents i
+        LEFT JOIN profiles p ON p.id = i.reported_by
+        WHERE i.id = %s AND i.org_id = %s
+        """,
+        (str(incident_id), org_id),
     )
-    if not resp.data:
+    if not incident:
         raise HTTPException(status_code=404, detail="Incident not found")
-    incident = resp.data[0]
+    incident = dict(incident)
 
-    # Fetch comments (best-effort — table/schema may vary)
+    # Fetch comments (best-effort)
     try:
-        comments_resp = (
-            db.table("incident_comments")
-            .select("body, created_at, profiles!user_id(full_name)")
-            .eq("incident_id", str(incident_id))
-            .order("created_at", desc=False)
-            .execute()
+        comments = rows(
+            conn,
+            """
+            SELECT ic.body, ic.created_at,
+                   json_build_object('full_name', p.full_name) AS profiles
+            FROM incident_comments ic
+            LEFT JOIN profiles p ON p.id = ic.user_id
+            WHERE ic.incident_id = %s
+            ORDER BY ic.created_at ASC
+            """,
+            (str(incident_id),),
         )
-        comments = comments_resp.data or []
     except Exception:
         comments = []
 

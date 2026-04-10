@@ -9,10 +9,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from dependencies import get_current_user, require_manager_or_above, paginate
+from dependencies import get_current_user, require_manager_or_above, paginate, get_db
 from models.caps import UpdateCAPItemRequest, DismissCAPRequest
 from services.cap_service import CAPService
-from services.supabase_client import get_admin_client
+from services.db import row, rows
 
 router = APIRouter()
 
@@ -25,9 +25,11 @@ async def list_caps(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     return await CAPService.list_caps(
+        conn,
         org_id=org_id,
         status=status,
         location_id=location_id,
@@ -42,9 +44,10 @@ async def list_caps(
 async def get_cap_by_submission(
     submission_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    cap = await CAPService.get_cap_by_submission(str(submission_id), org_id)
+    cap = await CAPService.get_cap_by_submission(conn, str(submission_id), org_id)
     if not cap:
         return {"cap": None}
     return cap
@@ -54,9 +57,10 @@ async def get_cap_by_submission(
 async def get_cap(
     cap_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    return await CAPService.get_cap(str(cap_id), org_id)
+    return await CAPService.get_cap(conn, str(cap_id), org_id)
 
 
 @router.put("/{cap_id}/items/{item_id}")
@@ -65,20 +69,22 @@ async def update_cap_item(
     item_id: UUID,
     body: UpdateCAPItemRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    return await CAPService.update_cap_item(str(cap_id), str(item_id), org_id, user_id, body)
+    return await CAPService.update_cap_item(conn, str(cap_id), str(item_id), org_id, user_id, body)
 
 
 @router.post("/{cap_id}/confirm")
 async def confirm_cap(
     cap_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    return await CAPService.confirm_cap(str(cap_id), org_id, user_id)
+    return await CAPService.confirm_cap(conn, str(cap_id), org_id, user_id)
 
 
 @router.post("/{cap_id}/dismiss")
@@ -86,10 +92,11 @@ async def dismiss_cap(
     cap_id: UUID,
     body: DismissCAPRequest,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     user_id = current_user["sub"]
-    return await CAPService.dismiss_cap(str(cap_id), org_id, user_id, body.reason)
+    return await CAPService.dismiss_cap(conn, str(cap_id), org_id, user_id, body.reason)
 
 
 # ── PDF Export ─────────────────────────────────────────────────────────────────
@@ -98,40 +105,65 @@ async def dismiss_cap(
 async def export_cap_pdf(
     cap_id: UUID,
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     """Stream a PDF CAP report generated on-demand via reportlab."""
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
     if not org_id:
         raise HTTPException(status_code=403, detail="No organisation found for user")
-    db = get_admin_client()
 
     # Fetch CAP with related data
-    cap_resp = (
-        db.table("corrective_action_plans")
-        .select(
-            "*, locations(name), "
-            "form_submissions(submitted_at, overall_score, passed, "
-            "form_templates(title))"
-        )
-        .eq("id", str(cap_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .maybe_single()
-        .execute()
+    cap_row = row(
+        conn,
+        """
+        SELECT
+            cap.*,
+            loc.name            AS location_name,
+            sub.submitted_at,
+            sub.overall_score,
+            sub.passed,
+            ft.title            AS form_template_title
+        FROM corrective_action_plans cap
+        LEFT JOIN locations loc         ON loc.id  = cap.location_id
+        LEFT JOIN form_submissions sub  ON sub.id  = cap.submission_id
+        LEFT JOIN form_templates ft     ON ft.id   = sub.form_template_id
+        WHERE cap.id = %s
+          AND cap.organisation_id = %s
+          AND cap.is_deleted = FALSE
+        """,
+        (str(cap_id), org_id),
     )
-    if not cap_resp.data:
+    if not cap_row:
         raise HTTPException(status_code=404, detail="CAP not found")
-    cap = cap_resp.data
+
+    cap = dict(cap_row)
+    # Nest related data to match shape expected by _generate_cap_pdf
+    cap["locations"] = {"name": cap.pop("location_name", None)}
+    cap["form_submissions"] = {
+        "submitted_at": cap.pop("submitted_at", None),
+        "overall_score": cap.pop("overall_score", None),
+        "passed": cap.pop("passed", None),
+        "form_templates": {"title": cap.pop("form_template_title", None)},
+    }
 
     # Fetch CAP items with assignee info
-    items_resp = (
-        db.table("cap_items")
-        .select("*, followup_assignee:profiles!followup_assignee_id(full_name)")
-        .eq("cap_id", str(cap_id))
-        .eq("is_deleted", False)
-        .execute()
+    item_rows = rows(
+        conn,
+        """
+        SELECT
+            ci.*,
+            p.full_name AS followup_assignee_full_name
+        FROM cap_items ci
+        LEFT JOIN profiles p ON p.id = ci.followup_assignee_id
+        WHERE ci.cap_id = %s AND ci.is_deleted = FALSE
+        """,
+        (str(cap_id),),
     )
-    items = items_resp.data or []
+    items = []
+    for ir in item_rows:
+        ir = dict(ir)
+        ir["followup_assignee"] = {"full_name": ir.pop("followup_assignee_full_name", None)}
+        items.append(ir)
 
     pdf_bytes = _generate_cap_pdf(cap, items)
 
@@ -255,7 +287,7 @@ def _generate_cap_pdf(cap: dict, items: list) -> bytes:
             Paragraph("<b>Due Date</b>", small_style),
             Paragraph("<b>Status</b>", small_style),
         ]
-        rows = [header]
+        table_rows = [header]
         for item in items:
             priority = item.get("followup_priority") or item.get("suggested_priority") or "medium"
             ftype = item.get("followup_type") or item.get("suggested_followup_type") or "task"
@@ -277,7 +309,7 @@ def _generate_cap_pdf(cap: dict, items: list) -> bytes:
             if item.get("is_critical"):
                 label_text = f"{label_text} [CRITICAL]"
 
-            rows.append([
+            table_rows.append([
                 Paragraph(label_text, small_style),
                 Paragraph(priority.title(), small_style),
                 Paragraph(ftype.title(), small_style),
@@ -287,7 +319,7 @@ def _generate_cap_pdf(cap: dict, items: list) -> bytes:
             ])
 
         col_widths = [5.5 * cm, 2 * cm, 2.5 * cm, 3 * cm, 2.2 * cm, 2.3 * cm]
-        t = Table(rows, colWidths=col_widths)
+        t = Table(table_rows, colWidths=col_widths)
         t.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), brand),
             ("TEXTCOLOR", (0, 0), (-1, 0), white),

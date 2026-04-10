@@ -9,8 +9,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_admin, paginate
-from services.supabase_client import get_supabase
+from dependencies import get_current_user, require_admin, paginate, get_db
+from services.db import row, rows, execute, execute_returning
 
 router = APIRouter()
 
@@ -45,60 +45,92 @@ class GrantCategoryAccessRequest(BaseModel):
 async def list_vendors(
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
-
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 
-    resp = (
-        db.table("vendors")
-        .select("*, vendor_category_access!left(id, category_id, is_deleted, issue_categories(name))", count="exact")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .order("name")
-        .range(offset, offset + page_size - 1)
-        .execute()
+    # Fetch vendors with their non-deleted category access entries + category names
+    vendor_rows = rows(
+        conn,
+        """
+        SELECT v.*,
+               vca.id        AS vca_id,
+               vca.category_id AS vca_category_id,
+               vca.is_deleted  AS vca_is_deleted,
+               ic.name         AS vca_category_name
+        FROM vendors v
+        LEFT JOIN vendor_category_access vca
+               ON vca.vendor_id = v.id AND vca.is_deleted = false
+        LEFT JOIN issue_categories ic
+               ON ic.id = vca.category_id
+        WHERE v.organisation_id = %s
+          AND v.is_deleted = false
+        ORDER BY v.name
+        LIMIT %s OFFSET %s
+        """,
+        (org_id, page_size, offset),
     )
 
-    vendors = []
-    for v in (resp.data or []):
-        v["vendor_category_access"] = [
-            a for a in (v.get("vendor_category_access") or []) if not a.get("is_deleted")
-        ]
-        vendors.append(v)
+    # Count total vendors (separate query so LIMIT/OFFSET don't affect it)
+    total_row = row(
+        conn,
+        "SELECT COUNT(*) AS cnt FROM vendors WHERE organisation_id = %s AND is_deleted = false",
+        (org_id,),
+    )
+    total = total_row["cnt"] if total_row else 0
 
-    return {"data": vendors, "total": resp.count or 0}
+    # Re-assemble into vendor dicts with nested vendor_category_access list
+    vendor_map: dict = {}
+    for r in vendor_rows:
+        vid = r["id"]
+        if vid not in vendor_map:
+            vendor_map[vid] = {
+                k: v for k, v in r.items()
+                if not k.startswith("vca_")
+            }
+            vendor_map[vid]["vendor_category_access"] = []
+        if r["vca_id"] is not None:
+            vendor_map[vid]["vendor_category_access"].append({
+                "id": r["vca_id"],
+                "category_id": r["vca_category_id"],
+                "is_deleted": r["vca_is_deleted"],
+                "issue_categories": {"name": r["vca_category_name"]},
+            })
+
+    return {"data": list(vendor_map.values()), "total": total}
 
 
 @router.post("/")
 async def create_vendor(
     body: CreateVendorRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    data = {
-        "organisation_id": org_id,
-        "name": body.name,
-    }
-    if body.contact_name is not None:
-        data["contact_name"] = body.contact_name
-    if body.contact_email is not None:
-        data["contact_email"] = body.contact_email
-    if body.contact_phone is not None:
-        data["contact_phone"] = body.contact_phone
-    if body.address is not None:
-        data["address"] = body.address
-    if body.notes is not None:
-        data["notes"] = body.notes
+    cols = ["organisation_id", "name"]
+    vals: list = [org_id, body.name]
 
-    resp = db.table("vendors").insert(data).execute()
-    if not resp.data:
+    optional_fields = ["contact_name", "contact_email", "contact_phone", "address", "notes"]
+    for field in optional_fields:
+        val = getattr(body, field)
+        if val is not None:
+            cols.append(field)
+            vals.append(val)
+
+    placeholders = ", ".join(["%s"] * len(cols))
+    col_list = ", ".join(cols)
+
+    vendor = execute_returning(
+        conn,
+        f"INSERT INTO vendors ({col_list}) VALUES ({placeholders}) RETURNING *",
+        tuple(vals),
+    )
+    if not vendor:
         raise HTTPException(status_code=500, detail="Failed to create vendor")
-    return resp.data[0]
+    return vendor
 
 
 @router.put("/{vendor_id}")
@@ -106,41 +138,50 @@ async def update_vendor(
     vendor_id: UUID,
     body: UpdateVendorRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="Nothing to update")
     updates["updated_at"] = datetime.utcnow().isoformat()
 
-    resp = (
-        db.table("vendors")
-        .update(updates)
-        .eq("id", str(vendor_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    set_clause = ", ".join(f"{k} = %s" for k in updates)
+    vals = list(updates.values()) + [str(vendor_id), org_id]
+
+    vendor = execute_returning(
+        conn,
+        f"""
+        UPDATE vendors
+        SET {set_clause}
+        WHERE id = %s AND organisation_id = %s AND is_deleted = false
+        RETURNING *
+        """,
+        tuple(vals),
     )
-    if not resp.data:
+    if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
-    return resp.data[0]
+    return vendor
 
 
 @router.delete("/{vendor_id}")
 async def delete_vendor(
     vendor_id: UUID,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    db.table("vendors").update({
-        "is_deleted": True,
-        "updated_at": datetime.utcnow().isoformat(),
-    }).eq("id", str(vendor_id)).eq("organisation_id", org_id).execute()
-
+    execute(
+        conn,
+        """
+        UPDATE vendors
+        SET is_deleted = true, updated_at = %s
+        WHERE id = %s AND organisation_id = %s
+        """,
+        (datetime.utcnow().isoformat(), str(vendor_id), org_id),
+    )
     return {"ok": True}
 
 
@@ -151,62 +192,62 @@ async def grant_category_access(
     vendor_id: UUID,
     body: GrantCategoryAccessRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
     # Verify vendor belongs to org
-    vendor = (
-        db.table("vendors")
-        .select("id")
-        .eq("id", str(vendor_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    vendor = row(
+        conn,
+        "SELECT id FROM vendors WHERE id = %s AND organisation_id = %s AND is_deleted = false",
+        (str(vendor_id), org_id),
     )
-    if not vendor.data:
+    if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
     # Verify category belongs to org
-    category = (
-        db.table("issue_categories")
-        .select("id")
-        .eq("id", body.category_id)
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    category = row(
+        conn,
+        "SELECT id FROM issue_categories WHERE id = %s AND organisation_id = %s AND is_deleted = false",
+        (body.category_id, org_id),
     )
-    if not category.data:
+    if not category:
         raise HTTPException(status_code=404, detail="Category not found")
 
     # Upsert — if a soft-deleted record exists, restore it
-    existing = (
-        db.table("vendor_category_access")
-        .select("id, is_deleted")
-        .eq("vendor_id", str(vendor_id))
-        .eq("category_id", body.category_id)
-        .execute()
+    existing = row(
+        conn,
+        "SELECT id, is_deleted FROM vendor_category_access WHERE vendor_id = %s AND category_id = %s",
+        (str(vendor_id), body.category_id),
     )
-    if existing.data:
-        record = existing.data[0]
-        if not record.get("is_deleted"):
-            return record
-        # Restore
-        resp = (
-            db.table("vendor_category_access")
-            .update({"is_deleted": False, "updated_at": datetime.utcnow().isoformat()})
-            .eq("id", record["id"])
-            .execute()
+    if existing:
+        if not existing["is_deleted"]:
+            return existing
+        # Restore soft-deleted record
+        restored = execute_returning(
+            conn,
+            """
+            UPDATE vendor_category_access
+            SET is_deleted = false, updated_at = %s
+            WHERE id = %s
+            RETURNING *
+            """,
+            (datetime.utcnow().isoformat(), existing["id"]),
         )
-        return resp.data[0] if resp.data else record
+        return restored if restored else existing
 
-    resp = db.table("vendor_category_access").insert({
-        "vendor_id": str(vendor_id),
-        "category_id": body.category_id,
-    }).execute()
-    if not resp.data:
+    access = execute_returning(
+        conn,
+        """
+        INSERT INTO vendor_category_access (vendor_id, category_id)
+        VALUES (%s, %s)
+        RETURNING *
+        """,
+        (str(vendor_id), body.category_id),
+    )
+    if not access:
         raise HTTPException(status_code=500, detail="Failed to grant category access")
-    return resp.data[0]
+    return access
 
 
 @router.delete("/{vendor_id}/category-access/{category_id}")
@@ -214,24 +255,25 @@ async def revoke_category_access(
     vendor_id: UUID,
     category_id: UUID,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    vendor = (
-        db.table("vendors")
-        .select("id")
-        .eq("id", str(vendor_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    vendor = row(
+        conn,
+        "SELECT id FROM vendors WHERE id = %s AND organisation_id = %s AND is_deleted = false",
+        (str(vendor_id), org_id),
     )
-    if not vendor.data:
+    if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
-    db.table("vendor_category_access").update({
-        "is_deleted": True,
-        "updated_at": datetime.utcnow().isoformat(),
-    }).eq("vendor_id", str(vendor_id)).eq("category_id", str(category_id)).execute()
-
+    execute(
+        conn,
+        """
+        UPDATE vendor_category_access
+        SET is_deleted = true, updated_at = %s
+        WHERE vendor_id = %s AND category_id = %s
+        """,
+        (datetime.utcnow().isoformat(), str(vendor_id), str(category_id)),
+    )
     return {"ok": True}

@@ -12,8 +12,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from dependencies import get_current_user, require_admin, paginate
-from services.supabase_client import get_supabase
+from dependencies import get_current_user, get_db, require_admin, paginate
+from services.db import execute, execute_returning, row, rows
 
 router = APIRouter()
 
@@ -41,16 +41,16 @@ def _random_suffix(length: int = 8) -> str:
 async def create_guide(
     body: CreateRepairGuideRequest,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
     file_url = None
 
     # Derive guide_type from file content type if uploading
     guide_type = body.guide_type or "text"
 
-    # Upload file to Supabase Storage if base64 content provided
+    # Phase 5: replace with Azure Blob
     if body.file_content_base64:
         try:
             file_bytes = base64.b64decode(body.file_content_base64)
@@ -80,8 +80,11 @@ async def create_guide(
             elif content_type.startswith("audio/"):
                 guide_type = "audio"
 
+        # Phase 5: replace with Azure Blob — storage upload retained below
+        from services.supabase_client import get_supabase  # Phase 5: replace with Azure Blob
+        _storage_client = get_supabase()  # Phase 5: replace with Azure Blob
         try:
-            db.storage.from_("repair-guides").upload(
+            _storage_client.storage.from_("repair-guides").upload(
                 storage_path,
                 file_bytes,
                 {"content-type": content_type},
@@ -90,29 +93,42 @@ async def create_guide(
             raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
 
         try:
-            public_url_resp = db.storage.from_("repair-guides").get_public_url(storage_path)
+            public_url_resp = _storage_client.storage.from_("repair-guides").get_public_url(storage_path)  # Phase 5: replace with Azure Blob
             file_url = public_url_resp if isinstance(public_url_resp, str) else storage_path
         except Exception:
             file_url = storage_path
 
-    data = {
-        "organisation_id": org_id,
-        "title": body.title,
-        "guide_type": guide_type,
-    }
-    if body.asset_id is not None:
-        data["asset_id"] = body.asset_id
-    if body.category_id is not None:
-        data["category_id"] = body.category_id
-    if body.content is not None:
-        data["content"] = body.content
-    if file_url is not None:
-        data["file_url"] = file_url
+    # Build dynamic INSERT based on which optional fields are present
+    columns = ["organisation_id", "title", "guide_type"]
+    placeholders = ["%s", "%s", "%s"]
+    values: list = [org_id, body.title, guide_type]
 
-    resp = db.table("repair_guides").insert(data).execute()
-    if not resp.data:
+    if body.asset_id is not None:
+        columns.append("asset_id")
+        placeholders.append("%s")
+        values.append(body.asset_id)
+    if body.category_id is not None:
+        columns.append("category_id")
+        placeholders.append("%s")
+        values.append(body.category_id)
+    if body.content is not None:
+        columns.append("content")
+        placeholders.append("%s")
+        values.append(body.content)
+    if file_url is not None:
+        columns.append("file_url")
+        placeholders.append("%s")
+        values.append(file_url)
+
+    sql = (
+        f"INSERT INTO repair_guides ({', '.join(columns)}) "
+        f"VALUES ({', '.join(placeholders)}) "
+        f"RETURNING *"
+    )
+    result = execute_returning(conn, sql, tuple(values))
+    if not result:
         raise HTTPException(status_code=500, detail="Failed to create repair guide")
-    return resp.data[0]
+    return dict(result)
 
 
 @router.get("/")
@@ -121,64 +137,105 @@ async def list_guides(
     category_id: Optional[str] = Query(None),
     pagination: dict = Depends(paginate),
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
     offset = pagination["offset"]
     page_size = pagination["page_size"]
 
-    query = (
-        db.table("repair_guides")
-        .select("id, title, guide_type, asset_id, category_id, content, file_url, created_at, "
-                "assets(name), issue_categories(name)", count="exact")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-    )
+    filters = ["rg.organisation_id = %s", "rg.is_deleted = FALSE"]
+    params: list = [org_id]
 
     if asset_id:
-        query = query.eq("asset_id", asset_id)
+        filters.append("rg.asset_id = %s")
+        params.append(asset_id)
     if category_id:
-        query = query.eq("category_id", category_id)
+        filters.append("rg.category_id = %s")
+        params.append(category_id)
 
-    resp = query.order("created_at", desc=True).range(offset, offset + page_size - 1).execute()
+    where = " AND ".join(filters)
 
-    return {"data": resp.data or [], "total": resp.count or 0}
+    # Total count
+    count_sql = f"SELECT COUNT(*) AS total FROM repair_guides rg WHERE {where}"
+    count_row = row(conn, count_sql, tuple(params))
+    total = count_row["total"] if count_row else 0
+
+    # Paginated data with joined asset and category names
+    data_sql = f"""
+        SELECT
+            rg.id, rg.title, rg.guide_type, rg.asset_id, rg.category_id,
+            rg.content, rg.file_url, rg.created_at,
+            a.name AS asset_name,
+            ic.name AS category_name
+        FROM repair_guides rg
+        LEFT JOIN assets a ON a.id = rg.asset_id
+        LEFT JOIN issue_categories ic ON ic.id = rg.category_id
+        WHERE {where}
+        ORDER BY rg.created_at DESC
+        LIMIT %s OFFSET %s
+    """
+    params.extend([page_size, offset])
+    data = rows(conn, data_sql, tuple(params))
+
+    # Reshape to match Supabase nested shape: assets(name), issue_categories(name)
+    for r_ in data:
+        r_["assets"] = {"name": r_.pop("asset_name")} if r_.get("asset_name") else None
+        r_["issue_categories"] = {"name": r_.pop("category_name")} if r_.get("category_name") else None
+
+    return {"data": [dict(r_) for r_ in data], "total": total}
 
 
 @router.get("/{guide_id}")
 async def get_guide(
     guide_id: UUID,
     current_user: dict = Depends(get_current_user),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    resp = (
-        db.table("repair_guides")
-        .select("*, assets(name), issue_categories(name)")
-        .eq("id", str(guide_id))
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
+    result = row(
+        conn,
+        """
+        SELECT
+            rg.*,
+            a.name AS asset_name,
+            ic.name AS category_name
+        FROM repair_guides rg
+        LEFT JOIN assets a ON a.id = rg.asset_id
+        LEFT JOIN issue_categories ic ON ic.id = rg.category_id
+        WHERE rg.id = %s
+          AND rg.organisation_id = %s
+          AND rg.is_deleted = FALSE
+        """,
+        (str(guide_id), org_id),
     )
-    if not resp.data:
+    if not result:
         raise HTTPException(status_code=404, detail="Repair guide not found")
 
-    return resp.data[0]
+    result = dict(result)
+    result["assets"] = {"name": result.pop("asset_name")} if result.get("asset_name") else None
+    result["issue_categories"] = {"name": result.pop("category_name")} if result.get("category_name") else None
+    return result
 
 
 @router.delete("/{guide_id}")
 async def delete_guide(
     guide_id: UUID,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
 
-    db.table("repair_guides").update({
-        "is_deleted": True,
-        "updated_at": datetime.utcnow().isoformat(),
-    }).eq("id", str(guide_id)).eq("organisation_id", org_id).execute()
-
+    execute(
+        conn,
+        """
+        UPDATE repair_guides
+           SET is_deleted = TRUE,
+               updated_at = NOW()
+         WHERE id = %s
+           AND organisation_id = %s
+        """,
+        (str(guide_id), org_id),
+    )
     return {"ok": True}

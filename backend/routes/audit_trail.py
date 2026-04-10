@@ -5,8 +5,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
-from dependencies import require_manager_or_above
-from services.supabase_client import get_supabase
+from dependencies import get_db, require_manager_or_above
+from services.db import rows
 
 router = APIRouter()
 
@@ -27,39 +27,46 @@ async def get_audit_trail(
         ),
     ),
     current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
 ):
     org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
-    db = get_supabase()
     events: list[dict] = []
 
     # ── 1. Task status history ────────────────────────────────────────────────
     if entity_type is None or entity_type == "task":
         try:
-            res = (
-                db.table("task_status_history")
-                .select(
-                    "id, task_id, old_status, new_status, changed_at, changed_by, "
-                    "tasks!inner(title, organisation_id), "
-                    "profiles!task_status_history_changed_by_fkey(full_name)"
-                )
-                .eq("tasks.organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    tsh.id,
+                    tsh.task_id,
+                    tsh.old_status,
+                    tsh.new_status,
+                    tsh.changed_at,
+                    tsh.changed_by,
+                    t.title       AS task_title,
+                    p.full_name   AS actor_name
+                FROM task_status_history tsh
+                JOIN tasks t ON t.id = tsh.task_id
+                LEFT JOIN profiles p ON p.id = tsh.changed_by
+                WHERE t.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                task = row.get("tasks") or {}
-                profile = row.get("profiles") or {}
-                old_s = row.get("old_status") or "unknown"
-                new_s = row.get("new_status") or "unknown"
+            for r in result:
+                old_s = r.get("old_status") or "unknown"
+                new_s = r.get("new_status") or "unknown"
                 events.append({
-                    "id": _safe_str(row.get("id")),
+                    "id": _safe_str(r.get("id")),
                     "event_type": "task_status_changed",
                     "entity_type": "task",
-                    "entity_id": _safe_str(row.get("task_id")),
-                    "entity_title": task.get("title") or "Untitled Task",
-                    "actor_name": profile.get("full_name") or "Unknown",
-                    "actor_id": _safe_str(row.get("changed_by")),
+                    "entity_id": _safe_str(r.get("task_id")),
+                    "entity_title": r.get("task_title") or "Untitled Task",
+                    "actor_name": r.get("actor_name") or "Unknown",
+                    "actor_id": _safe_str(r.get("changed_by")),
                     "description": f"Status changed from {old_s} to {new_s}",
-                    "timestamp": _safe_str(row.get("changed_at")),
+                    "timestamp": _safe_str(r.get("changed_at")),
                     "metadata": {"old_status": old_s, "new_status": new_s},
                 })
         except Exception:
@@ -68,31 +75,38 @@ async def get_audit_trail(
     # ── 2. Issue status history ───────────────────────────────────────────────
     if entity_type is None or entity_type == "issue":
         try:
-            res = (
-                db.table("issue_status_history")
-                .select(
-                    "id, issue_id, old_status, new_status, changed_at, changed_by, "
-                    "issues!inner(title, organisation_id), "
-                    "profiles!issue_status_history_changed_by_fkey(full_name)"
-                )
-                .eq("issues.organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    ish.id,
+                    ish.issue_id,
+                    ish.old_status,
+                    ish.new_status,
+                    ish.changed_at,
+                    ish.changed_by,
+                    i.title       AS issue_title,
+                    p.full_name   AS actor_name
+                FROM issue_status_history ish
+                JOIN issues i ON i.id = ish.issue_id
+                LEFT JOIN profiles p ON p.id = ish.changed_by
+                WHERE i.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                issue = row.get("issues") or {}
-                profile = row.get("profiles") or {}
-                old_s = row.get("old_status") or "unknown"
-                new_s = row.get("new_status") or "unknown"
+            for r in result:
+                old_s = r.get("old_status") or "unknown"
+                new_s = r.get("new_status") or "unknown"
                 events.append({
-                    "id": _safe_str(row.get("id")),
+                    "id": _safe_str(r.get("id")),
                     "event_type": "issue_status_changed",
                     "entity_type": "issue",
-                    "entity_id": _safe_str(row.get("issue_id")),
-                    "entity_title": issue.get("title") or "Untitled Issue",
-                    "actor_name": profile.get("full_name") or "Unknown",
-                    "actor_id": _safe_str(row.get("changed_by")),
+                    "entity_id": _safe_str(r.get("issue_id")),
+                    "entity_title": r.get("issue_title") or "Untitled Issue",
+                    "actor_name": r.get("actor_name") or "Unknown",
+                    "actor_id": _safe_str(r.get("changed_by")),
                     "description": f"Status changed from {old_s} to {new_s}",
-                    "timestamp": _safe_str(row.get("changed_at")),
+                    "timestamp": _safe_str(r.get("changed_at")),
                     "metadata": {"old_status": old_s, "new_status": new_s},
                 })
         except Exception:
@@ -101,30 +115,35 @@ async def get_audit_trail(
     # ── 3. Form submissions ───────────────────────────────────────────────────
     if entity_type is None or entity_type == "form":
         try:
-            res = (
-                db.table("form_submissions")
-                .select(
-                    "id, form_template_id, submitted_at, submitted_by, "
-                    "form_templates!inner(title, organisation_id), "
-                    "profiles!form_submissions_submitted_by_fkey(full_name)"
-                )
-                .eq("form_templates.organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    fs.id,
+                    fs.form_template_id,
+                    fs.submitted_at,
+                    fs.submitted_by,
+                    ft.title      AS template_title,
+                    p.full_name   AS actor_name
+                FROM form_submissions fs
+                JOIN form_templates ft ON ft.id = fs.form_template_id
+                LEFT JOIN profiles p ON p.id = fs.submitted_by
+                WHERE ft.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                template = row.get("form_templates") or {}
-                profile = row.get("profiles") or {}
-                title = template.get("title") or "Untitled Form"
+            for r in result:
+                title = r.get("template_title") or "Untitled Form"
                 events.append({
-                    "id": _safe_str(row.get("id")),
+                    "id": _safe_str(r.get("id")),
                     "event_type": "form_submitted",
                     "entity_type": "form",
-                    "entity_id": _safe_str(row.get("form_template_id")),
+                    "entity_id": _safe_str(r.get("form_template_id")),
                     "entity_title": title,
-                    "actor_name": profile.get("full_name") or "Unknown",
-                    "actor_id": _safe_str(row.get("submitted_by")),
+                    "actor_name": r.get("actor_name") or "Unknown",
+                    "actor_id": _safe_str(r.get("submitted_by")),
                     "description": f"Form submitted: {title}",
-                    "timestamp": _safe_str(row.get("submitted_at")),
+                    "timestamp": _safe_str(r.get("submitted_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -133,30 +152,35 @@ async def get_audit_trail(
     # ── 4. Workflow instances ─────────────────────────────────────────────────
     if entity_type is None or entity_type == "workflow":
         try:
-            res = (
-                db.table("workflow_instances")
-                .select(
-                    "id, definition_id, triggered_at, triggered_by, organisation_id, "
-                    "workflow_definitions!inner(name, organisation_id), "
-                    "profiles!workflow_instances_triggered_by_fkey(full_name)"
-                )
-                .eq("organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    wi.id,
+                    wi.definition_id,
+                    wi.triggered_at,
+                    wi.triggered_by,
+                    wd.name       AS workflow_name,
+                    p.full_name   AS actor_name
+                FROM workflow_instances wi
+                JOIN workflow_definitions wd ON wd.id = wi.definition_id
+                LEFT JOIN profiles p ON p.id = wi.triggered_by
+                WHERE wi.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                definition = row.get("workflow_definitions") or {}
-                profile = row.get("profiles") or {}
-                name = definition.get("name") or "Untitled Workflow"
+            for r in result:
+                name = r.get("workflow_name") or "Untitled Workflow"
                 events.append({
-                    "id": _safe_str(row.get("id")),
+                    "id": _safe_str(r.get("id")),
                     "event_type": "workflow_triggered",
                     "entity_type": "workflow",
-                    "entity_id": _safe_str(row.get("definition_id")),
+                    "entity_id": _safe_str(r.get("definition_id")),
                     "entity_title": name,
-                    "actor_name": profile.get("full_name") or "Unknown",
-                    "actor_id": _safe_str(row.get("triggered_by")),
+                    "actor_name": r.get("actor_name") or "Unknown",
+                    "actor_id": _safe_str(r.get("triggered_by")),
                     "description": f"Workflow triggered: {name}",
-                    "timestamp": _safe_str(row.get("triggered_at")),
+                    "timestamp": _safe_str(r.get("triggered_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -165,26 +189,27 @@ async def get_audit_trail(
     # ── 5. Workflow definitions (created — includes provisioned workflows) ────
     if entity_type is None or entity_type == "workflow":
         try:
-            res = (
-                db.table("workflow_definitions")
-                .select("id, name, created_at, created_by, organisation_id")
-                .eq("organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT id, name, created_at, created_by
+                FROM workflow_definitions
+                WHERE organisation_id = %s
+                """,
+                (org_id,),
             )
-            # Build a set of definition_ids that already appear as triggered instances
-            # so we can label the event correctly without duplicating the card.
-            for row in res.data or []:
-                name = row.get("name") or "Untitled Workflow"
+            for r in result:
+                name = r.get("name") or "Untitled Workflow"
                 events.append({
-                    "id": f"wfdef-{_safe_str(row.get('id'))}",
+                    "id": f"wfdef-{_safe_str(r.get('id'))}",
                     "event_type": "workflow_created",
                     "entity_type": "workflow",
-                    "entity_id": _safe_str(row.get("id")),
+                    "entity_id": _safe_str(r.get("id")),
                     "entity_title": name,
                     "actor_name": "System",
-                    "actor_id": _safe_str(row.get("created_by")),
+                    "actor_id": _safe_str(r.get("created_by")),
                     "description": f"Workflow created: {name}",
-                    "timestamp": _safe_str(row.get("created_at")),
+                    "timestamp": _safe_str(r.get("created_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -193,24 +218,27 @@ async def get_audit_trail(
     # ── 6. Form templates (created — includes provisioned forms) ─────────────
     if entity_type is None or entity_type == "form":
         try:
-            res = (
-                db.table("form_templates")
-                .select("id, title, created_at, created_by, organisation_id")
-                .eq("organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT id, title, created_at, created_by
+                FROM form_templates
+                WHERE organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                title = row.get("title") or "Untitled Form"
+            for r in result:
+                title = r.get("title") or "Untitled Form"
                 events.append({
-                    "id": f"fmtpl-{_safe_str(row.get('id'))}",
+                    "id": f"fmtpl-{_safe_str(r.get('id'))}",
                     "event_type": "form_created",
                     "entity_type": "form",
-                    "entity_id": _safe_str(row.get("id")),
+                    "entity_id": _safe_str(r.get("id")),
                     "entity_title": title,
                     "actor_name": "System",
-                    "actor_id": _safe_str(row.get("created_by")),
+                    "actor_id": _safe_str(r.get("created_by")),
                     "description": f"Form created: {title}",
-                    "timestamp": _safe_str(row.get("created_at")),
+                    "timestamp": _safe_str(r.get("created_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -219,32 +247,40 @@ async def get_audit_trail(
     # ── 7. Published shifts ───────────────────────────────────────────────────
     if entity_type is None or entity_type == "shift":
         try:
-            res = (
-                db.table("shifts")
-                .select(
-                    "id, role, start_at, location_id, status, created_at, created_by, "
-                    "profiles!shifts_created_by_fkey(full_name)"
-                )
-                .eq("organisation_id", org_id)
-                .eq("status", "published")
-                .order("created_at", desc=True)
-                .limit(200)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    s.id,
+                    s.role,
+                    s.start_at,
+                    s.location_id,
+                    s.status,
+                    s.created_at,
+                    s.created_by,
+                    p.full_name   AS actor_name
+                FROM shifts s
+                LEFT JOIN profiles p ON p.id = s.created_by
+                WHERE s.organisation_id = %s
+                  AND s.status = 'published'
+                ORDER BY s.created_at DESC
+                LIMIT 200
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                profile = row.get("profiles") or {}
-                role = row.get("role") or "Shift"
-                start = (row.get("start_at") or "")[:10]
+            for r in result:
+                role = r.get("role") or "Shift"
+                start = (str(r.get("start_at") or ""))[:10]
                 events.append({
-                    "id": f"shift-{_safe_str(row.get('id'))}",
+                    "id": f"shift-{_safe_str(r.get('id'))}",
                     "event_type": "shift_published",
                     "entity_type": "shift",
-                    "entity_id": _safe_str(row.get("id")),
+                    "entity_id": _safe_str(r.get("id")),
                     "entity_title": f"{role} — {start}",
-                    "actor_name": profile.get("full_name") or "Manager",
-                    "actor_id": _safe_str(row.get("created_by")),
+                    "actor_name": r.get("actor_name") or "Manager",
+                    "actor_id": _safe_str(r.get("created_by")),
                     "description": f"Shift published: {role} on {start}",
-                    "timestamp": _safe_str(row.get("created_at")),
+                    "timestamp": _safe_str(r.get("created_at")),
                     "metadata": {"status": "published"},
                 })
         except Exception:
@@ -253,31 +289,36 @@ async def get_audit_trail(
     # ── 8. Training completions ───────────────────────────────────────────────
     if entity_type is None or entity_type == "training":
         try:
-            res = (
-                db.table("course_enrollments")
-                .select(
-                    "id, course_id, completed_at, user_id, "
-                    "courses!inner(title, organisation_id), "
-                    "profiles!course_enrollments_user_id_fkey(full_name)"
-                )
-                .eq("courses.organisation_id", org_id)
-                .not_.is_("completed_at", "null")
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    ce.id,
+                    ce.course_id,
+                    ce.completed_at,
+                    ce.user_id,
+                    c.title       AS course_title,
+                    p.full_name   AS actor_name
+                FROM course_enrollments ce
+                JOIN courses c ON c.id = ce.course_id
+                LEFT JOIN profiles p ON p.id = ce.user_id
+                WHERE c.organisation_id = %s
+                  AND ce.completed_at IS NOT NULL
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                course = row.get("courses") or {}
-                profile = row.get("profiles") or {}
-                title = course.get("title") or "Course"
+            for r in result:
+                title = r.get("course_title") or "Course"
                 events.append({
-                    "id": f"enroll-{_safe_str(row.get('id'))}",
+                    "id": f"enroll-{_safe_str(r.get('id'))}",
                     "event_type": "training_completed",
                     "entity_type": "training",
-                    "entity_id": _safe_str(row.get("course_id")),
+                    "entity_id": _safe_str(r.get("course_id")),
                     "entity_title": title,
-                    "actor_name": profile.get("full_name") or "Staff",
-                    "actor_id": _safe_str(row.get("user_id")),
+                    "actor_name": r.get("actor_name") or "Staff",
+                    "actor_id": _safe_str(r.get("user_id")),
                     "description": f"Training completed: {title}",
-                    "timestamp": _safe_str(row.get("completed_at")),
+                    "timestamp": _safe_str(r.get("completed_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -286,28 +327,33 @@ async def get_audit_trail(
     # ── 9. Announcements ─────────────────────────────────────────────────────
     if entity_type is None or entity_type == "announcement":
         try:
-            res = (
-                db.table("announcements")
-                .select(
-                    "id, title, created_at, created_by, organisation_id, "
-                    "profiles!announcements_created_by_fkey(full_name)"
-                )
-                .eq("organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    a.id,
+                    a.title,
+                    a.created_at,
+                    a.created_by,
+                    p.full_name   AS actor_name
+                FROM announcements a
+                LEFT JOIN profiles p ON p.id = a.created_by
+                WHERE a.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                profile = row.get("profiles") or {}
-                title = row.get("title") or "Announcement"
+            for r in result:
+                title = r.get("title") or "Announcement"
                 events.append({
-                    "id": f"ann-{_safe_str(row.get('id'))}",
+                    "id": f"ann-{_safe_str(r.get('id'))}",
                     "event_type": "announcement_created",
                     "entity_type": "announcement",
-                    "entity_id": _safe_str(row.get("id")),
+                    "entity_id": _safe_str(r.get("id")),
                     "entity_title": title,
-                    "actor_name": profile.get("full_name") or "Manager",
-                    "actor_id": _safe_str(row.get("created_by")),
+                    "actor_name": r.get("actor_name") or "Manager",
+                    "actor_id": _safe_str(r.get("created_by")),
                     "description": f"Announcement posted: {title}",
-                    "timestamp": _safe_str(row.get("created_at")),
+                    "timestamp": _safe_str(r.get("created_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -316,30 +362,35 @@ async def get_audit_trail(
     # ── 10. Badge awards ──────────────────────────────────────────────────────
     if entity_type is None or entity_type == "badge":
         try:
-            res = (
-                db.table("user_badges")
-                .select(
-                    "id, badge_config_id, awarded_at, user_id, "
-                    "badge_configs!inner(name, organisation_id), "
-                    "profiles!user_badges_user_id_fkey(full_name)"
-                )
-                .eq("badge_configs.organisation_id", org_id)
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT
+                    ub.id,
+                    ub.badge_config_id,
+                    ub.awarded_at,
+                    ub.user_id,
+                    bc.name       AS badge_name,
+                    p.full_name   AS actor_name
+                FROM user_badges ub
+                JOIN badge_configs bc ON bc.id = ub.badge_config_id
+                LEFT JOIN profiles p ON p.id = ub.user_id
+                WHERE bc.organisation_id = %s
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                badge = row.get("badge_configs") or {}
-                profile = row.get("profiles") or {}
-                name = badge.get("name") or "Badge"
+            for r in result:
+                name = r.get("badge_name") or "Badge"
                 events.append({
-                    "id": f"badge-{_safe_str(row.get('id'))}",
+                    "id": f"badge-{_safe_str(r.get('id'))}",
                     "event_type": "badge_awarded",
                     "entity_type": "badge",
-                    "entity_id": _safe_str(row.get("badge_config_id")),
+                    "entity_id": _safe_str(r.get("badge_config_id")),
                     "entity_title": name,
-                    "actor_name": profile.get("full_name") or "Staff",
-                    "actor_id": _safe_str(row.get("user_id")),
+                    "actor_name": r.get("actor_name") or "Staff",
+                    "actor_id": _safe_str(r.get("user_id")),
                     "description": f"Badge awarded: {name}",
-                    "timestamp": _safe_str(row.get("awarded_at")),
+                    "timestamp": _safe_str(r.get("awarded_at")),
                     "metadata": {},
                 })
         except Exception:
@@ -348,28 +399,35 @@ async def get_audit_trail(
     # ── 11. Onboarding provisioning events ───────────────────────────────────
     if entity_type is None:
         try:
-            res = (
-                db.table("onboarding_sessions")
-                .select("id, completed_at, launch_progress, company_name, industry_code")
-                .eq("organisation_id", org_id)
-                .eq("status", "completed")
-                .execute()
+            result = rows(
+                conn,
+                """
+                SELECT id, completed_at, launch_progress, company_name, industry_code
+                FROM onboarding_sessions
+                WHERE organisation_id = %s
+                  AND status = 'completed'
+                """,
+                (org_id,),
             )
-            for row in res.data or []:
-                progress = row.get("launch_progress") or {}
+            for r in result:
+                progress = r.get("launch_progress") or {}
                 steps = progress.get("steps_completed") or []
-                company = row.get("company_name") or "your company"
-                description = f"Workspace provisioned for {company}: {', '.join(steps[:5])}" if steps else f"Workspace provisioned for {company}"
+                company = r.get("company_name") or "your company"
+                description = (
+                    f"Workspace provisioned for {company}: {', '.join(steps[:5])}"
+                    if steps
+                    else f"Workspace provisioned for {company}"
+                )
                 events.append({
-                    "id": _safe_str(row.get("id")),
+                    "id": _safe_str(r.get("id")),
                     "event_type": "workspace_provisioned",
                     "entity_type": "onboarding",
-                    "entity_id": _safe_str(row.get("id")),
+                    "entity_id": _safe_str(r.get("id")),
                     "entity_title": f"Workspace — {company}",
                     "actor_name": "Onboarding Wizard",
                     "actor_id": "",
                     "description": description,
-                    "timestamp": _safe_str(row.get("completed_at")),
+                    "timestamp": _safe_str(r.get("completed_at")),
                     "metadata": {"steps_completed": steps},
                 })
         except Exception:

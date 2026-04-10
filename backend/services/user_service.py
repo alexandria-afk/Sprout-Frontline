@@ -1,17 +1,18 @@
 import csv
 import io
+import uuid
 from uuid import UUID
 from fastapi import HTTPException
 from collections import Counter
 from models.users import CreateUserRequest, UpdateUserRequest, ProfileResponse, PositionSuggestion
 from models.base import PaginatedResponse
-from services.supabase_client import get_supabase
-from config import settings
+from services.db import row, rows, execute, execute_returning
 
 
 class UserService:
     @staticmethod
     async def list_users(
+        conn,
         org_id: str,
         location_id: str | None = None,
         role: str | None = None,
@@ -19,29 +20,48 @@ class UserService:
         page: int = 1,
         page_size: int = 20,
     ) -> PaginatedResponse[ProfileResponse]:
-        supabase = get_supabase()
         offset = (page - 1) * page_size
 
-        try:
-            query = (
-                supabase.table("profiles")
-                .select("*, reports_to_profile:reports_to(id, full_name)", count="exact")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-            )
-            if location_id:
-                query = query.eq("location_id", str(location_id))
-            if role:
-                query = query.eq("role", role)
-            if search:
-                query = query.ilike("full_name", f"%{search}%")
+        # Build dynamic WHERE clauses
+        conditions = [
+            "p.organisation_id = %s",
+            "p.is_deleted = false",
+        ]
+        params: list = [str(org_id)]
 
-            response = query.range(offset, offset + page_size - 1).execute()
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        if location_id:
+            conditions.append("p.location_id = %s")
+            params.append(str(location_id))
+        if role:
+            conditions.append("p.role = %s")
+            params.append(role)
+        if search:
+            conditions.append("p.full_name ILIKE %s")
+            params.append(f"%{search}%")
 
-        items = [ProfileResponse(**row) for row in response.data]
-        total_count = response.count if response.count is not None else len(items)
+        where = " AND ".join(conditions)
+
+        # Total count
+        count_sql = f"SELECT COUNT(*) AS cnt FROM profiles p WHERE {where}"
+        count_row = row(conn, count_sql, tuple(params))
+        total_count = count_row["cnt"] if count_row else 0
+
+        # Paginated data with reports_to join
+        data_sql = f"""
+            SELECT
+                p.*,
+                json_build_object('id', rp.id, 'full_name', rp.full_name)
+                    AS reports_to_profile
+            FROM profiles p
+            LEFT JOIN profiles rp ON rp.id = p.reports_to AND rp.is_deleted = false
+            WHERE {where}
+            ORDER BY p.full_name ASC
+            LIMIT %s OFFSET %s
+        """
+        params_data = tuple(params) + (page_size, offset)
+        result_rows = rows(conn, data_sql, params_data)
+
+        items = [ProfileResponse(**r) for r in result_rows]
 
         return PaginatedResponse(
             items=items,
@@ -51,117 +71,98 @@ class UserService:
         )
 
     @staticmethod
-    async def create_user(body: CreateUserRequest, org_id: str) -> ProfileResponse:
-        supabase = get_supabase()
-        # Check if a profile already exists for this email in this org
-        existing = (
-            supabase.table("profiles")
-            .select("id")
-            .eq("organisation_id", str(org_id))
-            .eq("is_deleted", False)
-            .execute()
+    async def create_user(conn, body: CreateUserRequest, org_id: str) -> ProfileResponse:
+        # Check if a non-deleted profile with this email already exists in the org
+        existing_profile = row(
+            conn,
+            """
+            SELECT id FROM profiles
+            WHERE organisation_id = %s AND email = %s AND is_deleted = false
+            LIMIT 1
+            """,
+            (str(org_id), body.email),
         )
-        # Also check auth users by email
-        try:
-            auth_list = supabase.auth.admin.list_users()
-            existing_emails = {u.email for u in auth_list if u.email}
-            if body.email in existing_emails:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"A user with email {body.email} already exists. Re-send the invite from the user list instead.",
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            pass  # If list_users fails, proceed and let invite_user_by_email handle it
-
-        try:
-            auth_response = supabase.auth.admin.invite_user_by_email(
-                body.email,
-                options={
-                    "data": {"full_name": body.full_name},
-                    "redirect_to": f"{settings.frontend_url}/auth/callback",
-                },
+        if existing_profile:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A user with email {body.email} already exists. Re-send the invite from the user list instead.",
             )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invite failed: {e}")
 
-        user_id = str(auth_response.user.id)
+        # TODO: create user in Keycloak admin API
+        # Previously: supabase.auth.admin.invite_user_by_email(body.email, ...)
+        # Previously: supabase.auth.admin.update_user_by_id(user_id, {"app_metadata": {...}})
+        # Generate a profile ID; the real Keycloak user ID should be used here once
+        # the Keycloak invite flow is implemented.
+        user_id = str(uuid.uuid4())
 
-        try:
-            supabase.auth.admin.update_user_by_id(
-                user_id,
-                {"app_metadata": {"organisation_id": str(org_id), "role": body.role}},
-            )
-        except Exception as e:
-            supabase.auth.admin.delete_user(user_id)
-            raise HTTPException(status_code=400, detail=f"Metadata update failed: {e}")
+        # Build INSERT parameters
+        columns = ["id", "organisation_id", "full_name", "role", "email", "language", "is_active", "is_deleted"]
+        values: list = [user_id, str(org_id), body.full_name, body.role, body.email, "en", True, False]
 
-        profile_data = {
-            "id": user_id,
-            "organisation_id": str(org_id),
-            "full_name": body.full_name,
-            "role": body.role,
-            "language": "en",
-            "is_active": True,
-            "is_deleted": False,
-        }
         if body.location_id:
-            profile_data["location_id"] = str(body.location_id)
+            columns.append("location_id")
+            values.append(str(body.location_id))
         if body.phone_number:
-            profile_data["phone_number"] = body.phone_number
+            columns.append("phone_number")
+            values.append(body.phone_number)
         if body.reports_to:
-            profile_data["reports_to"] = str(body.reports_to)
+            columns.append("reports_to")
+            values.append(str(body.reports_to))
         if body.position:
-            profile_data["position"] = body.position
+            columns.append("position")
+            values.append(body.position)
 
-        try:
-            profile_response = supabase.table("profiles").insert(profile_data).execute()
-        except Exception as e:
-            supabase.auth.admin.delete_user(user_id)
-            raise HTTPException(status_code=400, detail=f"Profile creation failed: {e}")
+        col_str = ", ".join(columns)
+        placeholder_str = ", ".join(["%s"] * len(values))
 
-        return ProfileResponse(**profile_response.data[0])
+        profile_row = execute_returning(
+            conn,
+            f"""
+            INSERT INTO profiles ({col_str})
+            VALUES ({placeholder_str})
+            RETURNING *
+            """,
+            tuple(values),
+        )
+        if not profile_row:
+            raise HTTPException(status_code=400, detail="Profile creation failed")
+
+        return ProfileResponse(**profile_row)
 
     @staticmethod
-    async def get_user(user_id: str, org_id: str) -> ProfileResponse:
-        supabase = get_supabase()
-        try:
-            response = (
-                supabase.table("profiles")
-                .select("*")
-                .eq("id", str(user_id))
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-        if not response.data:
+    async def get_user(conn, user_id: str, org_id: str) -> ProfileResponse:
+        result = row(
+            conn,
+            """
+            SELECT * FROM profiles
+            WHERE id = %s AND organisation_id = %s AND is_deleted = false
+            LIMIT 1
+            """,
+            (str(user_id), str(org_id)),
+        )
+        if not result:
             raise HTTPException(status_code=404, detail="User not found")
 
-        return ProfileResponse(**response.data[0])
+        return ProfileResponse(**result)
 
     @staticmethod
     async def update_user(
-        user_id: str, body: UpdateUserRequest, org_id: str
+        conn, user_id: str, body: UpdateUserRequest, org_id: str
     ) -> ProfileResponse:
-        supabase = get_supabase()
-
         # Verify user exists in org
-        existing = (
-            supabase.table("profiles")
-            .select("*")
-            .eq("id", str(user_id))
-            .eq("organisation_id", str(org_id))
-            .eq("is_deleted", False)
-            .execute()
+        existing = row(
+            conn,
+            """
+            SELECT * FROM profiles
+            WHERE id = %s AND organisation_id = %s AND is_deleted = false
+            LIMIT 1
+            """,
+            (str(user_id), str(org_id)),
         )
-        if not existing.data:
+        if not existing:
             raise HTTPException(status_code=404, detail="User not found")
 
-        updates = {}
+        updates: dict = {}
         if body.full_name is not None:
             updates["full_name"] = body.full_name
         if body.role is not None:
@@ -180,84 +181,76 @@ class UserService:
             updates["position"] = body.position if body.position else None
 
         if not updates:
-            return ProfileResponse(**existing.data[0])
+            return ProfileResponse(**existing)
 
-        try:
-            response = (
-                supabase.table("profiles")
-                .update(updates)
-                .eq("id", str(user_id))
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        set_clause = ", ".join(f"{col} = %s" for col in updates.keys())
+        params = tuple(updates.values()) + (str(user_id),)
+
+        updated_row = execute_returning(
+            conn,
+            f"""
+            UPDATE profiles
+            SET {set_clause}
+            WHERE id = %s
+            RETURNING *
+            """,
+            params,
+        )
+        if not updated_row:
+            raise HTTPException(status_code=400, detail="Update failed")
 
         if body.role is not None:
-            try:
-                current_metadata = existing.data[0]
-                supabase.auth.admin.update_user_by_id(
-                    str(user_id),
-                    {
-                        "app_metadata": {
-                            "organisation_id": str(org_id),
-                            "role": body.role,
-                        }
-                    },
-                )
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Metadata update failed: {e}")
+            # TODO: update role in Keycloak admin API
+            # Previously: supabase.auth.admin.update_user_by_id(user_id, {"app_metadata": {"role": body.role, ...}})
+            pass
 
-        return ProfileResponse(**response.data[0])
+        return ProfileResponse(**updated_row)
 
     @staticmethod
-    async def delete_user(user_id: str, org_id: str) -> dict:
-        supabase = get_supabase()
-
-        existing = (
-            supabase.table("profiles")
-            .select("id")
-            .eq("id", str(user_id))
-            .eq("organisation_id", str(org_id))
-            .eq("is_deleted", False)
-            .execute()
+    async def delete_user(conn, user_id: str, org_id: str) -> dict:
+        existing = row(
+            conn,
+            """
+            SELECT id FROM profiles
+            WHERE id = %s AND organisation_id = %s AND is_deleted = false
+            LIMIT 1
+            """,
+            (str(user_id), str(org_id)),
         )
-        if not existing.data:
+        if not existing:
             raise HTTPException(status_code=404, detail="User not found")
 
-        try:
-            supabase.table("profiles").update({"is_deleted": True}).eq(
-                "id", str(user_id)
-            ).execute()
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        affected = execute(
+            conn,
+            "UPDATE profiles SET is_deleted = true WHERE id = %s",
+            (str(user_id),),
+        )
+        if not affected:
+            raise HTTPException(status_code=400, detail="Delete failed")
 
-        try:
-            supabase.auth.admin.update_user_by_id(
-                str(user_id), {"ban_duration": "876600h"}
-            )
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Auth ban failed: {e}")
+        # TODO: disable/ban user in Keycloak admin API
+        # Previously: supabase.auth.admin.update_user_by_id(user_id, {"ban_duration": "876600h"})
 
         return {"success": True, "message": "User deleted"}
 
     @staticmethod
-    async def bulk_import(csv_content: str, org_id: str) -> dict:
+    async def bulk_import(conn, csv_content: str, org_id: str) -> dict:
         reader = csv.DictReader(io.StringIO(csv_content))
         successes = []
         failures = []
 
-        for row_num, row in enumerate(reader, start=1):
-            email = row.get("email", "").strip()
+        for row_num, csv_row in enumerate(reader, start=1):
+            email = csv_row.get("email", "").strip()
             try:
                 body = CreateUserRequest(
                     email=email,
-                    full_name=row.get("full_name", "").strip(),
-                    role=row.get("role", "staff").strip() or "staff",
-                    location_id=row.get("location_id", "").strip() or None,
-                    phone_number=row.get("phone_number", "").strip() or None,
-                    position=row.get("position", "").strip() or None,
+                    full_name=csv_row.get("full_name", "").strip(),
+                    role=csv_row.get("role", "staff").strip() or "staff",
+                    location_id=csv_row.get("location_id", "").strip() or None,
+                    phone_number=csv_row.get("phone_number", "").strip() or None,
+                    position=csv_row.get("position", "").strip() or None,
                 )
-                profile = await UserService.create_user(body, org_id)
+                profile = await UserService.create_user(conn, body, org_id)
                 successes.append({"row": row_num, "email": email, "user_id": str(profile.id)})
             except Exception as e:
                 err_str = str(e).lower()
@@ -274,49 +267,38 @@ class UserService:
         return {"successes": successes, "failures": failures}
 
     @staticmethod
-    async def get_me(user_id: str) -> ProfileResponse:
-        supabase = get_supabase()
-        try:
-            response = (
-                supabase.table("profiles")
-                .select("*")
-                .eq("id", str(user_id))
-                .eq("is_deleted", False)
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-        if not response.data:
+    async def get_me(conn, user_id: str) -> ProfileResponse:
+        result = row(
+            conn,
+            """
+            SELECT * FROM profiles
+            WHERE id = %s AND is_deleted = false
+            LIMIT 1
+            """,
+            (str(user_id),),
+        )
+        if not result:
             raise HTTPException(status_code=404, detail="Profile not found")
 
-        return ProfileResponse(**response.data[0])
+        return ProfileResponse(**result)
 
     @staticmethod
-    async def get_distinct_positions(org_id: str, search: str = "") -> list[PositionSuggestion]:
-        supabase = get_supabase()
-        try:
-            resp = (
-                supabase.table("profiles")
-                .select("position")
-                .eq("organisation_id", str(org_id))
-                .eq("is_deleted", False)
-                .not_.is_("position", "null")
-                .execute()
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    async def get_distinct_positions(conn, org_id: str, search: str = "") -> list[PositionSuggestion]:
+        result = rows(
+            conn,
+            """
+            SELECT position
+            FROM profiles
+            WHERE organisation_id = %s
+              AND is_deleted = false
+              AND position IS NOT NULL
+            """,
+            (str(org_id),),
+        )
 
-        counts = Counter(row["position"] for row in resp.data if row.get("position"))
+        counts = Counter(r["position"] for r in result if r.get("position"))
         results = [PositionSuggestion(position=p, count=c) for p, c in counts.items()]
         if search:
             q = search.lower()
             results = [r for r in results if q in r.position.lower()]
         return sorted(results, key=lambda x: -x.count)
-
-
-def _generate_temp_password() -> str:
-    import secrets
-    import string
-    alphabet = string.ascii_letters + string.digits + "!@#$%"
-    return "".join(secrets.choice(alphabet) for _ in range(16))

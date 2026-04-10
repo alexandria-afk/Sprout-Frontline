@@ -15,7 +15,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from services.supabase_client import get_admin_client
+from services.db import row, rows, execute, execute_returning, execute_many
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +139,7 @@ def find_next_stage_id(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def resolve_stage_assignee(
+    conn,
     stage: dict,
     location_id: Optional[str],
     org_id: str,
@@ -154,21 +155,19 @@ async def resolve_stage_assignee(
     if not assigned_role:
         return None
 
-    db = get_admin_client()
-    q = db.table("profiles") \
-        .select("id") \
-        .eq("organisation_id", org_id) \
-        .eq("role", assigned_role) \
-        .eq("is_deleted", False) \
-        .limit(1)
-
     if location_id:
-        q = q.eq("location_id", location_id)
-
-    res = q.execute()
-    if res.data:
-        return str(res.data[0]["id"])
-    return None
+        r = row(conn,
+            "SELECT id FROM profiles WHERE organisation_id = %s AND role = %s "
+            "AND is_deleted = FALSE AND location_id = %s LIMIT 1",
+            (org_id, assigned_role, location_id),
+        )
+    else:
+        r = row(conn,
+            "SELECT id FROM profiles WHERE organisation_id = %s AND role = %s "
+            "AND is_deleted = FALSE LIMIT 1",
+            (org_id, assigned_role),
+        )
+    return str(r["id"]) if r else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,7 +175,7 @@ async def resolve_stage_assignee(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _execute_system_stage(
-    db,
+    conn,
     stage: dict,
     stage_instance_id: str,
     instance: dict,
@@ -221,54 +220,85 @@ def _execute_system_stage(
             task_due_at = (datetime.now(timezone.utc) + timedelta(days=int(deadline_days))).isoformat()
         elif due_hours:
             task_due_at = (datetime.now(timezone.utc) + timedelta(hours=int(due_hours))).isoformat()
-        task_row: dict = {
-            "organisation_id": org_id,
-            "title": cfg.get("title", "Workflow Task"),
-            "priority": cfg.get("priority", "medium"),
-            "status": "pending",
-            "source_type": "workflow",
-            "created_by": triggered_by,
-        }
-        if location_id:
-            task_row["location_id"] = location_id
-        if task_due_at:
-            task_row["due_at"] = task_due_at
+
+        assigned_to = None
         if task_role:
-            resolved = _resolve_role_sync(db, task_role, org_id, location_id)
-            if resolved:
-                task_row["assigned_to"] = resolved
-        task_res = db.table("tasks").insert(task_row).execute()
-        if task_res.data:
-            spawned_id = task_res.data[0]["id"]
-            db.table("workflow_stage_instances").update({"spawned_task_id": spawned_id}).eq("id", stage_instance_id).execute()
+            assigned_to = _resolve_role_sync(conn, task_role, org_id, location_id)
+
+        task_row = execute_returning(conn,
+            """
+            INSERT INTO tasks (organisation_id, title, priority, status, source_type,
+                               created_by, location_id, due_at, assigned_to)
+            VALUES (%s, %s, %s, 'pending', 'workflow', %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                org_id,
+                cfg.get("title", "Workflow Task"),
+                cfg.get("priority", "medium"),
+                triggered_by,
+                location_id,
+                task_due_at,
+                assigned_to,
+            ),
+        )
+        if task_row:
+            spawned_id = task_row["id"]
+            execute(conn,
+                "UPDATE workflow_stage_instances SET spawned_task_id = %s WHERE id = %s",
+                (spawned_id, stage_instance_id),
+            )
             logger.info(f"[create_task stage] spawned task {spawned_id}")
 
     elif action_type == "create_issue":
-        issue_res = db.table("issues").insert({
-            "organisation_id": org_id,
-            "title": cfg.get("title", "Workflow Issue"),
-            "priority": cfg.get("priority", "medium"),
-            "status": "open",
-            "reported_by": triggered_by or _get_first_admin(db, org_id),
-            "location_id": location_id or _get_first_location(db, org_id),
-            **({"category_id": cfg["category_id"]} if cfg.get("category_id") else {}),
-        }).execute()
-        if issue_res.data:
-            spawned_id = issue_res.data[0]["id"]
-            db.table("workflow_stage_instances").update({"spawned_issue_id": spawned_id}).eq("id", stage_instance_id).execute()
+        reported_by = triggered_by or _get_first_admin(conn, org_id)
+        loc_id = location_id or _get_first_location(conn, org_id)
+        category_id = cfg.get("category_id")
+        issue_row = execute_returning(conn,
+            """
+            INSERT INTO issues (organisation_id, title, priority, status, reported_by,
+                                location_id, category_id)
+            VALUES (%s, %s, %s, 'open', %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                org_id,
+                cfg.get("title", "Workflow Issue"),
+                cfg.get("priority", "medium"),
+                reported_by,
+                loc_id,
+                category_id,
+            ),
+        )
+        if issue_row:
+            spawned_id = issue_row["id"]
+            execute(conn,
+                "UPDATE workflow_stage_instances SET spawned_issue_id = %s WHERE id = %s",
+                (spawned_id, stage_instance_id),
+            )
             logger.info(f"[create_issue stage] spawned issue {spawned_id}")
 
     elif action_type == "create_incident":
-        incident_res = db.table("incidents").insert({
-            "org_id": org_id,
-            "title": cfg.get("title", "Workflow Incident"),
-            "status": "reported",
-            "incident_date": now_iso,
-            "reported_by": triggered_by or _get_first_admin(db, org_id),
-        }).execute()
-        if incident_res.data:
-            spawned_id = incident_res.data[0]["id"]
-            db.table("workflow_stage_instances").update({"spawned_incident_id": spawned_id}).eq("id", stage_instance_id).execute()
+        reported_by = triggered_by or _get_first_admin(conn, org_id)
+        incident_row = execute_returning(conn,
+            """
+            INSERT INTO incidents (org_id, title, status, incident_date, reported_by)
+            VALUES (%s, %s, 'reported', %s, %s)
+            RETURNING id
+            """,
+            (
+                org_id,
+                cfg.get("title", "Workflow Incident"),
+                now_iso,
+                reported_by,
+            ),
+        )
+        if incident_row:
+            spawned_id = incident_row["id"]
+            execute(conn,
+                "UPDATE workflow_stage_instances SET spawned_incident_id = %s WHERE id = %s",
+                (spawned_id, stage_instance_id),
+            )
             logger.info(f"[create_incident stage] spawned incident {spawned_id}")
 
     elif action_type == "assign_training":
@@ -280,8 +310,12 @@ def _execute_system_stage(
         # Resolve course_refs (name strings) to IDs for this org
         course_refs = cfg.get("course_refs") or []
         if course_refs:
-            refs_res = db.table("courses").select("id").in_("title", course_refs).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-            course_ids += [r["id"] for r in (refs_res.data or [])]
+            ref_rows = rows(conn,
+                "SELECT id FROM courses WHERE title = ANY(%s) AND organisation_id = %s AND is_deleted = FALSE",
+                (course_refs, org_id),
+            )
+            course_ids += [r["id"] for r in ref_rows]
+
         subject_user_id = instance.get("subject_user_id") or triggered_by
         if subject_user_id and course_ids:
             deadline_dt = None
@@ -292,53 +326,66 @@ def _execute_system_stage(
                 except (ValueError, TypeError):
                     pass
             # Single query to find already-enrolled courses (avoids N+1)
-            existing_res = db.table("course_enrollments") \
-                .select("course_id") \
-                .eq("user_id", subject_user_id) \
-                .in_("course_id", course_ids) \
-                .execute()
-            already_enrolled = {r["course_id"] for r in (existing_res.data or [])}
-            enrolled_by = triggered_by or _get_first_admin(db, org_id)
+            already_rows = rows(conn,
+                "SELECT course_id FROM course_enrollments WHERE user_id = %s AND course_id = ANY(%s::uuid[])",
+                (subject_user_id, list(course_ids)),
+            )
+            already_enrolled = {r["course_id"] for r in already_rows}
+            enrolled_by = triggered_by or _get_first_admin(conn, org_id)
             enrollment_rows = [
-                {
-                    "course_id": cid,
-                    "user_id": subject_user_id,
-                    "enrolled_by": enrolled_by,
-                    "status": "not_started",
-                    **({"cert_expires_at": deadline_dt} if deadline_dt else {}),
-                }
+                (cid, subject_user_id, enrolled_by, "not_started", deadline_dt)
                 for cid in course_ids if cid not in already_enrolled
             ]
             if enrollment_rows:
-                db.table("course_enrollments").insert(enrollment_rows).execute()
+                execute_many(conn,
+                    """
+                    INSERT INTO course_enrollments (course_id, user_id, enrolled_by, status, cert_expires_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    enrollment_rows,
+                )
                 logger.info(f"[assign_training stage] enrolled user {subject_user_id} in {len(enrollment_rows)} courses")
 
     return update
 
 
-def _resolve_role_sync(db, role: str, org_id: str, location_id: Optional[str]) -> Optional[str]:
-    q = db.table("profiles").select("id").eq("organisation_id", org_id).eq("role", role).eq("is_deleted", False).limit(1)
+def _resolve_role_sync(conn, role: str, org_id: str, location_id: Optional[str]) -> Optional[str]:
     if location_id:
-        q = q.eq("location_id", location_id)
-    res = q.execute()
-    return res.data[0]["id"] if res.data else None
+        r = row(conn,
+            "SELECT id FROM profiles WHERE organisation_id = %s AND role = %s "
+            "AND is_deleted = FALSE AND location_id = %s LIMIT 1",
+            (org_id, role, location_id),
+        )
+    else:
+        r = row(conn,
+            "SELECT id FROM profiles WHERE organisation_id = %s AND role = %s "
+            "AND is_deleted = FALSE LIMIT 1",
+            (org_id, role),
+        )
+    return r["id"] if r else None
 
 
-def _get_first_admin(db, org_id: str) -> Optional[str]:
-    res = db.table("profiles").select("id").eq("organisation_id", org_id).in_("role", ["admin", "super_admin"]).limit(1).execute()
-    return res.data[0]["id"] if res.data else None
+def _get_first_admin(conn, org_id: str) -> Optional[str]:
+    r = row(conn,
+        "SELECT id FROM profiles WHERE organisation_id = %s AND role = ANY(%s) LIMIT 1",
+        (org_id, ["admin", "super_admin"]),
+    )
+    return r["id"] if r else None
 
 
-def _get_first_location(db, org_id: str) -> Optional[str]:
-    res = db.table("locations").select("id").eq("organisation_id", org_id).eq("is_deleted", False).limit(1).execute()
-    return res.data[0]["id"] if res.data else None
+def _get_first_location(conn, org_id: str) -> Optional[str]:
+    r = row(conn,
+        "SELECT id FROM locations WHERE organisation_id = %s AND is_deleted = FALSE LIMIT 1",
+        (org_id,),
+    )
+    return r["id"] if r else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core Stage Activation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _activate_stage(db, instance_id: str, stage_id: str, stage: dict, instance: dict, response_map: dict):
+def _activate_stage(conn, instance_id: str, stage_id: str, stage: dict, instance: dict, response_map: dict):
     """
     Activate a stage instance:
     - Set status → in_progress (or auto_completed for system stages)
@@ -351,27 +398,16 @@ def _activate_stage(db, instance_id: str, stage_id: str, stage: dict, instance: 
 
     # Resolve location from submission if not on instance
     if not location_id and instance.get("submission_id"):
-        sub_res = db.table("form_submissions") \
-            .select("location_id") \
-            .eq("id", instance["submission_id"]) \
-            .maybe_single() \
-            .execute()
-        location_id = sub_res.data.get("location_id") if sub_res.data else None
+        sub_loc = row(conn,
+            "SELECT location_id FROM form_submissions WHERE id = %s",
+            (instance["submission_id"],),
+        )
+        location_id = sub_loc["location_id"] if sub_loc else None
 
     # Resolve assignee (by specific user, or by role+location, or by role org-wide)
     assigned_user_id = stage.get("assigned_user_id")
     if not assigned_user_id and stage.get("assigned_role"):
-        q = db.table("profiles") \
-            .select("id") \
-            .eq("organisation_id", org_id) \
-            .eq("role", stage["assigned_role"]) \
-            .eq("is_deleted", False) \
-            .limit(1)
-        if location_id:
-            q = q.eq("location_id", location_id)
-        user_res = q.execute()
-        if user_res.data:
-            assigned_user_id = user_res.data[0]["id"]
+        assigned_user_id = _resolve_role_sync(conn, stage["assigned_role"], org_id, location_id)
     logger.info(f"_activate_stage: stage='{stage.get('name')}' role={stage.get('assigned_role')} location={location_id} assigned_to={assigned_user_id}")
 
     # Compute due_at
@@ -381,30 +417,41 @@ def _activate_stage(db, instance_id: str, stage_id: str, stage: dict, instance: 
         due_at = (datetime.now(timezone.utc) + timedelta(hours=int(sla_hours))).isoformat()
 
     # Activate stage instance
-    db.table("workflow_stage_instances").update({
-        "status": "in_progress",
-        "assigned_to": assigned_user_id,
-        "started_at": "now()",
-        **({"due_at": due_at} if due_at else {}),
-    }).eq("workflow_instance_id", instance_id) \
-      .eq("stage_id", stage_id) \
-      .execute()
+    if due_at:
+        execute(conn,
+            """
+            UPDATE workflow_stage_instances
+            SET status = 'in_progress', assigned_to = %s, started_at = NOW(), due_at = %s
+            WHERE workflow_instance_id = %s AND stage_id = %s
+            """,
+            (assigned_user_id, due_at, instance_id, stage_id),
+        )
+    else:
+        execute(conn,
+            """
+            UPDATE workflow_stage_instances
+            SET status = 'in_progress', assigned_to = %s, started_at = NOW()
+            WHERE workflow_instance_id = %s AND stage_id = %s
+            """,
+            (assigned_user_id, instance_id, stage_id),
+        )
 
     # Execute system stages immediately
     action_type = stage.get("action_type")
     if action_type in SYSTEM_STAGE_TYPES:
-        # Get the stage_instance id
-        si_res = db.table("workflow_stage_instances") \
-            .select("id") \
-            .eq("workflow_instance_id", instance_id) \
-            .eq("stage_id", stage_id) \
-            .maybe_single() \
-            .execute()
-        if si_res.data:
-            stage_instance_id = si_res.data["id"]
-            update = _execute_system_stage(db, stage, stage_instance_id, instance)
+        si_row = row(conn,
+            "SELECT id FROM workflow_stage_instances WHERE workflow_instance_id = %s AND stage_id = %s",
+            (instance_id, stage_id),
+        )
+        if si_row:
+            stage_instance_id = si_row["id"]
+            update = _execute_system_stage(conn, stage, stage_instance_id, instance)
             if update:
-                db.table("workflow_stage_instances").update(update).eq("id", stage_instance_id).execute()
+                set_clauses = ", ".join(f"{k} = %s" for k in update.keys())
+                execute(conn,
+                    f"UPDATE workflow_stage_instances SET {set_clauses} WHERE id = %s",
+                    (*update.values(), stage_instance_id),
+                )
 
     # Notify the assigned user for human-action stages
     HUMAN_STAGE_TYPES = {"approve", "review", "sign", "fill_form"}
@@ -438,6 +485,7 @@ def _activate_stage(db, instance_id: str, stage_id: str, stage: dict, instance: 
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def trigger_workflow(
+    conn,
     definition_id: str,
     org_id: str,
     source_type: str,
@@ -453,65 +501,61 @@ async def trigger_workflow(
     Create a workflow instance for the given definition and activate the first stage.
     Works for all trigger types (manual, issue_created, incident_created, audit_submitted, etc.)
     """
-    db = get_admin_client()
-
-    wf_res = db.table("workflow_definitions") \
-        .select("id, name") \
-        .eq("id", definition_id) \
-        .eq("organisation_id", org_id) \
-        .eq("is_active", True) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-
-    if not wf_res.data:
+    wf_def = row(conn,
+        """
+        SELECT id, name FROM workflow_definitions
+        WHERE id = %s AND organisation_id = %s AND is_active = TRUE AND is_deleted = FALSE
+        """,
+        (definition_id, org_id),
+    )
+    if not wf_def:
         return None
 
-    wf_def_id = wf_res.data["id"]
+    wf_def_id = wf_def["id"]
 
-    stages_res = db.table("workflow_stages") \
-        .select("*") \
-        .eq("workflow_definition_id", wf_def_id) \
-        .eq("is_deleted", False) \
-        .order("stage_order") \
-        .execute()
-    stages = stages_res.data
+    stages = rows(conn,
+        """
+        SELECT * FROM workflow_stages
+        WHERE workflow_definition_id = %s AND is_deleted = FALSE
+        ORDER BY stage_order
+        """,
+        (wf_def_id,),
+    )
     if not stages:
         logger.warning(f"Workflow {wf_def_id} has no stages — skipping instantiation")
         return None
 
-    rules_res = db.table("workflow_routing_rules") \
-        .select("*") \
-        .eq("workflow_definition_id", wf_def_id) \
-        .eq("is_deleted", False) \
-        .execute()
-    routing_rules = rules_res.data
+    routing_rules = rows(conn,
+        "SELECT * FROM workflow_routing_rules WHERE workflow_definition_id = %s AND is_deleted = FALSE",
+        (wf_def_id,),
+    )
 
     first_stage = stages[0]
-    inst_res = db.table("workflow_instances").insert({
-        "workflow_definition_id": wf_def_id,
-        "organisation_id": org_id,
-        "status": "in_progress",
-        "current_stage_id": first_stage["id"],
-        "source_type": source_type,
-        "triggered_by": triggered_by,
-        **({"source_id": source_id} if source_id else {}),
-        **({"location_id": location_id} if location_id else {}),
-        **({"submission_id": submission_id} if submission_id else {}),
-        **({"subject_user_id": subject_user_id} if subject_user_id else {}),
-    }).execute()
-
-    instance = inst_res.data[0]
+    instance = execute_returning(conn,
+        """
+        INSERT INTO workflow_instances (
+            workflow_definition_id, organisation_id, status, current_stage_id,
+            source_type, triggered_by, source_id, location_id, submission_id, subject_user_id
+        ) VALUES (%s, %s, 'in_progress', %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            wf_def_id, org_id, first_stage["id"],
+            source_type, triggered_by,
+            source_id, location_id, submission_id, subject_user_id,
+        ),
+    )
+    instance = dict(instance)
     instance_id = instance["id"]
 
     # Create all stage instances as pending
-    db.table("workflow_stage_instances").insert([
-        {"workflow_instance_id": instance_id, "stage_id": stage["id"], "status": "pending"}
-        for stage in stages
-    ]).execute()
+    execute_many(conn,
+        "INSERT INTO workflow_stage_instances (workflow_instance_id, stage_id, status) VALUES (%s, %s, 'pending')",
+        [(instance_id, stage["id"]) for stage in stages],
+    )
 
     # Activate first stage
-    _activate_stage(db, instance_id, first_stage["id"], first_stage, instance, submission_responses or {})
+    _activate_stage(conn, instance_id, first_stage["id"], dict(first_stage), instance, submission_responses or {})
 
     logger.info(
         f"Workflow instance {instance_id} created (trigger={source_type}, source={source_id}), "
@@ -521,6 +565,7 @@ async def trigger_workflow(
 
 
 async def trigger_workflows_for_event(
+    conn,
     event_type: str,  # 'issue_created' | 'incident_created'
     org_id: str,
     source_id: str,
@@ -534,17 +579,17 @@ async def trigger_workflows_for_event(
     Find all active workflows matching trigger_type and auto-start them.
     Called from issue/incident create endpoints.
     """
-    db = get_admin_client()
-    q = db.table("workflow_definitions") \
-        .select("id, trigger_form_template_id, trigger_issue_category_id, trigger_conditions") \
-        .eq("trigger_type", event_type) \
-        .eq("organisation_id", org_id) \
-        .eq("is_active", True) \
-        .eq("is_deleted", False)
-    res = q.execute()
+    wf_rows = rows(conn,
+        """
+        SELECT id, trigger_form_template_id, trigger_issue_category_id, trigger_conditions
+        FROM workflow_definitions
+        WHERE trigger_type = %s AND organisation_id = %s AND is_active = TRUE AND is_deleted = FALSE
+        """,
+        (event_type, org_id),
+    )
 
     instances = []
-    for wf in (res.data or []):
+    for wf in wf_rows:
         # Filter by form template if applicable
         if event_type in ("form_submitted", "audit_submitted") and template_id:
             wf_tpl_id = wf.get("trigger_form_template_id")
@@ -558,6 +603,7 @@ async def trigger_workflows_for_event(
                 continue  # This workflow is scoped to a different category
 
         instance = await trigger_workflow(
+            conn,
             definition_id=wf["id"],
             org_id=org_id,
             source_type=event_type.replace("_created", ""),
@@ -572,6 +618,7 @@ async def trigger_workflows_for_event(
 
 
 async def trigger_workflows_for_employee_created(
+    conn,
     org_id: str,
     new_user_id: str,
     triggered_by: str,
@@ -583,17 +630,17 @@ async def trigger_workflows_for_employee_created(
     Find all active workflows with trigger_type='employee_created' and evaluate
     trigger_conditions against the new employee profile. If conditions match, start workflow.
     """
-    db = get_admin_client()
-    res = db.table("workflow_definitions") \
-        .select("id, trigger_conditions") \
-        .eq("trigger_type", "employee_created") \
-        .eq("organisation_id", org_id) \
-        .eq("is_active", True) \
-        .eq("is_deleted", False) \
-        .execute()
+    wf_rows = rows(conn,
+        """
+        SELECT id, trigger_conditions FROM workflow_definitions
+        WHERE trigger_type = 'employee_created' AND organisation_id = %s
+          AND is_active = TRUE AND is_deleted = FALSE
+        """,
+        (org_id,),
+    )
 
     instances = []
-    for wf in (res.data or []):
+    for wf in wf_rows:
         conditions = wf.get("trigger_conditions") or {}
 
         # Role filter
@@ -609,6 +656,7 @@ async def trigger_workflows_for_employee_created(
                 continue
 
         instance = await trigger_workflow(
+            conn,
             definition_id=wf["id"],
             org_id=org_id,
             source_type="employee_created",
@@ -626,7 +674,7 @@ async def trigger_workflows_for_employee_created(
 # Wait Stage Ticker — advance condition-based and timed-out wait stages
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def tick_wait_stages() -> dict:
+async def tick_wait_stages(conn) -> dict:
     """
     Advance all in-progress wait stage instances that are either:
       - Timed out (due_at <= now), or
@@ -639,60 +687,75 @@ async def tick_wait_stages() -> dict:
     select is deliberately limited to the minimum columns needed to keep the
     memory footprint small when the table grows.
     """
-    db = get_admin_client()
     now = datetime.now(timezone.utc)
     advanced = 0
     timed_out_count = 0
 
     # Select only the columns required for timeout/condition evaluation — do
     # not use SELECT * to avoid loading large config blobs for non-wait stages.
-    res = db.table("workflow_stage_instances") \
-        .select(
-            "id, workflow_instance_id, due_at, stage_id,"
-            "workflow_stages(action_type, config, workflow_definition_id),"
-            "workflow_instances(organisation_id, subject_user_id)"
-        ) \
-        .eq("status", "in_progress") \
-        .execute()
+    stage_instances = rows(conn,
+        """
+        SELECT
+            wsi.id,
+            wsi.workflow_instance_id,
+            wsi.due_at,
+            wsi.stage_id,
+            ws.action_type AS stage_action_type,
+            ws.config AS stage_config,
+            ws.workflow_definition_id AS stage_wf_def_id,
+            wi.organisation_id AS instance_org_id,
+            wi.subject_user_id AS instance_subject_user_id
+        FROM workflow_stage_instances wsi
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        JOIN workflow_instances wi ON wi.id = wsi.workflow_instance_id
+        WHERE wsi.status = 'in_progress'
+        """,
+        (),
+    )
 
-    for si in (res.data or []):
-        stage_meta = si.get("workflow_stages") or {}
-        if stage_meta.get("action_type") != "wait":
+    for si in stage_instances:
+        if si.get("stage_action_type") != "wait":
             continue
 
-        instance_meta = si.get("workflow_instances") or {}
-        org_id = instance_meta.get("organisation_id")
-        subject_user_id = instance_meta.get("subject_user_id")
-        cfg = stage_meta.get("config") or {}
+        org_id = si.get("instance_org_id")
+        subject_user_id = si.get("instance_subject_user_id")
+        cfg = si.get("stage_config") or {}
         condition = cfg.get("condition")
+        wf_def_id = si.get("stage_wf_def_id")
 
         # ── Timeout check ────────────────────────────────────────────────────
         due_at_str = si.get("due_at")
         if due_at_str:
-            due_dt = datetime.fromisoformat(due_at_str.replace("Z", "+00:00"))
+            if isinstance(due_at_str, str):
+                due_dt = datetime.fromisoformat(due_at_str.replace("Z", "+00:00"))
+            else:
+                due_dt = due_at_str
             if now >= due_dt:
-                db.table("workflow_stage_instances").update({
-                    "status": "auto_completed",
-                    "completed_at": now.isoformat(),
-                    "comment": "Wait timed out",
-                }).eq("id", si["id"]).execute()
-                await advance_workflow(si["workflow_instance_id"], si["id"], None)
+                execute(conn,
+                    """
+                    UPDATE workflow_stage_instances
+                    SET status = 'auto_completed', completed_at = %s, comment = 'Wait timed out'
+                    WHERE id = %s
+                    """,
+                    (now.isoformat(), si["id"]),
+                )
+                await advance_workflow(conn, si["workflow_instance_id"], si["id"], None)
                 timed_out_count += 1
                 continue
 
         # ── Condition check ───────────────────────────────────────────────────
         if condition == "all_courses_passed" and subject_user_id and org_id:
-            wf_def_id = stage_meta.get("workflow_definition_id")
             # Resolve course_refs from the sibling assign_training stage definition
-            at_res = db.table("workflow_stages") \
-                .select("config") \
-                .eq("workflow_definition_id", wf_def_id) \
-                .eq("action_type", "assign_training") \
-                .limit(1) \
-                .execute()
-            if not at_res.data:
+            at_row = row(conn,
+                """
+                SELECT config FROM workflow_stages
+                WHERE workflow_definition_id = %s AND action_type = 'assign_training' LIMIT 1
+                """,
+                (wf_def_id,),
+            )
+            if not at_row:
                 continue
-            at_cfg = at_res.data[0].get("config") or {}
+            at_cfg = at_row.get("config") or {}
             course_refs = at_cfg.get("course_refs") or []
             raw_ids = at_cfg.get("course_ids") or []
             if isinstance(raw_ids, str):
@@ -702,26 +765,30 @@ async def tick_wait_stages() -> dict:
                     raw_ids = []
             all_course_ids: list = list(raw_ids)
             if course_refs:
-                refs_res = db.table("courses").select("id").in_("title", course_refs).eq("organisation_id", org_id).eq("is_deleted", False).execute()
-                all_course_ids += [r["id"] for r in (refs_res.data or [])]
+                ref_rows = rows(conn,
+                    "SELECT id FROM courses WHERE title = ANY(%s) AND organisation_id = %s AND is_deleted = FALSE",
+                    (course_refs, org_id),
+                )
+                all_course_ids += [r["id"] for r in ref_rows]
 
             if not all_course_ids:
                 continue
 
-            enroll_res = db.table("course_enrollments") \
-                .select("status") \
-                .eq("user_id", subject_user_id) \
-                .in_("course_id", all_course_ids) \
-                .execute()
-            enrollments = enroll_res.data or []
+            enrollments = rows(conn,
+                "SELECT status FROM course_enrollments WHERE user_id = %s AND course_id = ANY(%s::uuid[])",
+                (subject_user_id, list(all_course_ids)),
+            )
             # All courses must be enrolled and passed
             if len(enrollments) == len(all_course_ids) and all(e["status"] == "passed" for e in enrollments):
-                db.table("workflow_stage_instances").update({
-                    "status": "auto_completed",
-                    "completed_at": now.isoformat(),
-                    "comment": "All required courses passed",
-                }).eq("id", si["id"]).execute()
-                await advance_workflow(si["workflow_instance_id"], si["id"], None)
+                execute(conn,
+                    """
+                    UPDATE workflow_stage_instances
+                    SET status = 'auto_completed', completed_at = %s, comment = 'All required courses passed'
+                    WHERE id = %s
+                    """,
+                    (now.isoformat(), si["id"]),
+                )
+                await advance_workflow(conn, si["workflow_instance_id"], si["id"], None)
                 advanced += 1
 
     logger.info(f"[tick_wait_stages] advanced={advanced} timed_out={timed_out_count}")
@@ -733,6 +800,7 @@ async def tick_wait_stages() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def instantiate_workflow(
+    conn,
     submission_id: str,
     form_template_id: str,
     org_id: str,
@@ -744,27 +812,26 @@ async def instantiate_workflow(
     Check if form_template has an active workflow. If yes, trigger it.
     Maintains backwards compatibility with Phase 2 audit submission trigger.
     """
-    db = get_admin_client()
-
-    wf_res = db.table("workflow_definitions") \
-        .select("id, name") \
-        .eq("form_template_id", form_template_id) \
-        .eq("organisation_id", org_id) \
-        .eq("is_active", True) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-
-    if not wf_res.data:
+    wf_def = row(conn,
+        """
+        SELECT id, name FROM workflow_definitions
+        WHERE form_template_id = %s AND organisation_id = %s
+          AND is_active = TRUE AND is_deleted = FALSE
+        LIMIT 1
+        """,
+        (form_template_id, org_id),
+    )
+    if not wf_def:
         return None
 
-    wf_def = wf_res.data
-
-    # Find the submitter user for triggered_by
-    sub_res = db.table("form_submissions").select("submitted_by").eq("id", submission_id).maybe_single().execute()
-    triggered_by = sub_res.data.get("submitted_by") if sub_res.data else None
+    sub_row = row(conn,
+        "SELECT submitted_by FROM form_submissions WHERE id = %s",
+        (submission_id,),
+    )
+    triggered_by = sub_row["submitted_by"] if sub_row else None
 
     return await trigger_workflow(
+        conn,
         definition_id=wf_def["id"],
         org_id=org_id,
         source_type="audit",
@@ -782,6 +849,7 @@ async def instantiate_workflow(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def advance_workflow(
+    conn,
     instance_id: str,
     stage_instance_id: str,
     acting_user_id: Optional[str] = None,
@@ -791,100 +859,140 @@ async def advance_workflow(
     or mark the workflow complete if there is no next stage.
     Call this after marking a stage instance as approved/completed.
     """
-    db = get_admin_client()
-
-    si_res = db.table("workflow_stage_instances") \
-        .select("*, workflow_instances(*)") \
-        .eq("id", stage_instance_id) \
-        .maybe_single() \
-        .execute()
-    if not si_res.data:
+    stage_inst = row(conn,
+        """
+        SELECT wsi.*, wi.id AS wi_id, wi.workflow_definition_id, wi.organisation_id,
+               wi.status AS wi_status, wi.source_type, wi.source_id,
+               wi.submission_id, wi.location_id, wi.triggered_by, wi.subject_user_id,
+               wi.current_stage_id
+        FROM workflow_stage_instances wsi
+        JOIN workflow_instances wi ON wi.id = wsi.workflow_instance_id
+        WHERE wsi.id = %s
+        """,
+        (stage_instance_id,),
+    )
+    if not stage_inst:
         raise HTTPException(status_code=404, detail="Stage instance not found")
-    stage_inst = si_res.data
-    instance = stage_inst["workflow_instances"]
+
+    # Build a sub-dict that mirrors the old nested workflow_instances structure
+    instance = {
+        "id": stage_inst["wi_id"],
+        "workflow_definition_id": stage_inst["workflow_definition_id"],
+        "organisation_id": stage_inst["organisation_id"],
+        "status": stage_inst["wi_status"],
+        "source_type": stage_inst["source_type"],
+        "source_id": stage_inst["source_id"],
+        "submission_id": stage_inst["submission_id"],
+        "location_id": stage_inst["location_id"],
+        "triggered_by": stage_inst["triggered_by"],
+        "subject_user_id": stage_inst["subject_user_id"],
+        "current_stage_id": stage_inst["current_stage_id"],
+    }
     wf_def_id = instance["workflow_definition_id"]
     stage_id = stage_inst["stage_id"]
 
-    rules_res = db.table("workflow_routing_rules") \
-        .select("*") \
-        .eq("workflow_definition_id", wf_def_id) \
-        .eq("is_deleted", False) \
-        .execute()
+    routing_rules = rows(conn,
+        "SELECT * FROM workflow_routing_rules WHERE workflow_definition_id = %s AND is_deleted = FALSE",
+        (wf_def_id,),
+    )
 
     response_map: dict = {}
     overall_score = 0.0
     if instance.get("submission_id"):
-        sub_res = db.table("form_responses") \
-            .select("field_id, value") \
-            .eq("submission_id", instance["submission_id"]) \
-            .execute()
-        response_map = {str(r["field_id"]): r["value"] for r in (sub_res.data or [])}
-        score_res = db.table("form_submissions") \
-            .select("overall_score") \
-            .eq("id", instance["submission_id"]) \
-            .maybe_single() \
-            .execute()
-        overall_score = float(score_res.data.get("overall_score", 0)) if score_res.data else 0.0
+        resp_rows = rows(conn,
+            "SELECT field_id, value FROM form_responses WHERE submission_id = %s",
+            (instance["submission_id"],),
+        )
+        response_map = {str(r["field_id"]): r["value"] for r in resp_rows}
+        score_row = row(conn,
+            "SELECT overall_score FROM form_submissions WHERE id = %s",
+            (instance["submission_id"],),
+        )
+        overall_score = float(score_row["overall_score"] or 0) if score_row else 0.0
 
     source_record = None
     if instance.get("source_type") and instance.get("source_id"):
         source_table = {"issue": "issues", "incident": "incidents"}.get(instance["source_type"])
         if source_table:
-            src_res = db.table(source_table).select("priority").eq("id", instance["source_id"]).maybe_single().execute()
-            source_record = src_res.data
+            source_record = row(conn,
+                f"SELECT priority FROM {source_table} WHERE id = %s",
+                (instance["source_id"],),
+            )
 
     acting_user_role = None
     if acting_user_id:
-        profile_res = db.table("profiles").select("role").eq("id", acting_user_id).maybe_single().execute()
-        acting_user_role = profile_res.data.get("role") if profile_res.data else None
+        profile = row(conn, "SELECT role FROM profiles WHERE id = %s", (acting_user_id,))
+        acting_user_role = profile["role"] if profile else None
 
     next_stage_id = find_next_stage_id(
-        rules_res.data, str(stage_id), response_map, overall_score,
-        stage_instance=stage_inst, source_record=source_record, acting_user_role=acting_user_role,
+        list(routing_rules), str(stage_id), response_map, overall_score,
+        stage_instance=dict(stage_inst), source_record=source_record,
+        acting_user_role=acting_user_role,
     )
 
     # If no routing rule matched, fall back to the next stage by stage_order
     if not next_stage_id:
-        cur_stage_rows = db.table("workflow_stages").select("stage_order").eq("id", str(stage_id)).execute()
-        if cur_stage_rows.data:
-            cur_order = cur_stage_rows.data[0]["stage_order"]
-            next_seq_rows = db.table("workflow_stages") \
-                .select("id") \
-                .eq("workflow_definition_id", wf_def_id) \
-                .eq("stage_order", cur_order + 1) \
-                .execute()
-            if next_seq_rows.data:
-                next_stage_id = str(next_seq_rows.data[0]["id"])
+        cur_stage = row(conn,
+            "SELECT stage_order FROM workflow_stages WHERE id = %s",
+            (str(stage_id),),
+        )
+        if cur_stage:
+            cur_order = cur_stage["stage_order"]
+            next_seq = row(conn,
+                """
+                SELECT id FROM workflow_stages
+                WHERE workflow_definition_id = %s AND stage_order = %s
+                """,
+                (wf_def_id, cur_order + 1),
+            )
+            if next_seq:
+                next_stage_id = str(next_seq["id"])
 
     if not next_stage_id:
         logger.info(f"advance_workflow {instance_id}: no next stage — completing workflow")
-        db.table("workflow_instances").update({
-            "status": "completed",
-            "completed_at": "now()",
-        }).eq("id", instance_id).execute()
+        execute(conn,
+            "UPDATE workflow_instances SET status = 'completed', completed_at = NOW() WHERE id = %s",
+            (instance_id,),
+        )
         return {"status": "completed"}
 
-    next_stage_res = db.table("workflow_stages").select("*").eq("id", next_stage_id).maybe_single().execute()
-    if not next_stage_res.data:
+    next_stage = row(conn, "SELECT * FROM workflow_stages WHERE id = %s", (next_stage_id,))
+    if not next_stage:
         raise HTTPException(status_code=404, detail="Next workflow stage not found")
-    next_stage = next_stage_res.data
-    logger.info(f"advance_workflow {instance_id}: activating next stage '{next_stage.get('name')}' (order={next_stage.get('stage_order')}, action={next_stage.get('action_type')}, is_final={next_stage.get('is_final')})")
+    next_stage = dict(next_stage)
 
-    _activate_stage(db, instance_id, next_stage_id, next_stage, instance, response_map)
+    logger.info(
+        f"advance_workflow {instance_id}: activating next stage '{next_stage.get('name')}' "
+        f"(order={next_stage.get('stage_order')}, action={next_stage.get('action_type')}, "
+        f"is_final={next_stage.get('is_final')})"
+    )
+
+    _activate_stage(conn, instance_id, next_stage_id, next_stage, instance, response_map)
 
     # Check the activated stage instance
-    si_check = db.table("workflow_stage_instances").select("id, status, assigned_to").eq("workflow_instance_id", instance_id).eq("stage_id", next_stage_id).maybe_single().execute()
-    logger.info(f"advance_workflow {instance_id}: stage instance after activation = {si_check.data}")
-
-    db.table("workflow_instances").update({
-        "status": "completed" if next_stage.get("is_final") else "in_progress",
-        **({"completed_at": "now()"} if next_stage.get("is_final") else {}),
-        "current_stage_id": next_stage_id,
-    }).eq("id", instance_id).execute()
+    si_check = row(conn,
+        "SELECT id, status, assigned_to FROM workflow_stage_instances "
+        "WHERE workflow_instance_id = %s AND stage_id = %s",
+        (instance_id, next_stage_id),
+    )
+    logger.info(f"advance_workflow {instance_id}: stage instance after activation = {si_check}")
 
     if next_stage.get("is_final"):
+        execute(conn,
+            """
+            UPDATE workflow_instances
+            SET status = 'completed', completed_at = NOW(), current_stage_id = %s
+            WHERE id = %s
+            """,
+            (next_stage_id, instance_id),
+        )
         return {"status": "completed", "final_stage_id": next_stage_id}
-    return {"status": "in_progress", "next_stage_id": next_stage_id}
+    else:
+        execute(conn,
+            "UPDATE workflow_instances SET status = 'in_progress', current_stage_id = %s WHERE id = %s",
+            (next_stage_id, instance_id),
+        )
+        return {"status": "in_progress", "next_stage_id": next_stage_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -892,6 +1000,7 @@ async def advance_workflow(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def approve_stage(
+    conn,
     instance_id: str,
     stage_instance_id: str,
     acting_user_id: str,
@@ -901,20 +1010,19 @@ async def approve_stage(
     """
     Approve the current stage and advance the workflow.
     """
-    db = get_admin_client()
-
-    inst = db.table("workflow_instances").select("id").eq("id", instance_id).eq("organisation_id", org_id).maybe_single().execute()
-    if not inst.data:
+    inst = row(conn,
+        "SELECT id FROM workflow_instances WHERE id = %s AND organisation_id = %s",
+        (instance_id, org_id),
+    )
+    if not inst:
         raise HTTPException(status_code=403, detail="Not found")
 
-    si_res = db.table("workflow_stage_instances") \
-        .select("workflow_instance_id, status") \
-        .eq("id", stage_instance_id) \
-        .maybe_single() \
-        .execute()
-    if not si_res.data:
+    stage_inst = row(conn,
+        "SELECT workflow_instance_id, status FROM workflow_stage_instances WHERE id = %s",
+        (stage_instance_id,),
+    )
+    if not stage_inst:
         raise HTTPException(status_code=404, detail="Stage instance not found")
-    stage_inst = si_res.data
 
     if str(stage_inst["workflow_instance_id"]) != str(instance_id):
         raise ValueError("Stage instance does not belong to this workflow instance")
@@ -922,16 +1030,20 @@ async def approve_stage(
     if stage_inst["status"] not in ("pending", "in_progress"):
         raise ValueError(f"Stage instance is already {stage_inst['status']}")
 
-    db.table("workflow_stage_instances").update({
-        "status": "approved",
-        "completed_at": "now()",
-        "comment": comment,
-    }).eq("id", stage_instance_id).execute()
+    execute(conn,
+        """
+        UPDATE workflow_stage_instances
+        SET status = 'approved', completed_at = NOW(), comment = %s
+        WHERE id = %s
+        """,
+        (comment, stage_instance_id),
+    )
 
-    return await advance_workflow(instance_id, stage_instance_id, acting_user_id)
+    return await advance_workflow(conn, instance_id, stage_instance_id, acting_user_id)
 
 
 async def reject_stage(
+    conn,
     instance_id: str,
     stage_instance_id: str,
     acting_user_id: str,
@@ -941,20 +1053,19 @@ async def reject_stage(
     """
     Reject the current stage and cancel the workflow.
     """
-    db = get_admin_client()
-
-    inst = db.table("workflow_instances").select("id").eq("id", instance_id).eq("organisation_id", org_id).maybe_single().execute()
-    if not inst.data:
+    inst = row(conn,
+        "SELECT id FROM workflow_instances WHERE id = %s AND organisation_id = %s",
+        (instance_id, org_id),
+    )
+    if not inst:
         raise HTTPException(status_code=403, detail="Not found")
 
-    si_res = db.table("workflow_stage_instances") \
-        .select("workflow_instance_id, stage_id, status") \
-        .eq("id", stage_instance_id) \
-        .maybe_single() \
-        .execute()
-    if not si_res.data:
+    stage_inst = row(conn,
+        "SELECT workflow_instance_id, stage_id, status FROM workflow_stage_instances WHERE id = %s",
+        (stage_instance_id,),
+    )
+    if not stage_inst:
         raise HTTPException(status_code=404, detail="Stage instance not found")
-    stage_inst = si_res.data
 
     if str(stage_inst["workflow_instance_id"]) != str(instance_id):
         raise ValueError("Stage instance does not belong to this workflow instance")
@@ -962,16 +1073,19 @@ async def reject_stage(
     if stage_inst["status"] not in ("pending", "in_progress"):
         raise ValueError(f"Stage instance is already {stage_inst['status']}")
 
-    db.table("workflow_stage_instances").update({
-        "status": "rejected",
-        "completed_at": "now()",
-        "comment": comment,
-    }).eq("id", stage_instance_id).execute()
+    execute(conn,
+        """
+        UPDATE workflow_stage_instances
+        SET status = 'rejected', completed_at = NOW(), comment = %s
+        WHERE id = %s
+        """,
+        (comment, stage_instance_id),
+    )
 
-    db.table("workflow_instances").update({
-        "status": "cancelled",
-        "cancelled_reason": comment,
-    }).eq("id", instance_id).execute()
+    execute(conn,
+        "UPDATE workflow_instances SET status = 'cancelled', cancelled_reason = %s WHERE id = %s",
+        (comment, instance_id),
+    )
 
     logger.info(f"Workflow instance {instance_id} CANCELLED — stage {stage_instance_id} rejected")
     return {"status": "cancelled"}
@@ -981,68 +1095,163 @@ async def reject_stage(
 # Queries
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_my_tasks(user_id: str, org_id: str, user_role: Optional[str] = None) -> list[dict]:
-    db = get_admin_client()
-    base_select = """
-        id, status, started_at, due_at, comment,
-        stage_id,
-        workflow_instances!inner(
-            id, status, source_type, source_id, organisation_id,
-            workflow_definitions(name)
-        ),
-        workflow_stages(name, action_type, stage_order, assigned_role, form_template_id, form_templates(title))
-    """
-
+async def get_my_tasks(conn, user_id: str, org_id: str, user_role: Optional[str] = None) -> list[dict]:
     # Query 1: directly assigned to this user by ID
-    r1 = db.table("workflow_stage_instances") \
-        .select(base_select) \
-        .eq("assigned_to", user_id) \
-        .eq("status", "in_progress") \
-        .eq("workflow_instances.organisation_id", org_id) \
-        .execute()
+    r1 = rows(conn,
+        """
+        SELECT
+            wsi.id, wsi.status, wsi.started_at, wsi.due_at, wsi.comment, wsi.stage_id,
+            wi.id AS wi_id, wi.status AS wi_status, wi.source_type, wi.source_id,
+            wi.organisation_id AS wi_org_id,
+            wd.name AS wd_name,
+            ws.name AS ws_name, ws.action_type AS ws_action_type,
+            ws.stage_order AS ws_stage_order, ws.assigned_role AS ws_assigned_role,
+            ws.form_template_id AS ws_form_template_id,
+            ft.title AS ft_title
+        FROM workflow_stage_instances wsi
+        JOIN workflow_instances wi ON wi.id = wsi.workflow_instance_id
+        JOIN workflow_definitions wd ON wd.id = wi.workflow_definition_id
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        LEFT JOIN form_templates ft ON ft.id = ws.form_template_id
+        WHERE wsi.assigned_to = %s
+          AND wsi.status = 'in_progress'
+          AND wi.organisation_id = %s
+        """,
+        (user_id, org_id),
+    )
 
     # Query 2: assigned by role but no specific user set yet
     role_tasks: list[dict] = []
     if user_role:
-        r2 = db.table("workflow_stage_instances") \
-            .select(base_select) \
-            .is_("assigned_to", "null") \
-            .eq("status", "in_progress") \
-            .eq("workflow_instances.organisation_id", org_id) \
-            .execute()
-        for t in (r2.data or []):
-            stage_info = t.get("workflow_stages") or {}
-            stage_role = stage_info.get("assigned_role")
+        r2 = rows(conn,
+            """
+            SELECT
+                wsi.id, wsi.status, wsi.started_at, wsi.due_at, wsi.comment, wsi.stage_id,
+                wi.id AS wi_id, wi.status AS wi_status, wi.source_type, wi.source_id,
+                wi.organisation_id AS wi_org_id,
+                wd.name AS wd_name,
+                ws.name AS ws_name, ws.action_type AS ws_action_type,
+                ws.stage_order AS ws_stage_order, ws.assigned_role AS ws_assigned_role,
+                ws.form_template_id AS ws_form_template_id,
+                ft.title AS ft_title
+            FROM workflow_stage_instances wsi
+            JOIN workflow_instances wi ON wi.id = wsi.workflow_instance_id
+            JOIN workflow_definitions wd ON wd.id = wi.workflow_definition_id
+            JOIN workflow_stages ws ON ws.id = wsi.stage_id
+            LEFT JOIN form_templates ft ON ft.id = ws.form_template_id
+            WHERE wsi.assigned_to IS NULL
+              AND wsi.status = 'in_progress'
+              AND wi.organisation_id = %s
+            """,
+            (org_id,),
+        )
+        for t in r2:
+            stage_role = t.get("ws_assigned_role")
             # Match if role matches, OR if no role set and user is super_admin (catch-all)
             if stage_role == user_role or (stage_role is None and user_role == "super_admin"):
                 role_tasks.append(t)
 
+    def _shape(t: dict) -> dict:
+        """Reshape flat row into nested structure matching old Supabase response."""
+        return {
+            "id": t["id"],
+            "status": t["status"],
+            "started_at": t["started_at"],
+            "due_at": t["due_at"],
+            "comment": t["comment"],
+            "stage_id": t["stage_id"],
+            "workflow_instances": {
+                "id": t["wi_id"],
+                "status": t["wi_status"],
+                "source_type": t["source_type"],
+                "source_id": t["source_id"],
+                "organisation_id": t["wi_org_id"],
+                "workflow_definitions": {"name": t["wd_name"]},
+            },
+            "workflow_stages": {
+                "name": t["ws_name"],
+                "action_type": t["ws_action_type"],
+                "stage_order": t["ws_stage_order"],
+                "assigned_role": t["ws_assigned_role"],
+                "form_template_id": t["ws_form_template_id"],
+                "form_templates": {"title": t["ft_title"]} if t.get("ft_title") else None,
+            },
+        }
+
     # Merge, dedup by id
     seen: set[str] = set()
     merged: list[dict] = []
-    for t in (r1.data or []) + role_tasks:
+    for t in list(r1) + role_tasks:
         if t["id"] not in seen:
             seen.add(t["id"])
-            merged.append(t)
+            merged.append(_shape(t))
     return merged
 
 
-async def get_instance_detail(instance_id: str, org_id: str) -> Optional[dict]:
-    db = get_admin_client()
-    res = db.table("workflow_instances") \
-        .select("""
-            *,
-            workflow_definitions(id, name, trigger_type),
-            workflow_stages!current_stage_id(name, action_type),
-            workflow_stage_instances(
-                id, status, started_at, completed_at, due_at, comment, assigned_to,
-                spawned_task_id, spawned_issue_id, spawned_incident_id,
-                workflow_stages(name, action_type, stage_order, is_final, config)
-            )
-        """) \
-        .eq("id", instance_id) \
-        .eq("organisation_id", org_id) \
-        .eq("is_deleted", False) \
-        .maybe_single() \
-        .execute()
-    return res.data
+async def get_instance_detail(conn, instance_id: str, org_id: str) -> Optional[dict]:
+    inst = row(conn,
+        """
+        SELECT
+            wi.*,
+            wd.id AS wd_id, wd.name AS wd_name, wd.trigger_type AS wd_trigger_type,
+            ws_cur.name AS cur_stage_name, ws_cur.action_type AS cur_stage_action_type
+        FROM workflow_instances wi
+        JOIN workflow_definitions wd ON wd.id = wi.workflow_definition_id
+        LEFT JOIN workflow_stages ws_cur ON ws_cur.id = wi.current_stage_id
+        WHERE wi.id = %s AND wi.organisation_id = %s AND wi.is_deleted = FALSE
+        """,
+        (instance_id, org_id),
+    )
+    if not inst:
+        return None
+    inst = dict(inst)
+
+    stage_instances = rows(conn,
+        """
+        SELECT
+            wsi.id, wsi.status, wsi.started_at, wsi.completed_at, wsi.due_at,
+            wsi.comment, wsi.assigned_to, wsi.spawned_task_id, wsi.spawned_issue_id,
+            wsi.spawned_incident_id,
+            ws.name AS ws_name, ws.action_type AS ws_action_type,
+            ws.stage_order AS ws_stage_order, ws.is_final AS ws_is_final,
+            ws.config AS ws_config
+        FROM workflow_stage_instances wsi
+        JOIN workflow_stages ws ON ws.id = wsi.stage_id
+        WHERE wsi.workflow_instance_id = %s
+        ORDER BY ws.stage_order
+        """,
+        (instance_id,),
+    )
+
+    inst["workflow_definitions"] = {
+        "id": inst.pop("wd_id"),
+        "name": inst.pop("wd_name"),
+        "trigger_type": inst.pop("wd_trigger_type"),
+    }
+    inst["workflow_stages"] = {
+        "name": inst.pop("cur_stage_name", None),
+        "action_type": inst.pop("cur_stage_action_type", None),
+    }
+    inst["workflow_stage_instances"] = [
+        {
+            "id": si["id"],
+            "status": si["status"],
+            "started_at": si["started_at"],
+            "completed_at": si["completed_at"],
+            "due_at": si["due_at"],
+            "comment": si["comment"],
+            "assigned_to": si["assigned_to"],
+            "spawned_task_id": si["spawned_task_id"],
+            "spawned_issue_id": si["spawned_issue_id"],
+            "spawned_incident_id": si["spawned_incident_id"],
+            "workflow_stages": {
+                "name": si["ws_name"],
+                "action_type": si["ws_action_type"],
+                "stage_order": si["ws_stage_order"],
+                "is_final": si["ws_is_final"],
+                "config": si["ws_config"],
+            },
+        }
+        for si in stage_instances
+    ]
+    return inst

@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from config import settings
 from models.caps import UpdateCAPItemRequest
 from models.tasks import CreateTaskRequest
-from services.supabase_client import get_admin_client
+from services.db import row, rows, execute, execute_returning
 from services.task_service import TaskService
 from services.ai_logger import log_ai_request, AITimer
 
@@ -182,6 +182,7 @@ class CAPService:
 
     @staticmethod
     async def generate_cap(
+        conn,
         submission_id: str,
         form_template_id: str,
         failed_fields: list,  # list[FieldScoreResult]
@@ -193,33 +194,31 @@ class CAPService:
         if not failed_fields:
             return None
 
-        db = get_admin_client()
-
         # Find a suggested assignee at the location
         staff_assignee = None
         manager_assignee = None
         try:
-            staff_resp = (
-                db.table("profiles")
-                .select("id")
-                .eq("location_id", location_id)
-                .eq("is_deleted", False)
-                .in_("role", ["staff"])
-                .limit(1)
-                .execute()
+            staff_row = row(
+                conn,
+                """
+                SELECT id FROM profiles
+                WHERE location_id = %s AND is_deleted = FALSE AND role = ANY(%s)
+                LIMIT 1
+                """,
+                (location_id, ["staff"]),
             )
-            staff_assignee = staff_resp.data[0]["id"] if staff_resp.data else None
+            staff_assignee = staff_row["id"] if staff_row else None
 
-            mgr_resp = (
-                db.table("profiles")
-                .select("id")
-                .eq("location_id", location_id)
-                .eq("is_deleted", False)
-                .in_("role", ["manager", "admin", "super_admin"])
-                .limit(1)
-                .execute()
+            mgr_row = row(
+                conn,
+                """
+                SELECT id FROM profiles
+                WHERE location_id = %s AND is_deleted = FALSE AND role = ANY(%s)
+                LIMIT 1
+                """,
+                (location_id, ["manager", "admin", "super_admin"]),
             )
-            manager_assignee = mgr_resp.data[0]["id"] if mgr_resp.data else None
+            manager_assignee = mgr_row["id"] if mgr_row else None
         except Exception:
             pass  # non-fatal — suggestions will have no assignee
 
@@ -233,15 +232,19 @@ class CAPService:
                     resp_map[fid] = val
 
         # Create the CAP record
-        cap_resp = db.table("corrective_action_plans").insert({
-            "submission_id": submission_id,
-            "organisation_id": org_id,
-            "location_id": location_id,
-            "status": "pending_review",
-        }).execute()
-        if not cap_resp.data:
+        cap = execute_returning(
+            conn,
+            """
+            INSERT INTO corrective_action_plans
+                (submission_id, organisation_id, location_id, status)
+            VALUES (%s, %s, %s, 'pending_review')
+            RETURNING *
+            """,
+            (submission_id, org_id, location_id),
+        )
+        if not cap:
             raise HTTPException(status_code=500, detail="Failed to create CAP")
-        cap = cap_resp.data[0]
+        cap = dict(cap)
         cap_id = cap["id"]
 
         now = datetime.now(timezone.utc)
@@ -250,7 +253,7 @@ class CAPService:
         ai_suggestions = await _ai_suggest_cap_items(failed_fields)
 
         # Create CAP items
-        items = []
+        items_data = []
         for idx, f in enumerate(failed_fields):
             response_value = resp_map.get(f.field_id, f.response_value or "non_compliant")
 
@@ -269,44 +272,83 @@ class CAPService:
             due_days = DUE_DAYS.get(priority, 7)
             assignee = staff_assignee if ftype == "task" else manager_assignee
 
-            items.append({
-                "cap_id": cap_id,
-                "field_id": f.field_id,
-                "field_label": f.label,
-                "response_value": response_value,
-                "score_awarded": f.achieved_score,
-                "max_score": f.max_score,
-                "is_critical": f.is_critical,
-                "suggested_followup_type": ftype,
-                "suggested_title": title,
-                "suggested_description": description,
-                "suggested_priority": priority,
-                "suggested_assignee_id": assignee,
-                "suggested_due_days": due_days,
-                # Pre-fill manager-editable fields with suggested values
-                "followup_type": ftype,
-                "followup_title": title,
-                "followup_description": description,
-                "followup_priority": priority,
-                "followup_assignee_id": assignee,
-                "followup_due_at": (now + timedelta(days=due_days)).isoformat(),
-            })
+            items_data.append((
+                cap_id,
+                f.field_id,
+                f.label,
+                response_value,
+                f.achieved_score,
+                f.max_score,
+                f.is_critical,
+                ftype,
+                title,
+                description,
+                priority,
+                assignee,
+                due_days,
+                ftype,
+                title,
+                description,
+                priority,
+                assignee,
+                (now + timedelta(days=due_days)).isoformat(),
+            ))
 
-        if items:
-            items_resp = db.table("cap_items").insert(items).execute()
-            cap["items"] = items_resp.data or []
-        else:
-            cap["items"] = []
+        inserted_items = []
+        if items_data:
+            for params in items_data:
+                item_row = execute_returning(
+                    conn,
+                    """
+                    INSERT INTO cap_items (
+                        cap_id, field_id, field_label, response_value,
+                        score_awarded, max_score, is_critical,
+                        suggested_followup_type, suggested_title,
+                        suggested_description, suggested_priority,
+                        suggested_assignee_id, suggested_due_days,
+                        followup_type, followup_title, followup_description,
+                        followup_priority, followup_assignee_id, followup_due_at
+                    ) VALUES (
+                        %s, %s, %s, %s,
+                        %s, %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s,
+                        %s, %s, %s,
+                        %s, %s, %s
+                    )
+                    RETURNING *
+                    """,
+                    params,
+                )
+                if item_row:
+                    inserted_items.append(dict(item_row))
+
+        cap["items"] = inserted_items
 
         # Notify managers at the location that a CAP needs review
         try:
-            tmpl_resp = db.table("form_templates").select("title").eq("id", form_template_id).maybe_single().execute()
-            tmpl_title = (tmpl_resp.data or {}).get("title", "Audit")
-            # Get the submission score if available
-            sub_resp = db.table("form_submissions").select("score_percentage").eq("id", submission_id).maybe_single().execute()
-            score = (sub_resp.data or {}).get("score_percentage")
-            loc_resp = db.table("locations").select("name").eq("id", location_id).maybe_single().execute()
-            loc_name = (loc_resp.data or {}).get("name", "")
+            tmpl_row = row(
+                conn,
+                "SELECT title FROM form_templates WHERE id = %s",
+                (form_template_id,),
+            )
+            tmpl_title = (tmpl_row or {}).get("title", "Audit")
+
+            sub_row = row(
+                conn,
+                "SELECT score_percentage FROM form_submissions WHERE id = %s",
+                (submission_id,),
+            )
+            score = (sub_row or {}).get("score_percentage")
+
+            loc_row = row(
+                conn,
+                "SELECT name FROM locations WHERE id = %s",
+                (location_id,),
+            )
+            loc_name = (loc_row or {}).get("name", "")
+
             score_str = f"Score: {round(score)}%" if score is not None else ""
             notif_body_parts = [p for p in [score_str, f"at {loc_name}" if loc_name else ""] if p]
             notif_body = " ".join(notif_body_parts) or None
@@ -331,6 +373,7 @@ class CAPService:
 
     @staticmethod
     async def list_caps(
+        conn,
         org_id: str,
         status: Optional[str] = None,
         location_id: Optional[str] = None,
@@ -339,178 +382,313 @@ class CAPService:
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
-        db = get_admin_client()
-        query = (
-            db.table("corrective_action_plans")
-            .select(
-                "*, locations(name), "
-                "form_submissions(submitted_at, overall_score, passed, form_templates(title))",
-                count="exact",
-            )
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-        )
+        filters = ["cap.organisation_id = %s", "cap.is_deleted = FALSE"]
+        params: list = [org_id]
+
         if status:
-            query = query.eq("status", status)
+            filters.append("cap.status = %s")
+            params.append(status)
         if location_id:
-            query = query.eq("location_id", location_id)
+            filters.append("cap.location_id = %s")
+            params.append(location_id)
         if from_date:
-            query = query.gte("generated_at", from_date)
+            filters.append("cap.generated_at >= %s")
+            params.append(from_date)
         if to_date:
-            query = query.lte("generated_at", to_date)
+            filters.append("cap.generated_at <= %s")
+            params.append(to_date)
+
+        where = " AND ".join(filters)
+
+        # Total count
+        count_row = row(
+            conn,
+            f"SELECT COUNT(*) AS cnt FROM corrective_action_plans cap WHERE {where}",
+            tuple(params),
+        )
+        total_count = count_row["cnt"] if count_row else 0
 
         offset = (page - 1) * page_size
-        resp = query.order("generated_at", desc=True).range(offset, offset + page_size - 1).execute()
+        list_params = tuple(params) + (page_size, offset)
+
+        cap_rows = rows(
+            conn,
+            f"""
+            SELECT
+                cap.*,
+                loc.name        AS location_name,
+                sub.submitted_at,
+                sub.overall_score,
+                sub.passed,
+                ft.title        AS form_template_title
+            FROM corrective_action_plans cap
+            LEFT JOIN locations loc          ON loc.id = cap.location_id
+            LEFT JOIN form_submissions sub   ON sub.id = cap.submission_id
+            LEFT JOIN form_templates ft      ON ft.id  = sub.form_template_id
+            WHERE {where}
+            ORDER BY cap.generated_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            list_params,
+        )
+
+        items = [dict(r) for r in cap_rows]
+
+        # Nest related fields to match original shape
+        for c in items:
+            c["locations"] = {"name": c.pop("location_name", None)}
+            c["form_submissions"] = {
+                "submitted_at": c.pop("submitted_at", None),
+                "overall_score": c.pop("overall_score", None),
+                "passed": c.pop("passed", None),
+                "form_templates": {"title": c.pop("form_template_title", None)},
+            }
 
         # Fetch item counts per CAP
-        items = resp.data or []
         if items:
             cap_ids = [c["id"] for c in items]
-            counts_resp = (
-                db.table("cap_items")
-                .select("cap_id", count="exact")
-                .in_("cap_id", cap_ids)
-                .eq("is_deleted", False)
-                .execute()
+            count_rows_data = rows(
+                conn,
+                """
+                SELECT cap_id, COUNT(*) AS cnt
+                FROM cap_items
+                WHERE cap_id = ANY(%s) AND is_deleted = FALSE
+                GROUP BY cap_id
+                """,
+                (cap_ids,),
             )
-            # Build count map from raw data
-            count_map: dict[str, int] = {}
-            for row in (counts_resp.data or []):
-                cid = row["cap_id"]
-                count_map[cid] = count_map.get(cid, 0) + 1
+            count_map = {r["cap_id"]: r["cnt"] for r in count_rows_data}
             for c in items:
                 c["item_count"] = count_map.get(c["id"], 0)
 
         return {
             "items": items,
-            "total_count": resp.count or 0,
+            "total_count": total_count,
             "page": page,
             "page_size": page_size,
         }
 
     @staticmethod
-    async def get_cap(cap_id: str, org_id: str) -> dict:
-        db = get_admin_client()
-        resp = (
-            db.table("corrective_action_plans")
-            .select(
-                "*, locations(name), "
-                "form_submissions(id, submitted_at, submitted_by, overall_score, passed, "
-                "form_templates(id, title, form_sections(id, title, display_order, "
-                "form_fields(id, label, display_order, section_id)))), "
-                "cap_items(*, suggested_assignee:profiles!suggested_assignee_id(full_name), "
-                "followup_assignee:profiles!followup_assignee_id(full_name))"
-            )
-            .eq("id", cap_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def get_cap(conn, cap_id: str, org_id: str) -> dict:
+        cap_row = row(
+            conn,
+            """
+            SELECT
+                cap.*,
+                loc.name                AS location_name,
+                sub.id                  AS sub_id,
+                sub.submitted_at,
+                sub.submitted_by,
+                sub.overall_score,
+                sub.passed,
+                ft.id                   AS ft_id,
+                ft.title                AS ft_title
+            FROM corrective_action_plans cap
+            LEFT JOIN locations loc         ON loc.id  = cap.location_id
+            LEFT JOIN form_submissions sub  ON sub.id  = cap.submission_id
+            LEFT JOIN form_templates ft     ON ft.id   = sub.form_template_id
+            WHERE cap.id = %s
+              AND cap.organisation_id = %s
+              AND cap.is_deleted = FALSE
+            """,
+            (cap_id, org_id),
         )
-        if not resp.data:
+        if not cap_row:
             raise HTTPException(status_code=404, detail="CAP not found")
-        cap = resp.data[0]
-        # Filter deleted items
-        cap["cap_items"] = [i for i in (cap.get("cap_items") or []) if not i.get("is_deleted")]
+        cap = dict(cap_row)
+
+        # Fetch form sections and fields for the template
+        sections = rows(
+            conn,
+            """
+            SELECT id, title, display_order
+            FROM form_sections
+            WHERE form_template_id = %s
+            ORDER BY display_order
+            """,
+            (cap["ft_id"],),
+        ) if cap.get("ft_id") else []
+
+        section_list = []
+        for sec in sections:
+            sec = dict(sec)
+            fields = rows(
+                conn,
+                """
+                SELECT id, label, display_order, section_id
+                FROM form_fields
+                WHERE section_id = %s
+                ORDER BY display_order
+                """,
+                (sec["id"],),
+            )
+            sec["form_fields"] = [dict(f) for f in fields]
+            section_list.append(sec)
+
+        # Fetch CAP items with assignee names
+        item_rows = rows(
+            conn,
+            """
+            SELECT
+                ci.*,
+                sa.full_name AS suggested_assignee_full_name,
+                fa.full_name AS followup_assignee_full_name
+            FROM cap_items ci
+            LEFT JOIN profiles sa ON sa.id = ci.suggested_assignee_id
+            LEFT JOIN profiles fa ON fa.id = ci.followup_assignee_id
+            WHERE ci.cap_id = %s AND ci.is_deleted = FALSE
+            """,
+            (cap_id,),
+        )
+        cap_items = []
+        for ir in item_rows:
+            ir = dict(ir)
+            ir["suggested_assignee"] = {"full_name": ir.pop("suggested_assignee_full_name", None)}
+            ir["followup_assignee"] = {"full_name": ir.pop("followup_assignee_full_name", None)}
+            cap_items.append(ir)
+
+        # Nest related data to match original shape
+        cap["locations"] = {"name": cap.pop("location_name", None)}
+        cap["form_submissions"] = {
+            "id": cap.pop("sub_id", None),
+            "submitted_at": cap.pop("submitted_at", None),
+            "submitted_by": cap.pop("submitted_by", None),
+            "overall_score": cap.pop("overall_score", None),
+            "passed": cap.pop("passed", None),
+            "form_templates": {
+                "id": cap.pop("ft_id", None),
+                "title": cap.pop("ft_title", None),
+                "form_sections": section_list,
+            },
+        }
+        cap["cap_items"] = cap_items
+
         return cap
 
     @staticmethod
-    async def get_cap_by_submission(submission_id: str, org_id: str) -> dict | None:
-        db = get_admin_client()
-        resp = (
-            db.table("corrective_action_plans")
-            .select("id, status")
-            .eq("submission_id", submission_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def get_cap_by_submission(conn, submission_id: str, org_id: str) -> dict | None:
+        result = row(
+            conn,
+            """
+            SELECT id, status
+            FROM corrective_action_plans
+            WHERE submission_id = %s
+              AND organisation_id = %s
+              AND is_deleted = FALSE
+            """,
+            (submission_id, org_id),
         )
-        if not resp.data:
-            return None
-        return resp.data[0]
+        return dict(result) if result else None
 
     # ── Update / Confirm / Dismiss ────────────────────────────────────────────
 
     @staticmethod
     async def update_cap_item(
-        cap_id: str, item_id: str, org_id: str, reviewed_by: str,
+        conn,
+        cap_id: str,
+        item_id: str,
+        org_id: str,
+        reviewed_by: str,
         body: UpdateCAPItemRequest,
     ) -> dict:
-        db = get_admin_client()
-
         # Verify CAP exists and is editable
-        cap_resp = (
-            db.table("corrective_action_plans")
-            .select("id, status")
-            .eq("id", cap_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+        cap_row = row(
+            conn,
+            """
+            SELECT id, status
+            FROM corrective_action_plans
+            WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+            """,
+            (cap_id, org_id),
         )
-        if not cap_resp.data:
+        if not cap_row:
             raise HTTPException(status_code=404, detail="CAP not found")
-        cap = cap_resp.data[0]
-        if cap["status"] not in ("pending_review", "in_review"):
+        cap_row = dict(cap_row)
+        if cap_row["status"] not in ("pending_review", "in_review"):
             raise HTTPException(status_code=400, detail="CAP is not editable")
 
-        # Build update dict
-        updates: dict = {}
+        # Build SET clause dynamically
+        set_parts: list[str] = []
+        update_params: list = []
+
         for field in ("followup_type", "followup_title", "followup_description", "followup_priority"):
             val = getattr(body, field, None)
             if val is not None:
-                updates[field] = val
-        if body.followup_assignee_id is not None:
-            updates["followup_assignee_id"] = str(body.followup_assignee_id)
-        if body.followup_due_at is not None:
-            updates["followup_due_at"] = body.followup_due_at.isoformat()
+                set_parts.append(f"{field} = %s")
+                update_params.append(val)
 
-        if not updates:
+        if body.followup_assignee_id is not None:
+            set_parts.append("followup_assignee_id = %s")
+            update_params.append(str(body.followup_assignee_id))
+
+        if body.followup_due_at is not None:
+            set_parts.append("followup_due_at = %s")
+            update_params.append(body.followup_due_at.isoformat())
+
+        if not set_parts:
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        set_parts.append("updated_at = %s")
+        update_params.append(datetime.now(timezone.utc).isoformat())
 
-        item_resp = (
-            db.table("cap_items")
-            .update(updates)
-            .eq("id", item_id)
-            .eq("cap_id", cap_id)
-            .eq("is_deleted", False)
-            .execute()
+        update_params.extend([item_id, cap_id])
+
+        updated_item = execute_returning(
+            conn,
+            f"""
+            UPDATE cap_items
+            SET {', '.join(set_parts)}
+            WHERE id = %s AND cap_id = %s AND is_deleted = FALSE
+            RETURNING *
+            """,
+            tuple(update_params),
         )
-        if not item_resp.data:
+        if not updated_item:
             raise HTTPException(status_code=404, detail="CAP item not found")
 
         # Auto-transition CAP to in_review
-        if cap["status"] == "pending_review":
-            db.table("corrective_action_plans").update({
-                "status": "in_review",
-                "reviewed_by": reviewed_by,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", cap_id).execute()
+        if cap_row["status"] == "pending_review":
+            execute(
+                conn,
+                """
+                UPDATE corrective_action_plans
+                SET status = 'in_review',
+                    reviewed_by = %s,
+                    updated_at = %s
+                WHERE id = %s
+                """,
+                (reviewed_by, datetime.now(timezone.utc).isoformat(), cap_id),
+            )
 
-        return item_resp.data[0]
+        return dict(updated_item)
 
     @staticmethod
-    async def confirm_cap(cap_id: str, org_id: str, reviewed_by: str) -> dict:
-        db = get_admin_client()
-
-        # Fetch CAP
-        cap_resp = (
-            db.table("corrective_action_plans")
-            .select("*, cap_items(*)")
-            .eq("id", cap_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def confirm_cap(conn, cap_id: str, org_id: str, reviewed_by: str) -> dict:
+        # Fetch CAP with items
+        cap_row = row(
+            conn,
+            """
+            SELECT *
+            FROM corrective_action_plans
+            WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+            """,
+            (cap_id, org_id),
         )
-        if not cap_resp.data:
+        if not cap_row:
             raise HTTPException(status_code=404, detail="CAP not found")
-        cap = cap_resp.data[0]
+        cap = dict(cap_row)
         if cap["status"] not in ("pending_review", "in_review"):
             raise HTTPException(status_code=400, detail=f"CAP cannot be confirmed from status '{cap['status']}'")
 
-        items = [i for i in (cap.get("cap_items") or []) if not i.get("is_deleted")]
-        task_items    = [i for i in items if i.get("followup_type") == "task"]
-        issue_items   = [i for i in items if i.get("followup_type") == "issue"]
+        item_rows = rows(
+            conn,
+            "SELECT * FROM cap_items WHERE cap_id = %s AND is_deleted = FALSE",
+            (cap_id,),
+        )
+        items = [dict(i) for i in item_rows]
+
+        task_items     = [i for i in items if i.get("followup_type") == "task"]
+        issue_items    = [i for i in items if i.get("followup_type") == "issue"]
         incident_items = [i for i in items if i.get("followup_type") == "incident"]
 
         spawned_tasks: list[dict] = []
@@ -530,19 +708,29 @@ class CAPService:
                 task = await TaskService.create_task(task_body, org_id, reviewed_by)
                 spawned_tasks.append({"task": task, "item_id": item["id"]})
 
-                db.table("cap_items").update({
-                    "spawned_task_id": task["id"],
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", item["id"]).execute()
-
-                db.table("tasks").update({
-                    "cap_item_id": item["id"],
-                }).eq("id", task["id"]).execute()
+                execute(
+                    conn,
+                    """
+                    UPDATE cap_items
+                    SET spawned_task_id = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (task["id"], datetime.now(timezone.utc).isoformat(), item["id"]),
+                )
+                execute(
+                    conn,
+                    "UPDATE tasks SET cap_item_id = %s WHERE id = %s",
+                    (item["id"], task["id"]),
+                )
 
         except Exception as e:
             for st in spawned_tasks:
                 try:
-                    db.table("tasks").update({"is_deleted": True}).eq("id", st["task"]["id"]).execute()
+                    execute(
+                        conn,
+                        "UPDATE tasks SET is_deleted = TRUE WHERE id = %s",
+                        (st["task"]["id"],),
+                    )
                 except Exception:
                     pass
             logger.error(f"CAP confirmation failed, rolled back tasks: {e}")
@@ -552,27 +740,48 @@ class CAPService:
         spawned_issues: list[str] = []
         for item in issue_items:
             try:
-                issue_data = {
-                    "organisation_id": org_id,
-                    "location_id": cap.get("location_id"),
-                    "reported_by": reviewed_by,
-                    "title": item.get("followup_title") or item.get("suggested_title") or "CAP Issue",
-                    "description": item.get("followup_description") or item.get("suggested_description") or "",
-                    "priority": item.get("followup_priority") or item.get("suggested_priority") or "medium",
-                    "status": "open",
-                }
-                # Find or use a default category
-                cat_resp = db.table("issue_categories").select("id").eq("organisation_id", org_id).eq("is_deleted", False).limit(1).execute()
-                if cat_resp.data:
-                    issue_data["category_id"] = cat_resp.data[0]["id"]
-                issue_resp = db.table("issues").insert(issue_data).execute()
-                if issue_resp.data:
-                    issue_id = issue_resp.data[0]["id"]
+                cat_row = row(
+                    conn,
+                    """
+                    SELECT id FROM issue_categories
+                    WHERE organisation_id = %s AND is_deleted = FALSE
+                    LIMIT 1
+                    """,
+                    (org_id,),
+                )
+                category_id = cat_row["id"] if cat_row else None
+
+                issue_row = execute_returning(
+                    conn,
+                    """
+                    INSERT INTO issues (
+                        organisation_id, location_id, reported_by,
+                        title, description, priority, status, category_id
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'open', %s)
+                    RETURNING id
+                    """,
+                    (
+                        org_id,
+                        cap.get("location_id"),
+                        reviewed_by,
+                        item.get("followup_title") or item.get("suggested_title") or "CAP Issue",
+                        item.get("followup_description") or item.get("suggested_description") or "",
+                        item.get("followup_priority") or item.get("suggested_priority") or "medium",
+                        category_id,
+                    ),
+                )
+                if issue_row:
+                    issue_id = issue_row["id"]
                     spawned_issues.append(issue_id)
-                    db.table("cap_items").update({
-                        "spawned_issue_id": issue_id,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", item["id"]).execute()
+                    execute(
+                        conn,
+                        """
+                        UPDATE cap_items
+                        SET spawned_issue_id = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (issue_id, datetime.now(timezone.utc).isoformat(), item["id"]),
+                    )
             except Exception as e:
                 logger.error(f"Failed to spawn issue for CAP item {item['id']}: {e}")
 
@@ -580,36 +789,54 @@ class CAPService:
         spawned_incidents: list[str] = []
         for item in incident_items:
             try:
-                incident_data = {
-                    "org_id": org_id,
-                    "reported_by": reviewed_by,
-                    "title": item.get("followup_title") or item.get("suggested_title") or "CAP Incident",
-                    "description": item.get("followup_description") or item.get("suggested_description") or "",
-                    "severity": item.get("followup_priority") or item.get("suggested_priority") or "medium",
-                    "status": "reported",
-                    "incident_date": datetime.now(timezone.utc).isoformat(),
-                }
-                if cap.get("location_id"):
-                    incident_data["location_id"] = cap["location_id"]
-                incident_resp = db.table("incidents").insert(incident_data).execute()
-                if incident_resp.data:
-                    incident_id = incident_resp.data[0]["id"]
+                incident_row = execute_returning(
+                    conn,
+                    """
+                    INSERT INTO incidents (
+                        org_id, reported_by, title, description,
+                        severity, status, incident_date, location_id
+                    ) VALUES (%s, %s, %s, %s, %s, 'reported', %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        org_id,
+                        reviewed_by,
+                        item.get("followup_title") or item.get("suggested_title") or "CAP Incident",
+                        item.get("followup_description") or item.get("suggested_description") or "",
+                        item.get("followup_priority") or item.get("suggested_priority") or "medium",
+                        datetime.now(timezone.utc).isoformat(),
+                        cap.get("location_id"),
+                    ),
+                )
+                if incident_row:
+                    incident_id = incident_row["id"]
                     spawned_incidents.append(incident_id)
-                    db.table("cap_items").update({
-                        "spawned_incident_id": incident_id,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", item["id"]).execute()
+                    execute(
+                        conn,
+                        """
+                        UPDATE cap_items
+                        SET spawned_incident_id = %s, updated_at = %s
+                        WHERE id = %s
+                        """,
+                        (incident_id, datetime.now(timezone.utc).isoformat(), item["id"]),
+                    )
             except Exception as e:
                 logger.error(f"Failed to spawn incident for CAP item {item['id']}: {e}")
 
         # Update CAP status
         now = datetime.now(timezone.utc).isoformat()
-        db.table("corrective_action_plans").update({
-            "status": "confirmed",
-            "reviewed_by": reviewed_by,
-            "reviewed_at": now,
-            "updated_at": now,
-        }).eq("id", cap_id).execute()
+        execute(
+            conn,
+            """
+            UPDATE corrective_action_plans
+            SET status = 'confirmed',
+                reviewed_by = %s,
+                reviewed_at = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (reviewed_by, now, now, cap_id),
+        )
 
         return {
             "cap_id": cap_id,
@@ -621,29 +848,34 @@ class CAPService:
         }
 
     @staticmethod
-    async def dismiss_cap(cap_id: str, org_id: str, reviewed_by: str, reason: str) -> dict:
-        db = get_admin_client()
-
-        cap_resp = (
-            db.table("corrective_action_plans")
-            .select("id, status")
-            .eq("id", cap_id)
-            .eq("organisation_id", org_id)
-            .eq("is_deleted", False)
-            .execute()
+    async def dismiss_cap(conn, cap_id: str, org_id: str, reviewed_by: str, reason: str) -> dict:
+        cap_row = row(
+            conn,
+            """
+            SELECT id, status
+            FROM corrective_action_plans
+            WHERE id = %s AND organisation_id = %s AND is_deleted = FALSE
+            """,
+            (cap_id, org_id),
         )
-        if not cap_resp.data:
+        if not cap_row:
             raise HTTPException(status_code=404, detail="CAP not found")
-        if cap_resp.data[0]["status"] in ("confirmed", "dismissed"):
+        if cap_row["status"] in ("confirmed", "dismissed"):
             raise HTTPException(status_code=400, detail="CAP is already finalized")
 
         now = datetime.now(timezone.utc).isoformat()
-        db.table("corrective_action_plans").update({
-            "status": "dismissed",
-            "dismissed_reason": reason,
-            "reviewed_by": reviewed_by,
-            "reviewed_at": now,
-            "updated_at": now,
-        }).eq("id", cap_id).execute()
+        execute(
+            conn,
+            """
+            UPDATE corrective_action_plans
+            SET status = 'dismissed',
+                dismissed_reason = %s,
+                reviewed_by = %s,
+                reviewed_at = %s,
+                updated_at = %s
+            WHERE id = %s
+            """,
+            (reason, reviewed_by, now, now, cap_id),
+        )
 
         return {"cap_id": cap_id, "status": "dismissed"}

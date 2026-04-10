@@ -1,23 +1,20 @@
 import uuid
 import re
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from dependencies import get_current_user, require_admin
+from dependencies import get_current_user, require_admin, get_db
 from services.auth_service import AuthService
-from services.supabase_client import get_supabase
-from models.auth import LoginRequest, ChangePasswordRequest
+from services.db import rows, execute_returning, execute
+from models.auth import ChangePasswordRequest
 
 router = APIRouter()
 
 
-@router.post("/login")
-async def login(body: LoginRequest):
-    return await AuthService.login(body)
-
-
-@router.post("/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
-    return await AuthService.logout(current_user)
+# login and logout are removed — authentication is now handled by Keycloak.
+# Clients should obtain tokens directly from Keycloak using the standard
+# OAuth2 / OIDC password or authorization-code flow, and revoke them via
+# Keycloak's token revocation endpoint.
 
 
 @router.post("/change-password")
@@ -40,12 +37,16 @@ class DemoStartResponse(BaseModel):
 
 
 @router.post("/demo-start", response_model=DemoStartResponse)
-async def demo_start(body: DemoStartRequest):
+async def demo_start(
+    body: DemoStartRequest,
+    conn=Depends(get_db),
+):
     """
-    For demo purposes: create a fresh org + super_admin user + onboarding session.
-    Returns credentials so the caller can sign the user in immediately.
+    For demo purposes: create a fresh org + super_admin profile + onboarding session.
+    NOTE: No Supabase Auth user is created here. The caller is responsible for
+    creating the corresponding Keycloak user and linking it via the profile id.
+    Returns credentials so the caller can complete Keycloak user setup immediately.
     """
-    sb = get_supabase()
     uid = str(uuid.uuid4())[:8]
 
     company_name = body.company_name.strip() or f"Demo Company {uid.upper()}"
@@ -54,53 +55,47 @@ async def demo_start(body: DemoStartRequest):
     password = f"Demo{uid}!"
 
     # 1. Create organisation
-    org_res = sb.table("organisations").insert({
-        "name": company_name,
-        "slug": slug,
-        "is_active": True,
-        "is_deleted": False,
-    }).execute()
-    if not org_res.data:
+    org = execute_returning(
+        conn,
+        """
+        INSERT INTO organisations (name, slug, is_active, is_deleted)
+        VALUES (%s, %s, TRUE, FALSE)
+        RETURNING *
+        """,
+        (company_name, slug),
+    )
+    if not org:
         raise HTTPException(status_code=500, detail="Failed to create organisation.")
-    org_id = org_res.data[0]["id"]
+    org_id = str(org["id"])
 
-    # 2. Create auth user with password (not invite — we need immediate sign-in)
+    # 2. Create profile (Keycloak user creation must be done separately by the caller)
+    profile_id = str(uuid.uuid4())
     try:
-        auth_res = sb.auth.admin.create_user({
-            "email": email,
-            "password": password,
-            "email_confirm": True,
-            "app_metadata": {"organisation_id": org_id, "role": "super_admin"},
-            "user_metadata": {"full_name": f"Admin ({company_name})"},
-        })
-        user_id = str(auth_res.user.id)
+        execute_returning(
+            conn,
+            """
+            INSERT INTO profiles
+                (id, organisation_id, full_name, role, language, is_active, is_deleted)
+            VALUES (%s, %s, %s, 'super_admin', 'en', TRUE, FALSE)
+            RETURNING id
+            """,
+            (profile_id, org_id, f"Admin ({company_name})"),
+        )
     except Exception as e:
-        sb.table("organisations").delete().eq("id", org_id).execute()
-        raise HTTPException(status_code=500, detail=f"Failed to create user: {e}")
-
-    # 3. Create profile
-    try:
-        sb.table("profiles").insert({
-            "id": user_id,
-            "organisation_id": org_id,
-            "full_name": f"Admin ({company_name})",
-            "role": "super_admin",
-            "language": "en",
-            "is_active": True,
-            "is_deleted": False,
-        }).execute()
-    except Exception as e:
-        sb.auth.admin.delete_user(user_id)
-        sb.table("organisations").delete().eq("id", org_id).execute()
+        execute(conn, "DELETE FROM organisations WHERE id = %s", (org_id,))
         raise HTTPException(status_code=500, detail=f"Failed to create profile: {e}")
 
-    # 4. Create onboarding session
-    sess_res = sb.table("onboarding_sessions").insert({
-        "organisation_id": org_id,
-        "current_step": 1,
-        "status": "in_progress",
-    }).execute()
-    session_id = sess_res.data[0]["id"] if sess_res.data else ""
+    # 3. Create onboarding session
+    session_row = execute_returning(
+        conn,
+        """
+        INSERT INTO onboarding_sessions (organisation_id, current_step, status)
+        VALUES (%s, 1, 'in_progress')
+        RETURNING id
+        """,
+        (org_id,),
+    )
+    session_id = str(session_row["id"]) if session_row else ""
 
     return DemoStartResponse(
         email=email,
@@ -114,30 +109,23 @@ async def demo_start(body: DemoStartRequest):
 async def delete_demo_workspace(
     org_id: str,
     current_user: dict = Depends(require_admin),
+    conn=Depends(get_db),
 ):
     """
     Permanently delete a demo workspace and all its data.
-    Requires admin or super_admin role. User must belong to the org being deleted.
+    Requires super_admin role. User must belong to the org being deleted.
+    NOTE: Corresponding Keycloak users must be deleted separately by the caller.
     """
     app_meta = current_user.get("app_metadata") or {}
 
-    # Only super_admin may wipe an org
     if app_meta.get("role") != "super_admin":
         raise HTTPException(status_code=403, detail="Super-admin access required.")
 
-    sb = get_supabase()
-
-    # Verify caller belongs to this org
     caller_org = app_meta.get("organisation_id")
     if str(caller_org) != str(org_id):
         raise HTTPException(status_code=403, detail="Not your organisation.")
 
-    # Collect user IDs to delete from auth
-    profiles_res = sb.table("profiles").select("id").eq("organisation_id", org_id).execute()
-    user_ids = [p["id"] for p in (profiles_res.data or [])]
-
-    # Delete all org data in dependency order
-    # Children before parents (FK constraints)
+    # Delete all org data in dependency order (children before parents)
     for tbl in [
         # Issue children
         "issue_attachments", "issue_comments", "issue_status_history",
@@ -167,18 +155,11 @@ async def delete_demo_workspace(
         "profiles",
     ]:
         try:
-            sb.table(tbl).delete().eq("organisation_id", org_id).execute()
+            execute(conn, f"DELETE FROM {tbl} WHERE organisation_id = %s", (org_id,))
         except Exception:
             pass  # Table may not exist or column name differs — continue
 
     # Delete the organisation itself
-    sb.table("organisations").delete().eq("id", org_id).execute()
-
-    # Delete auth users
-    for uid in user_ids:
-        try:
-            sb.auth.admin.delete_user(uid)
-        except Exception:
-            pass
+    execute(conn, "DELETE FROM organisations WHERE id = %s", (org_id,))
 
     return {"ok": True}
