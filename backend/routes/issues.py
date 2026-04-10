@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from dependencies import get_current_user, require_admin, require_manager_or_above, paginate, get_db
 from services.db import row, rows, execute, execute_returning
+from services.blob_storage import upload_blob, get_public_url
 
 router = APIRouter()
 
@@ -767,10 +768,6 @@ async def upload_attachments(
     bucket = "issue-media"
     timestamp = int(datetime.utcnow().timestamp())
 
-    # Phase 5: replace with Azure Blob
-    from services.supabase_client import get_supabase
-    _storage_client = get_supabase()
-
     for f in files:
         content = await f.read()
         if len(content) > MAX_SIZE:
@@ -787,18 +784,11 @@ async def upload_attachments(
         storage_path = f"{user_id}/{str(issue_id)}/{timestamp}-{suffix}.{ext}" if ext else f"{user_id}/{str(issue_id)}/{timestamp}-{suffix}"
 
         try:
-            # Phase 5: replace with Azure Blob
-            _storage_client.storage.from_(bucket).upload(
-                storage_path,
-                content,
-                {"content-type": f.content_type or "application/octet-stream"},
-            )
+            upload_blob("issue-media", storage_path, content, f.content_type or "application/octet-stream")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
 
-        # Phase 5: replace with Azure Blob
-        public_url_resp = _storage_client.storage.from_(bucket).get_public_url(storage_path)
-        file_url = public_url_resp if isinstance(public_url_resp, str) else storage_path
+        file_url = get_public_url("issue-media", storage_path)
 
         mime = f.content_type or "application/octet-stream"
         if mime.startswith("image/"):

@@ -18,6 +18,7 @@ from models.lms import (
 )
 from services.lms_service import LmsService
 from utils.ai_helpers import _strip_code_fence
+from services.blob_storage import upload_blob, get_public_url
 
 router = APIRouter()
 
@@ -376,14 +377,6 @@ async def upload_training_file(
     timestamp = int(time.time())
     storage_path = f"{org_id}/{user_id}/{timestamp}-{suffix}.{ext}"
 
-    # Phase 5: replace with Azure Blob
-    from services.supabase_client import get_admin_client
-    _storage_client = get_admin_client()
-    _storage_client.storage.from_("training-media").upload(
-        storage_path,
-        content,
-        {"content-type": file.content_type or "application/octet-stream"},
-    )
-    # Phase 5: replace with Azure Blob
-    public_url = _storage_client.storage.from_("training-media").get_public_url(storage_path)
+    upload_blob("training-media", storage_path, content, file.content_type or "application/octet-stream")
+    public_url = get_public_url("training-media", storage_path)
     return {"url": public_url}

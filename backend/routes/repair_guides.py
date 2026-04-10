@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from dependencies import get_current_user, get_db, require_admin, paginate
+from services.blob_storage import upload_blob, get_public_url
 from services.db import execute, execute_returning, row, rows
 
 router = APIRouter()
@@ -80,23 +81,12 @@ async def create_guide(
             elif content_type.startswith("audio/"):
                 guide_type = "audio"
 
-        # Phase 5: replace with Azure Blob — storage upload retained below
-        from services.supabase_client import get_supabase  # Phase 5: replace with Azure Blob
-        _storage_client = get_supabase()  # Phase 5: replace with Azure Blob
         try:
-            _storage_client.storage.from_("repair-guides").upload(
-                storage_path,
-                file_bytes,
-                {"content-type": content_type},
-            )
+            upload_blob("repair-guides", storage_path, file_bytes, content_type)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to upload file: {e}")
 
-        try:
-            public_url_resp = _storage_client.storage.from_("repair-guides").get_public_url(storage_path)  # Phase 5: replace with Azure Blob
-            file_url = public_url_resp if isinstance(public_url_resp, str) else storage_path
-        except Exception:
-            file_url = storage_path
+        file_url = get_public_url("repair-guides", storage_path)
 
     # Build dynamic INSERT based on which optional fields are present
     columns = ["organisation_id", "title", "guide_type"]

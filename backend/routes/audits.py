@@ -38,6 +38,7 @@ from services.workflow_service import instantiate_workflow
 from services.form_service import FormService
 from services.db import row, rows, execute, execute_returning
 from services.ai_logger import log_ai_request, AITimer
+from services.blob_storage import upload_blob, get_signed_url
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -987,20 +988,14 @@ async def capture_signature(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 signature data")
 
-    # Phase 5: replace with Azure Blob
-    from services.supabase_client import get_supabase
     path = f"{org_id}/{submission_id}/signature_{uuid4().hex}.png"
-    storage = get_supabase().storage.from_("audit-signatures")
 
     try:
-        storage.upload(path, img_bytes, {"content-type": "image/png", "upsert": "true"})
+        upload_blob("audit-signatures", path, img_bytes, "image/png")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to upload signature: {e}")
 
-    # Generate signed URL (1 hour)
-    # Phase 5: replace with Azure Blob
-    signed = storage.create_signed_url(path, 3600)
-    signed_url = signed.get("signedURL") or signed.get("signed_url") or path
+    signed_url = get_signed_url("audit-signatures", path, 3600)
 
     # Upsert audit_signatures record
     execute(
