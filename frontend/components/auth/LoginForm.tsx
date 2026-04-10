@@ -6,7 +6,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2, Zap, Sparkles, Building2, Trash2, LogIn } from "lucide-react";
-import { createClient } from "@/services/supabase/client";
 import { deleteDemoWorkspace } from "@/services/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -74,24 +73,16 @@ export function LoginForm() {
     !["localhost", "127.0.0.1"].includes(window.location.hostname);
 
   async function doSignIn(email: string, password: string): Promise<string | null> {
-    if (isLanAccess) {
-      const res = await fetch("/api/auth/signin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
-      });
-      const json = await res.json();
-      if (!res.ok) return json.error ?? "Sign-in failed";
-      return null;
-    } else {
-      const supabase = createClient();
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      return error
-        ? error.message === "Invalid login credentials"
-          ? "Incorrect email or password."
-          : error.message
-        : null;
-    }
+    // All sign-in goes through the server route which calls Keycloak and sets
+    // HttpOnly token cookies — no direct Supabase client calls.
+    const res = await fetch("/api/auth/signin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const json = await res.json();
+    if (!res.ok) return json.error ?? "Sign-in failed";
+    return null;
   }
 
   async function startOnboarding() {
@@ -157,9 +148,8 @@ export function LoginForm() {
       }
       // Wipe from DB
       await deleteDemoWorkspace(ws.org_id);
-      // Sign back out
-      const supabase = createClient();
-      await supabase.auth.signOut();
+      // Clear the session
+      await fetch("/api/auth/signout");
     } catch {
       // Best effort — still remove from local list
     } finally {

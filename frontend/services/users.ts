@@ -1,5 +1,6 @@
 import { apiFetch } from "./api/client";
 import { createClient } from "@/services/supabase/client";
+import { getClientToken } from "@/lib/auth";
 import type { Profile, PaginatedResponse, ApiResponse } from "@/types";
 
 export interface CreateUserPayload {
@@ -82,6 +83,7 @@ export interface Location {
 }
 
 export async function listLocations(): Promise<Location[]> {
+  // Phase 4: replace with psycopg2
   const supabase = createClient();
   const { data } = await supabase.auth.getSession();
   const orgId = data.session?.user?.app_metadata?.organisation_id as string | undefined;
@@ -90,6 +92,7 @@ export async function listLocations(): Promise<Location[]> {
 }
 
 async function getOrgId(): Promise<string | undefined> {
+  // Phase 4: replace with psycopg2
   const supabase = createClient();
   const { data } = await supabase.auth.getSession();
   return data.session?.user?.app_metadata?.organisation_id as string | undefined;
@@ -152,9 +155,7 @@ export async function listPositions(search = ""): Promise<{ position: string; co
 }
 
 export async function bulkImportUsers(file: File): Promise<ApiResponse<BulkImportResult>> {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  const token = getClientToken();
 
   const formData = new FormData();
   formData.append("file", file);

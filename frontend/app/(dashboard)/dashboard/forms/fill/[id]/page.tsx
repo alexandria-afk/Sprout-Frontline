@@ -15,7 +15,7 @@ import {
   createSubmission,
   type FormAssignment,
 } from "@/services/forms";
-import { createClient } from "@/services/supabase/client";
+import { createClient } from "@/services/supabase/client"; // Phase 5: replace storage calls
 import type { FormTemplate, FormField, FormSection, FormType } from "@/types";
 import { friendlyError } from "@/lib/errors";
 
@@ -115,11 +115,13 @@ function MediaInput({
   const canAdd = urls.length < MAX_MEDIA;
 
   const uploadFile = async (file: File): Promise<string> => {
+    // Get user ID from Keycloak session (Phase 5 will replace storage.from() with Azure Blob)
+    const meRes = await fetch("/api/auth/me");
+    if (!meRes.ok) throw new Error("Not authenticated");
+    const me = await meRes.json() as { id: string };
     const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error("Not authenticated");
     const ext = file.name.split(".").pop() ?? (isVideoMode ? "mp4" : "jpg");
-    const path = `${user.id}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    const path = `${me.id}/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
     const { error: uploadErr } = await supabase.storage
       .from("form-photos")
       .upload(path, file, { contentType: file.type, upsert: false });

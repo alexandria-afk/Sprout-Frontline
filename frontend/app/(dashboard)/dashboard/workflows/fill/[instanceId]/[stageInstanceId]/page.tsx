@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { getStageInstance, submitFormForStage, approveStage, rejectStage } from "@/services/workflows";
 import { getTemplate, getSubmission, type FormSubmissionDetail } from "@/services/forms";
-import { createClient } from "@/services/supabase/client";
+import { createClient } from "@/services/supabase/client"; // Phase 5: replace storage calls
 import type { FormTemplate, FormField } from "@/types";
 import { friendlyError } from "@/lib/errors";
 
@@ -36,11 +36,13 @@ function PhotoInput({ value, onChange }: { value: string; onChange: (v: string) 
     setUploadError("");
     setUploading(true);
     try {
+      // Get user ID from Keycloak session (Phase 5 will replace storage with Azure Blob)
+      const meRes = await fetch("/api/auth/me");
+      if (!meRes.ok) throw new Error("Not authenticated");
+      const me = await meRes.json() as { id: string };
       const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
       const ext = file.name.split(".").pop() ?? "jpg";
-      const path = `${user.id}/${Date.now()}.${ext}`;
+      const path = `${me.id}/${Date.now()}.${ext}`;
       const { error: uploadErr } = await supabase.storage.from("form-photos").upload(path, file, { contentType: file.type, upsert: false });
       if (uploadErr) throw uploadErr;
       const { data: signed, error: signErr } = await supabase.storage.from("form-photos").createSignedUrl(path, 315360000);
@@ -87,11 +89,13 @@ function VideoInput({ value, onChange }: { value: string; onChange: (v: string) 
     setUploadError("");
     setUploading(true);
     try {
+      // Get user ID from Keycloak session (Phase 5 will replace storage with Azure Blob)
+      const meRes = await fetch("/api/auth/me");
+      if (!meRes.ok) throw new Error("Not authenticated");
+      const me = await meRes.json() as { id: string };
       const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
       const ext = file.name.split(".").pop() ?? "mp4";
-      const path = `${user.id}/${Date.now()}.${ext}`;
+      const path = `${me.id}/${Date.now()}.${ext}`;
       const { error: uploadErr } = await supabase.storage.from("form-videos").upload(path, file, { contentType: file.type, upsert: false });
       if (uploadErr) throw uploadErr;
       const { data: signed, error: signErr } = await supabase.storage.from("form-videos").createSignedUrl(path, 315360000);

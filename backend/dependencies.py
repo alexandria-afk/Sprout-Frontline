@@ -1,16 +1,17 @@
 import jwt
+import psycopg2
+import psycopg2.extras
 from jwt import PyJWKClient
 from datetime import timedelta
 from fastapi import Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from config import settings
 
-# Local dev Supabase container clock can lag host by up to 2 hours
-_JWT_LEEWAY = timedelta(hours=12)
-
 security = HTTPBearer()
 
-# Cached JWKS client — fetches EC public key from Supabase once and reuses it
+# ── Keycloak JWKS client (cached) ─────────────────────────────────────────────
+# Fetches public keys from Keycloak once; reuses on subsequent requests.
+# JWKS URL: {keycloak_url}/realms/{keycloak_realm}/protocol/openid-connect/certs
 _jwks_client: PyJWKClient | None = None
 
 
@@ -18,86 +19,93 @@ def _get_jwks_client() -> PyJWKClient:
     global _jwks_client
     if _jwks_client is None:
         _jwks_client = PyJWKClient(
-            f"{settings.supabase_url}/auth/v1/.well-known/jwks.json",
+            f"{settings.keycloak_url}/realms/{settings.keycloak_realm}"
+            "/protocol/openid-connect/certs",
             cache_keys=True,
         )
     return _jwks_client
 
 
+# ── Database connection (per-request) ─────────────────────────────────────────
+def get_db():
+    """Yields a psycopg2 connection for the duration of the request."""
+    conn = psycopg2.connect(settings.database_url)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
-    """Validates Supabase-issued Bearer JWT and returns the decoded payload.
+    """Validates a Keycloak-issued Bearer JWT and returns a normalised payload.
 
-    If the JWT's app_metadata is missing organisation_id or role (this can happen
-    when an invite token is used before the first token refresh, since metadata is
-    set after the invite email is sent), the profile row is fetched from the DB to
-    fill in the missing fields so every downstream handler always has them.
+    The returned dict always contains an ``app_metadata`` sub-dict with:
+      - ``role``            — Keycloak realm role (string, e.g. "admin")
+      - ``organisation_id`` — from the profiles table
+      - ``location_id``     — from the profiles table (may be None)
+      - ``language``        — from the profiles table (default "en")
+
+    This mirrors the shape previously returned by Supabase so that all route
+    handlers that call ``current_user.get("app_metadata", {}).get("role")``
+    continue to work unchanged.
     """
     token = credentials.credentials
 
     try:
-        header = jwt.get_unverified_header(token)
-    except jwt.DecodeError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
-
-    alg = header.get("alg", "HS256")
-
-    try:
-        if alg == "HS256":
-            payload = jwt.decode(
-                token,
-                settings.supabase_jwt_secret,
-                algorithms=["HS256"],
-                audience="authenticated",
-                leeway=_JWT_LEEWAY,
-            )
-        else:
-            signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
-            payload = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["ES256", "RS256"],
-                audience="authenticated",
-                leeway=_JWT_LEEWAY,
-            )
+        signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            options={"verify_aud": False},
+        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
-    # Always enrich from profiles table so organisation_id and role are consistent
-    # regardless of JWT token refresh state. The JWT's app_metadata can lag after
-    # Supabase silently refreshes the access token mid-session, causing org_id
-    # mismatches between calls (e.g. createSession vs getLaunchProgress → 403).
-    # Profiles are looked up by user UUID (PK) so this is a fast indexed query.
-    app_meta = payload.get("app_metadata") or {}
     user_id = payload.get("sub")
+
+    # Keycloak puts roles in the "role" claim (array) per the realm mapper.
+    # Extract the first role as the effective role string.
+    raw_role = payload.get("role", [])
+    if isinstance(raw_role, list):
+        role = raw_role[0] if raw_role else None
+    else:
+        role = raw_role  # scalar fallback
+
+    # Enrich with org / location / language from the profiles table.
+    # Uses a direct psycopg2 connection (no Supabase client dependency here).
+    app_meta: dict = {"role": role}
     if user_id:
         try:
-            from services.supabase_client import get_supabase
-            sb = get_supabase()
-            profile = (
-                sb.table("profiles")
-                .select("organisation_id, role, location_id, language")
-                .eq("id", user_id)
-                .eq("is_deleted", False)
-                .maybe_single()
-                .execute()
-            )
-            if profile.data:
+            conn = psycopg2.connect(settings.database_url)
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT organisation_id, role, location_id, language
+                    FROM profiles
+                    WHERE id = %s AND is_deleted = false
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+            conn.close()
+            if row:
                 app_meta = {
-                    **app_meta,
-                    "organisation_id": str(profile.data["organisation_id"]),
-                    "role": profile.data["role"],
-                    "location_id": profile.data.get("location_id"),
-                    "language": profile.data.get("language") or "en",
+                    "role": row["role"] or role,
+                    "organisation_id": str(row["organisation_id"]) if row["organisation_id"] else None,
+                    "location_id": row.get("location_id"),
+                    "language": row.get("language") or "en",
                 }
-                payload = {**payload, "app_metadata": app_meta}
         except Exception:
-            pass  # Fall back to JWT values if DB lookup fails
+            pass  # Fall back to JWT claims if DB lookup fails
 
-    return payload
+    return {**payload, "app_metadata": app_meta}
 
 
 async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:

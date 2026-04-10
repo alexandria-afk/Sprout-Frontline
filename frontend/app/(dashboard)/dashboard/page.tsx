@@ -53,6 +53,7 @@ import { AnnouncementCard, proxied } from "@/components/announcements/Announceme
 import { getDashboardInsights, type AiInsight } from "@/services/ai";
 import Link from "next/link";
 import { useTranslation } from "@/lib/i18n";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 function SkeletonCard() {
@@ -830,6 +831,7 @@ function MyInbox({ isManager = false }: { isManager?: boolean }) {
 function MyShiftCard() {
   const { t } = useTranslation();
   const pathname = usePathname();
+  const { user: currentUser } = useCurrentUser();
   const [shift, setShift]           = useState<Shift | null>(null);
   const [attendance, setAttendance] = useState<AttendanceRecord | null>(null);
   const [onBreak, setOnBreak]       = useState(false);
@@ -841,14 +843,12 @@ function MyShiftCard() {
   const [breakTypeModal, setBreakTypeModal] = useState(false);
 
   const loadAttendance = useCallback(async () => {
-    const supabase = createClient();
-    const { data: { session } } = await supabase.auth.getSession();
-    const uid = session?.user?.id ?? null;
+    const uid = currentUser?.id ?? null;
     setUserId(uid);
     if (!uid) { setLoading(false); return; }
 
     // Prefer app_metadata; fall back to profile row (JWT may lag after location assignment)
-    let lid = (session?.user?.app_metadata?.location_id as string) ?? null;
+    let lid = (currentUser?.app_metadata?.location_id as string) ?? null;
     if (!lid) {
       const supabase2 = createClient();
       const { data: profile } = await supabase2
@@ -882,7 +882,7 @@ function MyShiftCard() {
       setActiveBreakId(null);
     }
     setLoading(false);
-  }, []);
+  }, [currentUser]);
 
   // Load on mount and whenever the route changes back to /dashboard (in-app navigation)
   useEffect(() => { loadAttendance(); }, [loadAttendance, pathname]);
@@ -1044,17 +1044,16 @@ function MyShiftCard() {
 // ── Mini Leaderboard ──────────────────────────────────────────────────────────
 function MiniLeaderboard({ locationId }: { locationId?: string }) {
   const { t } = useTranslation();
+  const { user: currentUser } = useCurrentUser();
   const [allEntries, setAllEntries] = useState<SafetyPoints[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function load() {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const uid = session?.user?.id ?? null;
-      // Use passed locationId if provided; otherwise fall back to session location
-      const lid = locationId ?? (session?.user?.app_metadata?.location_id as string) ?? undefined;
+      const uid = currentUser?.id ?? null;
+      // Use passed locationId if provided; otherwise fall back to currentUser location
+      const lid = locationId ?? (currentUser?.app_metadata?.location_id as string) ?? undefined;
       setCurrentUserId(uid);
       const res = await getSafetyLeaderboard(lid).catch(() => ({ data: [] as SafetyPoints[], total: 0 }));
       const sorted = [...(res.data ?? [])].sort((a, b) => b.total_points - a.total_points);
@@ -1062,7 +1061,7 @@ function MiniLeaderboard({ locationId }: { locationId?: string }) {
       setLoading(false);
     }
     load();
-  }, []);
+  }, [currentUser, locationId]);
 
   function RankMark({ rank }: { rank: number }) {
     if (rank === 1) return <Trophy className="w-4 h-4 text-yellow-500 shrink-0" />;
@@ -1362,29 +1361,19 @@ function OnboardingBanner() {
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function DashboardPage() {
   const { t } = useTranslation();
+  const { user: currentUser } = useCurrentUser();
   const [role, setRole] = useState("staff"); // default to most restrictive
   const [name, setName] = useState("there");
   const [orgId, setOrgId] = useState("");
   const [locationId, setLocationId] = useState("");
 
   useEffect(() => {
-    const supabase = createClient();
-    // getSession reads from local cache — no network call, resolves immediately
-    supabase.auth.getSession().then(({ data }) => {
-      const user = data.session?.user;
-      if (user) {
-        setRole((user.app_metadata?.role as string) ?? "staff");
-        setOrgId((user.app_metadata?.organisation_id as string) ?? "");
-        setLocationId((user.app_metadata?.location_id as string) ?? "");
-        setName(
-          (user.app_metadata?.full_name as string) ||
-          (user.user_metadata?.full_name as string) ||
-          user.email?.split("@")[0] ||
-          "there"
-        );
-      }
-    });
-  }, []);
+    if (!currentUser) return;
+    setRole(currentUser.role ?? "staff");
+    setOrgId(currentUser.app_metadata?.organisation_id ?? "");
+    setLocationId(currentUser.app_metadata?.location_id ?? "");
+    setName(currentUser.app_metadata?.full_name ?? currentUser.email ?? "there");
+  }, [currentUser]);
 
   const isStaff = role === "staff";
   const isAdmin = ["super_admin", "admin"].includes(role);

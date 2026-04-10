@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/services/supabase/server";
+import { getServerUser } from "@/services/server-auth";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { SidekickChat } from "@/components/shared/SidekickChat";
 
@@ -8,14 +8,13 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = await getServerUser();
 
   if (!user) {
     redirect("/login");
   }
 
-  const role = (user.app_metadata?.role as string) ?? "staff";
+  const role = user.role ?? "staff";
 
   return (
     <div className="flex min-h-screen">

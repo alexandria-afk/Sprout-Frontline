@@ -1,11 +1,19 @@
-import { createClient } from "@/services/supabase/client";
+import { TOKEN_COOKIE } from "@/lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+/** Read the Keycloak access token from the browser cookie (client-side only). */
+function getTokenFromCookie(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie
+    .split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(`${TOKEN_COOKIE}=`));
+  return match ? decodeURIComponent(match.slice(TOKEN_COOKIE.length + 1)) : null;
+}
+
 async function getAuthHeaders(): Promise<HeadersInit> {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  const token = data.session?.access_token;
+  const token = getTokenFromCookie();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

@@ -4,6 +4,7 @@ import { Search, Check, Loader2, Users, MapPin, User, Lock } from "lucide-react"
 import { listUsers, listLocations, type Location } from "@/services/users";
 import { createClient } from "@/services/supabase/client";
 import type { Profile } from "@/types";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import clsx from "clsx";
 
 type AssignMode = "role" | "location" | "individual";
@@ -22,6 +23,7 @@ export interface AssignPeoplePanelProps {
 }
 
 export function AssignPeoplePanel({ selected, onChange }: AssignPeoplePanelProps) {
+  const { user: currentUser } = useCurrentUser();
   const [users, setUsers]         = useState<Profile[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading]     = useState(true);
@@ -31,17 +33,18 @@ export function AssignPeoplePanel({ selected, onChange }: AssignPeoplePanelProps
   const [scopeLabel, setScopeLabel] = useState("");   // e.g. "BGC Branch"
 
   useEffect(() => {
+    if (!currentUser) return;
+    const _user = currentUser;
     async function load() {
       try {
-        const supabase = createClient();
-        const { data: { session } } = await supabase.auth.getSession();
-        const userId  = session?.user?.id ?? "";
-        const role    = (session?.user?.app_metadata?.role as string) ?? "staff";
+        const userId  = _user.id ?? "";
+        const role    = _user.role ?? "staff";
         const managerMode = role === "manager";
         setIsManager(managerMode);
 
         if (managerMode) {
           // Get manager's own profile to find their location_id
+          const supabase = createClient();
           const { data: myProfile } = await supabase
             .from("profiles")
             .select("location_id")
@@ -90,7 +93,7 @@ export function AssignPeoplePanel({ selected, onChange }: AssignPeoplePanelProps
       }
     }
     load();
-  }, []);
+  }, [currentUser]);
 
   // ── Selection helpers ────────────────────────────────────────────────────────
 

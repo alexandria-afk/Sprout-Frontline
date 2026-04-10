@@ -11,8 +11,8 @@ import {
   ClipboardList, TimerReset, TrendingUp, BarChart3,
   RefreshCw, Check, Ban, Globe, Filter,
 } from "lucide-react";
-import { createClient } from "@/services/supabase/client";
 import { listUsers, listLocations, getMyOrganisation } from "@/services/users";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { Location } from "@/services/users";
 import { AssignPeoplePanel } from "@/components/shared/AssignPeoplePanel";
 import { PositionCombobox } from "@/components/shared/PositionCombobox";
@@ -3000,6 +3000,7 @@ function StaffAvailabilityTab() {
 
 export default function ShiftsPage() {
   const { t } = useTranslation();
+  const { user: currentUser } = useCurrentUser();
   const [role, setRole] = useState<string>("staff");
   const [userId, setUserId] = useState<string>("");
   const [locationId, setLocationId] = useState<string>("");
@@ -3025,13 +3026,12 @@ export default function ShiftsPage() {
   const isAdmin = ["super_admin", "admin"].includes(role);
 
   useEffect(() => {
+    if (!currentUser) return;
+    const _user = currentUser;
     async function init() {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const meta = session?.user?.app_metadata ?? {};
-      const r = meta.role ?? "staff";
-      const uid = session?.user?.id ?? "";
-      const locId = meta.location_id ?? "";
+      const r = _user.role ?? "staff";
+      const uid = _user.id ?? "";
+      const locId = _user.app_metadata?.location_id ?? "";
       setRole(r);
       setUserId(uid);
       setLocationId(locId);
@@ -3090,7 +3090,7 @@ export default function ShiftsPage() {
         .finally(() => setSessionLoading(false));
     }
     init();
-  }, []);
+  }, [currentUser]);
 
   const MANAGER_TABS: { id: ManagerTab; label: string; icon: React.ElementType }[] = [
     { id: "roster",     label: t("shifts.roster"),     icon: Calendar      },

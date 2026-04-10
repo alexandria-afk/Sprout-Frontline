@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { ShieldCheck, CheckCircle2, XCircle, FileDown, Eye, ClipboardList } from "lucide-react";
 import Link from "next/link";
 import { apiFetch } from "@/services/api/client";
+import { getClientToken } from "@/lib/auth";
 import { clsx } from "clsx";
 import { AuditDetailModal } from "@/components/audits/AuditDetailModal";
 
@@ -43,10 +44,7 @@ export default function AuditsPage() {
 
   async function exportPdf(id: string) {
     const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-    const { createClient } = await import("@/services/supabase/client");
-    const supabase = createClient();
-    const { data } = await supabase.auth.getSession();
-    const token = data.session?.access_token;
+    const token = getClientToken();
 
     const res = await fetch(`${API_BASE}/api/v1/audits/submissions/${id}/export`, {
       headers: { Authorization: `Bearer ${token}` },

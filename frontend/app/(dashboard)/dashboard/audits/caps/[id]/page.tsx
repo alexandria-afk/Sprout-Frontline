@@ -9,6 +9,7 @@ import {
   X, ClipboardList, ExternalLink, Download,
 } from "lucide-react";
 import { getCAP, updateCAPItem, confirmCAP, dismissCAP } from "@/services/caps";
+import { getClientToken } from "@/lib/auth";
 import { listUsers } from "@/services/users";
 import { friendlyError } from "@/lib/errors";
 import type { CAP, CAPItem, CAPStatus, FollowupType, Profile } from "@/types";
@@ -372,10 +373,7 @@ export default function CAPDetailPage() {
     setDownloadingPdf(true);
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-      const { createClient } = await import("@/services/supabase/client");
-      const supabase = createClient();
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
+      const token = getClientToken();
       const res = await fetch(`${API_BASE}/api/v1/caps/${cap.id}/export`, {
         headers: { Authorization: `Bearer ${token}` },
       });

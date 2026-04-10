@@ -41,7 +41,7 @@ import {
 import { friendlyError } from "@/lib/errors";
 import { listLocations, Location } from "@/services/users";
 import { getPackageTemplates } from "@/services/onboarding";
-import { createClient } from "@/services/supabase/client";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 // ── Native (system) workflows — hard-coded, shown for visibility only ──────────
 const NATIVE_WORKFLOWS = [
@@ -87,20 +87,18 @@ const TRIGGER_TYPE_COLORS: Record<string, string> = {
 
 export default function WorkflowsPage() {
   const router = useRouter();
+  const { user: currentUser } = useCurrentUser();
   const [definitions, setDefinitions] = useState<WorkflowDefinition[]>([]);
   const [runningIds, setRunningIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [defSearch, setDefSearch] = useState("");
   const [role, setRole] = useState<string>("");
 
-  // Resolve viewer role from session
+  // Resolve viewer role from currentUser
   useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getSession().then(({ data }) => {
-      const r = (data.session?.user?.app_metadata?.role as string) ?? "";
-      setRole(r);
-    });
-  }, []);
+    if (!currentUser) return;
+    setRole(currentUser.role ?? "");
+  }, [currentUser]);
 
   // Managers can view and trigger — only admins/super_admins can create, edit, delete
   const canManage = role === "admin" || role === "super_admin";

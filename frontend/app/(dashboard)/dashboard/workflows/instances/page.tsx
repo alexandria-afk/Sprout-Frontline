@@ -9,7 +9,7 @@ import {
   WorkflowInstance,
 } from "@/services/workflows";
 import { WorkflowInstanceModal } from "@/components/workflows/WorkflowInstanceModal";
-import { createClient } from "@/services/supabase/client";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 const STATUS_OPTIONS = [
   { value: "in_progress", label: "In Progress" },
@@ -64,6 +64,7 @@ function getTriggerBadgeStyle(triggerType?: string | null) {
 
 export default function WorkflowInstancesPage() {
   const router = useRouter();
+  const { user: currentUser } = useCurrentUser();
   const [instances, setInstances] = useState<WorkflowInstance[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -74,14 +75,11 @@ export default function WorkflowInstancesPage() {
   const [role, setRole] = useState<string>("admin");
   const [dateRange, setDateRange] = useState("month");
 
-  // Resolve viewer role from session
+  // Resolve viewer role from currentUser
   useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getSession().then(({ data }) => {
-      const r = (data.session?.user?.app_metadata?.role as string) ?? "admin";
-      setRole(r);
-    });
-  }, []);
+    if (!currentUser) return;
+    setRole(currentUser.role ?? "admin");
+  }, [currentUser]);
 
   const isManager = role === "manager";
 

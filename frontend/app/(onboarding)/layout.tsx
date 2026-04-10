@@ -1,15 +1,12 @@
 import { redirect } from "next/navigation";
-import { createClient } from "@/services/supabase/server";
+import { getServerUser } from "@/services/server-auth";
 
 export default async function OnboardingLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getServerUser();
 
   if (!user) {
     redirect("/login");

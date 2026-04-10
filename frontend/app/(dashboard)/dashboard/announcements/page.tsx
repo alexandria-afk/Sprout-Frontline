@@ -14,6 +14,7 @@ import type { Announcement } from "@/types";
 import { AnnouncementCard, isVideo, proxied } from "@/components/announcements/AnnouncementCard";
 import { friendlyError } from "@/lib/errors";
 import { useTranslation } from "@/lib/i18n";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 // ── Shared ──────────────────────────────────────────────────────────────────
 const inputCls = "border border-surface-border rounded-lg px-3 py-2 text-sm text-dark focus:outline-none focus:ring-2 focus:ring-sprout-purple/40 w-full";
@@ -48,17 +49,19 @@ function MediaUploader({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
 
+  const { user: currentUser } = useCurrentUser();
+
   const handleFiles = async (files: File[]) => {
     setUploadError("");
     setUploading(true);
-    const supabase = createClient();
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
+    const userId = currentUser?.id;
+    if (!userId) {
       setUploadError("Not signed in — please refresh and try again.");
       setUploading(false);
       return;
     }
-    const userId = session.user.id;
+    // Phase 5: replace storage
+    const supabase = createClient();
     for (const file of files) {
       const ext = file.name.split(".").pop() ?? "bin";
       const mimeType = file.type || "application/octet-stream";
@@ -132,6 +135,7 @@ const ROLES = ["admin", "manager", "staff"] as const;
 type AudienceMode = "role" | "location" | "everyone";
 
 function CreateAnnouncementModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: (a: Announcement) => void }) {
+  const { user: currentUser } = useCurrentUser();
   const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting } } =
     useForm<AnnouncementFormValues>({
       resolver: zodResolver(announcementSchema),
@@ -148,16 +152,17 @@ function CreateAnnouncementModal({ onClose, onSuccess }: { onClose: () => void; 
   const selectedRoles = watch("target_roles") ?? [];
 
   useEffect(() => {
+    if (!currentUser) return;
+    const _user = currentUser;
     async function init() {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const role = (session?.user?.app_metadata?.role as string) ?? "staff";
-      const userId = session?.user?.id ?? "";
+      const role = _user.role ?? "staff";
+      const userId = _user.id ?? "";
 
       const allLocs = await listLocations().catch(() => [] as Location[]);
       setLocations(allLocs);
 
       if (role === "manager") {
+        const supabase = createClient();
         const { data: myProfile } = await supabase
           .from("profiles")
           .select("location_id")
@@ -175,7 +180,7 @@ function CreateAnnouncementModal({ onClose, onSuccess }: { onClose: () => void; 
       }
     }
     init();
-  }, []);
+  }, [currentUser]);
 
   const toggleRole = (role: string) => {
     const current = selectedRoles;
@@ -373,6 +378,7 @@ function CreateAnnouncementModal({ onClose, onSuccess }: { onClose: () => void; 
 // ── Main Page ───────────────────────────────────────────────────────────────
 export default function AnnouncementsPage() {
   const { t } = useTranslation();
+  const { user: currentUser } = useCurrentUser();
   const { announcements, total, loading, error, fetchAnnouncements, addAnnouncement, removeAnnouncement } =
     useAnnouncementStore();
   const [showCreate, setShowCreate] = useState(false);
@@ -383,10 +389,9 @@ export default function AnnouncementsPage() {
 
   useEffect(() => { fetchAnnouncements(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    createClient().auth.getSession().then(({ data }) => {
-      setRole((data.session?.user?.app_metadata?.role as string) ?? "staff");
-    });
-  }, []);
+    if (!currentUser) return;
+    setRole(currentUser.role ?? "staff");
+  }, [currentUser]);
 
   const isStaff = role === "staff";
   const visibleAnnouncements = search

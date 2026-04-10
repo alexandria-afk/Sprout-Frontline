@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2, Sliders } from "lucide-react";
-import { createClient } from "@/services/supabase/client";
 import { getMyOrganisation, updateOrgFeatureFlags } from "@/services/users";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { OrgFeatureFlags } from "@/services/users";
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -83,6 +83,7 @@ function ToggleRow({
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function FeatureSettingsPage() {
+  const { user: currentUser } = useCurrentUser();
   const [orgId, setOrgId] = useState<string>("");
   const [flags, setFlags] = useState<OrgFeatureFlags>({});
   const [loading, setLoading] = useState(true);
@@ -90,21 +91,17 @@ export default function FeatureSettingsPage() {
   const [banner, setBanner] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   useEffect(() => {
-    async function load() {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      const id = session?.user?.app_metadata?.organisation_id as string | undefined;
-      if (id) setOrgId(id);
+    if (!currentUser) return;
+    const id = currentUser.app_metadata?.organisation_id;
+    if (id) setOrgId(id);
 
-      getMyOrganisation()
-        .then(org => {
-          setFlags(org.feature_flags ?? {});
-        })
-        .catch(() => {})
-        .finally(() => setLoading(false));
-    }
-    load();
-  }, []);
+    getMyOrganisation()
+      .then(org => {
+        setFlags(org.feature_flags ?? {});
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [currentUser]);
 
   async function handleSave() {
     if (!orgId) return;

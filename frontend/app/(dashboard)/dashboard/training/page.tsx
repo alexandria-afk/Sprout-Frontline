@@ -8,7 +8,6 @@ import {
   Send, UserPlus, Upload, FileText, Loader2, Globe, X, ChevronDown,
   Brain, TrendingUp, AlertTriangle,
 } from "lucide-react";
-import { createClient } from "@/services/supabase/client";
 import {
   getMyEnrollments, listManagedCourses, getLmsAnalytics,
   publishCourse, deleteCourse, translateCourse, getKnowledgeGaps, getLearningPath,
@@ -18,6 +17,7 @@ import {
 import { EnrollStaffModal } from "./courses/_components/EnrollStaffModal";
 import clsx from "clsx";
 import { useTranslation } from "@/lib/i18n";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 
 // Status styling
 const STATUS_STYLES: Record<string, { bg: string; text: string; label: string }> = {
@@ -775,25 +775,17 @@ function TrainingOverview() {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function TrainingPage() {
+  const { user: currentUser } = useCurrentUser();
   const [role, setRole]   = useState("staff");
   const [name, setName]   = useState("there");
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    const supabase = createClient();
-    supabase.auth.getSession().then(({ data }) => {
-      const user = data.session?.user;
-      if (user) {
-        setRole((user.app_metadata?.role as string) ?? "staff");
-        setName(
-          (user.app_metadata?.full_name as string) ||
-          (user.user_metadata?.full_name as string) ||
-          user.email?.split("@")[0] || "there"
-        );
-      }
-      setReady(true);
-    });
-  }, []);
+    if (!currentUser) return;
+    setRole(currentUser.role ?? "staff");
+    setName(currentUser.app_metadata?.full_name ?? currentUser.email ?? "there");
+    setReady(true);
+  }, [currentUser]);
 
   if (!ready) return (
     <div className="p-4 md:p-6 flex flex-col gap-4">

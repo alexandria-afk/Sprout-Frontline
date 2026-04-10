@@ -1,37 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@/services/supabase/client";
-import type { User, Session } from "@supabase/supabase-js";
+
+interface CurrentUser {
+  id: string;
+  email: string;
+  role: string;
+}
 
 export function useAuth() {
-  const [user, setUser] = useState<User | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<CurrentUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const supabase = createClient();
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setSession(session);
-        setUser(session?.user ?? null);
-      }
-    );
-
-    return () => subscription.unsubscribe();
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: CurrentUser | null) => {
+        setUser(data);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, []);
 
   async function signOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
+    window.location.href = "/api/auth/signout";
   }
 
-  return { user, session, loading, signOut };
+  return { user, loading, signOut };
 }

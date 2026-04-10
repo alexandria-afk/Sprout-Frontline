@@ -1,4 +1,5 @@
 import { apiFetch } from "@/services/api/client";
+import { getClientToken } from "@/lib/auth";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -347,10 +348,7 @@ export class PublishValidationError extends Error {
 
 export async function publishWorkflow(id: string): Promise<{ success: boolean }> {
   // Can't use apiFetch directly — need to inspect 422 body for validation errors
-  const { createClient } = await import("@/services/supabase/client");
-  const supabase = createClient();
-  const { data: session } = await supabase.auth.getSession();
-  const token = session.session?.access_token;
+  const token = getClientToken();
   const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
   const res = await fetch(`${API_BASE}/api/v1/workflows/definitions/${id}/publish`, {

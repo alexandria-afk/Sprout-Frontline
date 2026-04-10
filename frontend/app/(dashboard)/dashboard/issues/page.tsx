@@ -33,6 +33,7 @@ import {
   postMessage, getTask, markTaskRead, taskSummary,
 } from "@/services/tasks";
 import { createClient } from "@/services/supabase/client";
+import { getClientToken } from "@/lib/auth";
 import { CreateTaskModal } from "@/components/tasks/CreateTaskModal";
 import type {
   Issue,
@@ -231,9 +232,7 @@ const INCIDENT_STATUS_CONFIG: Record<IncidentStatus, { label: string; color: str
 
 async function listIncidents(params: { my_team?: boolean } = {}): Promise<{ data: Incident[] }> {
   try {
-    const supabase = createClient();
-    const { data: sessionData } = await supabase.auth.getSession();
-    const token = sessionData.session?.access_token;
+    const token = getClientToken();
     const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
     const q = new URLSearchParams();
     if (params.my_team) q.set("my_team", "true");
@@ -256,9 +255,7 @@ async function listIncidents(params: { my_team?: boolean } = {}): Promise<{ data
 
 
 async function updateIncidentPatch(id: string, body: { severity?: IncidentSeverity }): Promise<Incident> {
-  const supabase = createClient();
-  const { data: sessionData } = await supabase.auth.getSession();
-  const token = sessionData.session?.access_token;
+  const token = getClientToken();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const res = await fetch(`${apiBase}/api/v1/incidents/${id}`, {
     method: "PATCH",
@@ -275,9 +272,7 @@ async function updateIncidentPatch(id: string, body: { severity?: IncidentSeveri
 }
 
 async function updateIncidentStatus(id: string, status: IncidentStatus): Promise<Incident> {
-  const supabase = createClient();
-  const { data: sessionData } = await supabase.auth.getSession();
-  const token = sessionData.session?.access_token;
+  const token = getClientToken();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const res = await fetch(`${apiBase}/api/v1/incidents/${id}/status`, {
     method: "PUT",
@@ -294,9 +289,7 @@ async function updateIncidentStatus(id: string, status: IncidentStatus): Promise
 }
 
 async function addIncidentComment(id: string, body: string): Promise<IncidentComment> {
-  const supabase = createClient();
-  const { data: sessionData } = await supabase.auth.getSession();
-  const token = sessionData.session?.access_token;
+  const token = getClientToken();
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const res = await fetch(`${apiBase}/api/v1/incidents/${id}/comments`, {
     method: "POST",
@@ -581,9 +574,7 @@ function IncidentDetailPane({
     setDownloadingPdf(true);
     try {
       const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-      const supabase = createClient();
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
+      const token = getClientToken();
       const res = await fetch(`${API_BASE}/api/v1/incidents/${incident.id}/export`, {
         headers: { Authorization: `Bearer ${token}` },
       });
