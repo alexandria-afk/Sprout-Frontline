@@ -19,8 +19,9 @@ import os
 # Make sure we're in the right directory for imports
 sys.path.insert(0, os.path.dirname(__file__))
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone, timedelta
-from services.supabase_client import get_admin_client
 from services.cap_service import CAPService
 from services.form_service import FormService
 from models.forms import (
@@ -28,6 +29,11 @@ from models.forms import (
     CreateAssignmentRequest, CreateSubmissionRequest, FormResponseItem,
     ReviewSubmissionRequest,
 )
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/frontlinerdb")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 # ── Seed constants ────────────────────────────────────────────────────────────
 ORG_ID      = "9e12ff9e-bc77-4ca2-8bfb-be7b7c1fe009"
@@ -45,7 +51,7 @@ def err(msg: str):
 
 
 async def main():
-    db = get_admin_client()
+    conn = get_conn()
     print("\n=== Audit Workflow Seed ===\n")
 
     # ── 1. Create form template ───────────────────────────────────────────────
@@ -117,31 +123,40 @@ async def main():
     # ── 2. Audit config + section weights + field scores ─────────────────────
     print("\nStep 2: Setting up audit scoring config...")
 
-    # audit_configs (passing_score=80)
-    cfg_resp = db.table("audit_configs").insert({
-        "form_template_id": template_id,
-        "passing_score": 80,
-        "is_deleted": False,
-    }).execute()
-    log(f"Audit config: passing_score=80")
+    with conn.cursor() as cur:
+        # audit_configs (passing_score=80)
+        cur.execute(
+            """
+            INSERT INTO audit_configs (form_template_id, passing_score, is_deleted)
+            VALUES (%s, %s, %s)
+            """,
+            (template_id, 80, False),
+        )
+        log("Audit config: passing_score=80")
 
-    # section weights (equal weight — 1.0 each)
-    for title, sid in section_ids.items():
-        db.table("audit_section_weights").insert({
-            "section_id": sid,
-            "weight": 1.0,
-            "is_deleted": False,
-        }).execute()
-    log(f"Section weights set (1.0 each for {len(section_ids)} sections)")
+        # section weights (equal weight — 1.0 each)
+        for title, sid in section_ids.items():
+            cur.execute(
+                """
+                INSERT INTO audit_section_weights (section_id, weight, is_deleted)
+                VALUES (%s, %s, %s)
+                """,
+                (sid, 1.0, False),
+            )
+        log(f"Section weights set (1.0 each for {len(section_ids)} sections)")
 
-    # field max scores (10 each)
-    for label, fid in field_map.items():
-        db.table("audit_field_scores").insert({
-            "field_id": fid,
-            "max_score": 10,
-            "is_deleted": False,
-        }).execute()
-    log(f"Field max scores set (10 each for {len(field_map)} fields)")
+        # field max scores (10 each)
+        for label, fid in field_map.items():
+            cur.execute(
+                """
+                INSERT INTO audit_field_scores (field_id, max_score, is_deleted)
+                VALUES (%s, %s, %s)
+                """,
+                (fid, 10, False),
+            )
+        log(f"Field max scores set (10 each for {len(field_map)} fields)")
+
+    conn.commit()
 
     # ── 3. Create form assignment for staff at this location ──────────────────
     print("\nStep 3: Creating form assignment...")
@@ -198,6 +213,7 @@ async def main():
     cap_record = await CAPService.get_cap_by_submission(submission_id, ORG_ID)
     if not cap_record:
         err("CAP was not auto-generated — check form_service.review_submission CAP logic")
+        conn.close()
         return
 
     cap_id = cap_record["id"]
@@ -216,21 +232,27 @@ async def main():
         print(f"     [{ftype:10s}] {item.get('field_label','?')!r}  priority={item.get('followup_priority','?')}")
 
     # If any item has wrong type, manually fix it based on label
-    for item in items:
-        label = item.get("field_label", "").lower()
-        expected = None
-        if "fire" in label:
-            expected = "incident"
-        elif "fryer" in label or "equipment" in label:
-            expected = "issue"
-        elif "documentation" in label or "training" in label:
-            expected = "task"
-        if expected and item.get("followup_type") != expected:
-            db.table("cap_items").update({
-                "followup_type": expected,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", item["id"]).execute()
-            log(f"Corrected followup_type on '{item.get('field_label')}': {item.get('followup_type')} → {expected}")
+    with conn.cursor() as cur:
+        for item in items:
+            label = item.get("field_label", "").lower()
+            expected = None
+            if "fire" in label:
+                expected = "incident"
+            elif "fryer" in label or "equipment" in label:
+                expected = "issue"
+            elif "documentation" in label or "training" in label:
+                expected = "task"
+            if expected and item.get("followup_type") != expected:
+                cur.execute(
+                    """
+                    UPDATE cap_items
+                    SET followup_type = %s, updated_at = %s
+                    WHERE id = %s
+                    """,
+                    (expected, datetime.now(timezone.utc), item["id"]),
+                )
+                log(f"Corrected followup_type on '{item.get('field_label')}': {item.get('followup_type')} → {expected}")
+    conn.commit()
 
     # ── 7. Manager confirms CAP → spawns task, issue, incident ───────────────
     print("\nStep 7: Manager confirms CAP → spawning entities...")
@@ -253,8 +275,18 @@ async def main():
     print()
 
     # Fetch and show spawned entity IDs
-    final_items_resp = db.table("cap_items").select("*").eq("cap_id", cap_id).eq("is_deleted", False).execute()
-    for item in (final_items_resp.data or []):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT followup_type, field_label, spawned_task_id, spawned_issue_id, spawned_incident_id
+            FROM cap_items
+            WHERE cap_id = %s AND is_deleted = FALSE
+            """,
+            (cap_id,),
+        )
+        final_items = cur.fetchall()
+
+    for item in final_items:
         spawned = []
         if item.get("spawned_task_id"):
             spawned.append(f"task:{item['spawned_task_id'][:8]}…")
@@ -264,6 +296,8 @@ async def main():
             spawned.append(f"incident:{item['spawned_incident_id'][:8]}…")
         if spawned:
             print(f"  ↳ [{item.get('followup_type'):10s}] '{item.get('field_label')}' → {', '.join(spawned)}")
+
+    conn.close()
 
 
 if __name__ == "__main__":

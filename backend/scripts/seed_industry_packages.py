@@ -12,7 +12,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
-from services.supabase_client import get_supabase
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/frontlinerdb")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
 # ── QSR Template Content ───────────────────────────────────────────────────────
@@ -1406,28 +1412,35 @@ QSR_REPAIR_MANUALS = [
 
 
 def seed():
-    supabase = get_supabase()
+    conn = get_conn()
 
     print("Seeding QSR industry package...")
 
-    # Upsert package
-    pkg_res = supabase.table("industry_packages").upsert(
-        {
-            "industry_code": "qsr",
-            "name": "Quick Service Restaurant",
-            "description": "Complete operations package for QSR and fast food stores. Includes checklists, audits, workflows, and training modules aligned with Philippine HACCP and DOLE standards.",
-            "version": 1,
-            "is_active": True,
-        },
-        on_conflict="industry_code,version",
-    ).execute()
+    with conn.cursor() as cur:
+        # Upsert package
+        cur.execute(
+            """
+            INSERT INTO industry_packages (industry_code, name, description, version, is_active)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (industry_code, version) DO UPDATE SET
+                name        = EXCLUDED.name,
+                description = EXCLUDED.description,
+                is_active   = EXCLUDED.is_active
+            RETURNING id
+            """,
+            (
+                "qsr",
+                "Quick Service Restaurant",
+                "Complete operations package for QSR and fast food stores. Includes checklists, audits, workflows, and training modules aligned with Philippine HACCP and DOLE standards.",
+                1,
+                True,
+            ),
+        )
+        package_id = cur.fetchone()["id"]
+        print(f"  Package ID: {package_id}")
 
-    package = pkg_res.data[0]
-    package_id = package["id"]
-    print(f"  Package ID: {package_id}")
-
-    # Delete old items for this package (clean re-seed)
-    supabase.table("template_items").delete().eq("package_id", package_id).execute()
+        # Delete old items for this package (clean re-seed)
+        cur.execute("DELETE FROM template_items WHERE package_id = %s", (package_id,))
 
     all_items = (
         QSR_FORMS +
@@ -1438,27 +1451,38 @@ def seed():
         QSR_REPAIR_MANUALS
     )
 
-    inserted = 0
-    for item in all_items:
-        supabase.table("template_items").insert({
-            "package_id": package_id,
-            "category": item["category"],
-            "name": item["name"],
-            "description": item.get("description"),
-            "content": item["content"],
-            "is_recommended": item.get("is_recommended", True),
-            "sort_order": item.get("sort_order", 0),
-        }).execute()
-        inserted += 1
-        print(f"  [{item['category']}] {item['name']}")
+    with conn.cursor() as cur:
+        inserted = 0
+        for item in all_items:
+            cur.execute(
+                """
+                INSERT INTO template_items
+                    (package_id, category, name, description, content, is_recommended, sort_order)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    package_id,
+                    item.get("category"),
+                    item["name"],
+                    item.get("description"),
+                    json.dumps(item["content"]),
+                    item.get("is_recommended", True),
+                    item.get("sort_order", 0),
+                ),
+            )
+            inserted += 1
+            print(f"  [{item.get('category')}] {item['name']}")
+
+    conn.commit()
+    conn.close()
 
     print(f"\n✓ Seeded {inserted} templates for QSR package")
-    print(f"  Forms/Checklists/Audits: {sum(1 for i in all_items if i['category'] in ('form','checklist','audit'))}")
-    print(f"  Issue Categories:        {sum(1 for i in all_items if i['category'] == 'issue_category')}")
-    print(f"  Workflows:               {sum(1 for i in all_items if i['category'] == 'workflow')}")
-    print(f"  Training Modules:        {sum(1 for i in all_items if i['category'] == 'training_module')}")
-    print(f"  Shift Templates:         {sum(1 for i in all_items if i['category'] == 'shift_template')}")
-    print(f"  Repair Manuals:          {sum(1 for i in all_items if i['category'] == 'repair_manual')}")
+    print(f"  Forms/Checklists/Audits: {sum(1 for i in all_items if i.get('category') in ('form','checklist','audit'))}")
+    print(f"  Issue Categories:        {sum(1 for i in all_items if i.get('category') == 'issue_category')}")
+    print(f"  Workflows:               {sum(1 for i in all_items if i.get('category') == 'workflow')}")
+    print(f"  Training Modules:        {sum(1 for i in all_items if i.get('category') == 'training_module')}")
+    print(f"  Shift Templates:         {sum(1 for i in all_items if i.get('category') == 'shift_template')}")
+    print(f"  Repair Manuals:          {sum(1 for i in all_items if i.get('category') == 'repair_manual')}")
 
 
 if __name__ == "__main__":

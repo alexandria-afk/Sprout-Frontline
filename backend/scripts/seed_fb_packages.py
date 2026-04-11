@@ -13,7 +13,14 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.supabase_client import get_supabase
+import json
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/frontlinerdb")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
 # ── FORMS ─────────────────────────────────────────────────────────────────────
@@ -3142,49 +3149,62 @@ PACKAGES = [
 
 
 def seed():
-    supabase = get_supabase()
+    conn = get_conn()
 
     for pkg in PACKAGES:
         print(f"\nSeeding {pkg['name']} ({pkg['code']})...")
 
-        pkg_res = supabase.table("industry_packages").upsert(
-            {
-                "industry_code": pkg["code"],
-                "name": pkg["name"],
-                "description": pkg["description"],
-                "version": 1,
-                "is_active": True,
-            },
-            on_conflict="industry_code,version",
-        ).execute()
+        with conn.cursor() as cur:
+            # Upsert package
+            cur.execute(
+                """
+                INSERT INTO industry_packages (industry_code, name, description, version, is_active)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (industry_code, version) DO UPDATE SET
+                    name        = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    is_active   = EXCLUDED.is_active
+                RETURNING id
+                """,
+                (pkg["code"], pkg["name"], pkg["description"], 1, True),
+            )
+            package_id = cur.fetchone()["id"]
+            print(f"  Package ID: {package_id}")
 
-        package_id = pkg_res.data[0]["id"]
-        print(f"  Package ID: {package_id}")
+            # Clean re-seed
+            cur.execute("DELETE FROM template_items WHERE package_id = %s", (package_id,))
 
-        # Clean re-seed
-        supabase.table("template_items").delete().eq("package_id", package_id).execute()
+            items = pkg["items_fn"]()
+            inserted = 0
+            by_cat: dict[str, int] = {}
 
-        items = pkg["items_fn"]()
-        inserted = 0
-        by_cat: dict[str, int] = {}
+            for item in items:
+                cur.execute(
+                    """
+                    INSERT INTO template_items
+                        (package_id, category, name, description, content, is_recommended, sort_order)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        package_id,
+                        item.get("category"),
+                        item["name"],
+                        item.get("description"),
+                        json.dumps(item["content"]),
+                        item.get("is_recommended", True),
+                        item.get("sort_order", 0),
+                    ),
+                )
+                inserted += 1
+                cat = item.get("category", "unknown")
+                by_cat[cat] = by_cat.get(cat, 0) + 1
 
-        for item in items:
-            supabase.table("template_items").insert({
-                "package_id": package_id,
-                "category": item["category"],
-                "name": item["name"],
-                "description": item.get("description"),
-                "content": item["content"],
-                "is_recommended": item.get("is_recommended", True),
-                "sort_order": item.get("sort_order", 0),
-            }).execute()
-            inserted += 1
-            by_cat[item["category"]] = by_cat.get(item["category"], 0) + 1
-
+        conn.commit()
         print(f"  ✓ {inserted} templates inserted")
         for cat, count in sorted(by_cat.items()):
             print(f"    [{cat}] {count}")
 
+    conn.close()
     print("\n✓ All F&B packages seeded.")
 
 

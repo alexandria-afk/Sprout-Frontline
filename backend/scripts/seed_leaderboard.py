@@ -8,21 +8,31 @@ Usage (from backend/):
 import sys, os, random
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.supabase_client import get_supabase
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://localhost/frontlinerdb")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 # ── Target org (Renegade Burgers) ─────────────────────────────────────────────
 ORG_NAME_CONTAINS = "Renegade"
 
 def main():
-    db = get_supabase()
+    conn = get_conn()
 
-    # Find the org
-    orgs_resp = db.table("organisations").select("id, name").execute()
-    orgs = [o for o in (orgs_resp.data or []) if ORG_NAME_CONTAINS.lower() in o["name"].lower()]
+    with conn.cursor() as cur:
+        # Find the org
+        cur.execute("SELECT id, name FROM organisations")
+        all_orgs = cur.fetchall()
+
+    orgs = [o for o in all_orgs if ORG_NAME_CONTAINS.lower() in o["name"].lower()]
     if not orgs:
         print(f"No org matching '{ORG_NAME_CONTAINS}' found. Available:")
-        for o in (orgs_resp.data or []):
+        for o in all_orgs:
             print(f"  - {o['name']} ({o['id']})")
+        conn.close()
         return
 
     org = orgs[0]
@@ -30,27 +40,34 @@ def main():
     print(f"Seeding org: {org['name']} ({org_id})")
 
     # Fetch all active profiles in the org
-    profiles_resp = (
-        db.table("profiles")
-        .select("id, full_name, role, location_id")
-        .eq("organisation_id", org_id)
-        .eq("is_deleted", False)
-        .execute()
-    )
-    profiles = profiles_resp.data or []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, full_name, role, location_id
+            FROM profiles
+            WHERE organisation_id = %s AND is_deleted = FALSE
+            """,
+            (org_id,),
+        )
+        profiles = cur.fetchall()
+
     if not profiles:
         print("No profiles found in org.")
+        conn.close()
         return
     print(f"Found {len(profiles)} profiles.")
 
     # Fetch existing user_points rows
-    existing_resp = (
-        db.table("user_points")
-        .select("user_id, total_points")
-        .eq("organisation_id", org_id)
-        .execute()
-    )
-    existing = {r["user_id"]: r["total_points"] for r in (existing_resp.data or [])}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT user_id, total_points
+            FROM user_points
+            WHERE organisation_id = %s
+            """,
+            (org_id,),
+        )
+        existing = {r["user_id"]: r["total_points"] for r in cur.fetchall()}
 
     ROLE_RANGES = {
         "super_admin": (800, 1500),
@@ -83,32 +100,66 @@ def main():
                 "tasks_completed": random.randint(0, 30),
             })
 
-    if to_insert:
-        db.table("user_points").insert(to_insert).execute()
-        print(f"  Inserted {len(to_insert)} new rows.")
-    if to_update:
-        for row in to_update:
-            db.table("user_points").update({"total_points": row["total_points"]}).eq("user_id", row["user_id"]).execute()
-        print(f"  Updated {len(to_update)} zero-point rows.")
+    with conn.cursor() as cur:
+        if to_insert:
+            cur.executemany(
+                """
+                INSERT INTO user_points (
+                    organisation_id, user_id, total_points,
+                    issues_reported, issues_resolved,
+                    checklists_completed, tasks_completed
+                )
+                VALUES (
+                    %(organisation_id)s, %(user_id)s, %(total_points)s,
+                    %(issues_reported)s, %(issues_resolved)s,
+                    %(checklists_completed)s, %(tasks_completed)s
+                )
+                ON CONFLICT DO NOTHING
+                """,
+                to_insert,
+            )
+            print(f"  Inserted {len(to_insert)} new rows.")
+
+        if to_update:
+            for row in to_update:
+                cur.execute(
+                    """
+                    UPDATE user_points
+                    SET total_points = %s
+                    WHERE user_id = %s
+                    """,
+                    (row["total_points"], row["user_id"]),
+                )
+            print(f"  Updated {len(to_update)} zero-point rows.")
+
+    conn.commit()
+
     if not to_insert and not to_update:
         print("  All users already have points — no changes needed.")
 
     # Print leaderboard
-    result = (
-        db.table("user_points")
-        .select("total_points, profiles!user_id(full_name, role)")
-        .eq("organisation_id", org_id)
-        .order("total_points", desc=True)
-        .limit(10)
-        .execute()
-    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT up.total_points, p.full_name, p.role
+            FROM user_points up
+            JOIN profiles p ON p.id = up.user_id
+            WHERE up.organisation_id = %s
+            ORDER BY up.total_points DESC
+            LIMIT 10
+            """,
+            (org_id,),
+        )
+        leaderboard = cur.fetchall()
+
     print(f"\n── Leaderboard — {org['name']} (top 10) ──")
-    for i, row in enumerate(result.data or [], 1):
-        prof = row.get("profiles") or {}
-        name = prof.get("full_name", "Unknown")
-        role = prof.get("role", "?")
+    for i, row in enumerate(leaderboard, 1):
+        name = row.get("full_name", "Unknown")
+        role = row.get("role", "?")
         pts  = row["total_points"]
         print(f"  {i:>2}. {name:<30} ({role:<11}) {pts:>5} pts")
+
+    conn.close()
 
 if __name__ == "__main__":
     main()
