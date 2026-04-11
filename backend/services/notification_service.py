@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from services.supabase_client import get_supabase
+from services.db import _get_pool, row as db_row, rows as db_rows, execute_returning
 
 logger = logging.getLogger(__name__)
 
@@ -74,37 +74,46 @@ async def notify(
     Create a notification for a single user.
     If send_push=True, also attempts FCM push if the user has an fcm_token.
     """
-    db = get_supabase()
-    row: dict = {
-        "organisation_id": org_id,
-        "recipient_user_id": recipient_user_id,
-        "type": type,
-        "title": title,
-    }
-    if body:
-        row["body"] = body
-    if entity_type:
-        row["entity_type"] = entity_type
-    if entity_id:
-        row["entity_id"] = entity_id
-
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
-        resp = db.table("notifications").insert(row).execute()
-        notif = resp.data[0] if resp.data else None
+        notif = execute_returning(
+            conn,
+            """
+            INSERT INTO notifications
+                (organisation_id, recipient_user_id, type, title, body, entity_type, entity_id)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING *
+            """,
+            (
+                org_id,
+                recipient_user_id,
+                type,
+                title,
+                body,
+                entity_type,
+                entity_id,
+            ),
+        )
+        conn.commit()
     except Exception as e:
+        conn.rollback()
         logger.error(f"Failed to insert notification: {e}")
+        pool.putconn(conn)
         return None
 
     if send_push and notif:
         try:
-            profile_resp = (
-                db.table("profiles")
-                .select("fcm_token")
-                .eq("id", recipient_user_id)
-                .maybe_single()
-                .execute()
+            profile = db_row(
+                conn,
+                """
+                SELECT fcm_token
+                FROM profiles
+                WHERE id = %s
+                """,
+                (recipient_user_id,),
             )
-            fcm_token = (profile_resp.data or {}).get("fcm_token")
+            fcm_token = (profile or {}).get("fcm_token")
             if fcm_token:
                 push_data: dict = {"type": type}
                 if entity_type:
@@ -112,14 +121,27 @@ async def notify(
                 if entity_id:
                     push_data["entity_id"] = entity_id
                 _send_push(fcm_token, title, body or "", push_data)
-                db.table("notifications").update({
-                    "push_sent": True,
-                    "push_sent_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", notif["id"]).execute()
+                execute_returning(
+                    conn,
+                    """
+                    UPDATE notifications
+                    SET push_sent = TRUE,
+                        push_sent_at = %s
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    (
+                        datetime.now(timezone.utc),
+                        notif["id"],
+                    ),
+                )
+                conn.commit()
         except Exception as e:
+            conn.rollback()
             logger.warning(f"Push failed for user {recipient_user_id}: {e}")
 
-    return notif
+    pool.putconn(conn)
+    return dict(notif) if notif else None
 
 
 async def notify_role(
@@ -138,23 +160,42 @@ async def notify_role(
     Notify all active users with a given role, optionally scoped to a location.
     Returns count of notifications created.
     """
-    db = get_supabase()
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
-        q = (
-            db.table("profiles")
-            .select("id")
-            .eq("organisation_id", org_id)
-            .eq("role", role)
-            .eq("is_deleted", False)
-            .eq("is_active", True)
-        )
         if location_id:
-            q = q.eq("location_id", location_id)
-        users_resp = q.execute()
-        users = users_resp.data or []
+            users = db_rows(
+                conn,
+                """
+                SELECT id
+                FROM profiles
+                WHERE organisation_id = %s
+                  AND role = %s
+                  AND location_id = %s
+                  AND is_deleted = FALSE
+                  AND is_active = TRUE
+                """,
+                (org_id, role, location_id),
+            )
+        else:
+            users = db_rows(
+                conn,
+                """
+                SELECT id
+                FROM profiles
+                WHERE organisation_id = %s
+                  AND role = %s
+                  AND is_deleted = FALSE
+                  AND is_active = TRUE
+                """,
+                (org_id, role),
+            )
     except Exception as e:
         logger.error(f"notify_role: failed to fetch users: {e}")
+        pool.putconn(conn)
         return 0
+    finally:
+        pool.putconn(conn)
 
     count = 0
     for user in users:
@@ -188,22 +229,27 @@ async def notify_user_manager(
     Notify the user's direct manager (reports_to).
     Falls back to notifying any manager at the user's location if reports_to is unset.
     """
-    db = get_supabase()
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
-        profile_resp = (
-            db.table("profiles")
-            .select("reports_to, location_id")
-            .eq("id", user_id)
-            .eq("is_deleted", False)
-            .maybe_single()
-            .execute()
+        profile = db_row(
+            conn,
+            """
+            SELECT reports_to, location_id
+            FROM profiles
+            WHERE id = %s
+              AND is_deleted = FALSE
+            """,
+            (user_id,),
         )
-        profile = profile_resp.data or {}
-        reports_to = profile.get("reports_to")
-        location_id = profile.get("location_id")
+        reports_to = (profile or {}).get("reports_to")
+        location_id = (profile or {}).get("location_id")
     except Exception as e:
         logger.error(f"notify_user_manager: fetch profile failed: {e}")
+        pool.putconn(conn)
         return None
+    finally:
+        pool.putconn(conn)
 
     if reports_to:
         return await notify(

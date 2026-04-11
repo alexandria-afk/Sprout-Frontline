@@ -31,27 +31,30 @@ logger = logging.getLogger(__name__)
 def _reset_stuck_provisioning_sessions():
     """Reset any onboarding sessions that were left in 'provisioning' state by a server crash/restart."""
     try:
-        from services.supabase_client import get_supabase
-        sb = get_supabase()
-        sessions = sb.table("onboarding_sessions").select("id,launch_progress,updated_at").execute()
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
-        reset_count = 0
-        for s in (sessions.data or []):
-            progress = s.get("launch_progress") or {}
-            if progress.get("status") == "provisioning":
-                try:
-                    updated_at = datetime.fromisoformat((s.get("updated_at") or "").replace("Z", "+00:00"))
-                    if updated_at < cutoff:
-                        sb.table("onboarding_sessions").update({
-                            "launch_progress": {
-                                **progress,
-                                "status": "failed",
-                                "error": "Provisioning was interrupted (server restart). Click Retry to try again.",
-                            }
-                        }).eq("id", s["id"]).execute()
-                        reset_count += 1
-                except Exception:
-                    pass
+        import json
+        from services.db import _get_pool, rows, execute
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            sessions = rows(conn, "SELECT id, launch_progress, updated_at FROM onboarding_sessions", ())
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+            reset_count = 0
+            for s in sessions:
+                progress = s.get("launch_progress") or {}
+                if isinstance(progress, str):
+                    progress = json.loads(progress)
+                if progress.get("status") == "provisioning":
+                    try:
+                        updated_at = s.get("updated_at")
+                        if updated_at and (updated_at if isinstance(updated_at, datetime) else datetime.fromisoformat(str(updated_at).replace("Z", "+00:00"))) < cutoff:
+                            new_progress = json.dumps({**progress, "status": "failed", "error": "Provisioning was interrupted (server restart). Click Retry to try again."})
+                            execute(conn, "UPDATE onboarding_sessions SET launch_progress = %s WHERE id = %s", (new_progress, s["id"]))
+                            reset_count += 1
+                    except Exception:
+                        pass
+            conn.commit()
+        finally:
+            pool.putconn(conn)
         if reset_count:
             logger.info(f"Reset {reset_count} stuck provisioning session(s) on startup.")
     except Exception as e:

@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Optional
 
+from services.db import _get_pool, execute
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,20 +26,36 @@ def log_ai_request(
 ) -> None:
     """Write one row to ai_request_log. Swallows all exceptions."""
     try:
-        from services.supabase_client import get_admin_client
-        supabase = get_admin_client()
-        supabase.table("ai_request_log").insert({
-            "feature": feature,
-            "provider": "anthropic",
-            "model": model,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "latency_ms": latency_ms,
-            "success": success,
-            "organisation_id": org_id,
-            "user_id": user_id,
-            "error_message": error_message,
-        }).execute()
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            execute(
+                conn,
+                """
+                INSERT INTO ai_request_log
+                    (feature, provider, model, input_tokens, output_tokens,
+                     latency_ms, success, organisation_id, user_id, error_message)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    feature,
+                    "anthropic",
+                    model,
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                    success,
+                    org_id,
+                    user_id,
+                    error_message,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            pool.putconn(conn)
     except Exception as e:
         logger.debug(f"ai_logger: failed to log request: {e}")
 

@@ -7,7 +7,7 @@ Usage:
     system = get_industry_context(org_id) + BASE_SYSTEM_PROMPT
 """
 
-from services.supabase_client import get_supabase
+from services.db import _get_pool, row as db_row
 
 _INDUSTRY_LABELS: dict[str, str] = {
     "qsr":                    "Quick Service Restaurant (QSR) / Fast Food",
@@ -36,17 +36,24 @@ def get_industry_context(org_id: str | None) -> str:
     if not org_id:
         return ""
     try:
-        res = (
-            get_supabase()
-            .table("organisations")
-            .select("industry_code")
-            .eq("id", org_id)
-            .maybe_single()
-            .execute()
-        )
-        if not res.data:
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            result = db_row(
+                conn,
+                """
+                SELECT industry_code
+                FROM organisations
+                WHERE id = %s::uuid
+                """,
+                (org_id,),
+            )
+        finally:
+            pool.putconn(conn)
+
+        if not result:
             return ""
-        code = (res.data.get("industry_code") or "").strip()
+        code = (result.get("industry_code") or "").strip()
         if not code:
             return ""
         label = _INDUSTRY_LABELS.get(code, code)
