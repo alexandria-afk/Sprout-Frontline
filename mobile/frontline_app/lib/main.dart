@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:frontline_app/core/config/app_config.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
 import 'package:frontline_app/core/offline/sync_service.dart';
 import 'package:frontline_app/core/router/app_router.dart';
@@ -15,12 +13,6 @@ Future<void> main() async {
 
   // Initialize local offline storage
   await HiveService.init();
-
-  // Initialize Supabase — credentials passed via --dart-define at build time
-  await Supabase.initialize(
-    url: AppConfig.supabaseUrl,
-    anonKey: AppConfig.supabaseAnonKey,
-  );
 
   runApp(
     // ProviderScope is the Riverpod root — must wrap the entire app

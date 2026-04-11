@@ -22,8 +22,9 @@ dependencies:
   # HTTP client
   dio: ^5.7.0
 
-  # Supabase
-  supabase_flutter: ^2.9.0
+  # Auth
+  flutter_appauth: ^8.0.1
+  jwt_decoder: ^2.0.1
 
   # Offline / local storage
   hive_flutter: ^1.1.0

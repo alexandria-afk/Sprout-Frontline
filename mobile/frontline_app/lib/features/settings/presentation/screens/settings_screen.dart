@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/i18n/language_provider.dart';
 import 'package:frontline_app/core/api/dio_client.dart';
 import 'package:frontline_app/l10n/app_localizations.dart';
+import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -22,7 +22,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       await ref.read(localeProvider.notifier).setLocale(locale);
 
       // Persist to server (best-effort — don't block on failure)
-      final userId = Supabase.instance.client.auth.currentUser?.id;
+      final userId = ref.read(currentUserIdProvider).valueOrNull;
       if (userId != null) {
         try {
           await DioClient.instance.patch(

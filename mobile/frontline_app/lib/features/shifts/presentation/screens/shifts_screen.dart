@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/auth/role_provider.dart';
+import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 import 'package:frontline_app/core/theme/app_theme.dart';
 import 'package:frontline_app/features/shifts/data/models/shift_models.dart';
 import 'package:frontline_app/features/shifts/providers/shifts_provider.dart';
@@ -693,8 +693,7 @@ class _SwapCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final currentUserId =
-        Supabase.instance.client.auth.currentUser?.id ?? '';
+    final currentUserId = ref.watch(currentUserIdProvider).value ?? '';
     final isIncoming = swap.targetUserId == currentUserId &&
         swap.status == 'pending_peer';
 

@@ -1,6 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
+import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 import 'package:frontline_app/features/ai_insights/data/models/ai_insight_models.dart';
 import 'package:frontline_app/features/ai_insights/data/repositories/ai_insights_repository.dart';
 
@@ -18,8 +18,15 @@ final aiInsightsProvider =
 );
 
 class AIInsightsNotifier extends AsyncNotifier<AIInsightsResponse> {
+  String _userId = 'anon';
+
   @override
-  Future<AIInsightsResponse> build() => _load();
+  Future<AIInsightsResponse> build() async {
+    // Resolve user ID once at build time (safe async in AsyncNotifier.build).
+    final repo = ref.read(authRepositoryProvider);
+    _userId = (await repo.getCurrentUserId()) ?? 'anon';
+    return _load();
+  }
 
   Future<AIInsightsResponse> _load({bool refresh = false}) async {
     final cached = _fromCache();
@@ -41,8 +48,7 @@ class AIInsightsNotifier extends AsyncNotifier<AIInsightsResponse> {
 
   // ── Hive cache (scoped by user ID) ────────────────────────────────────
 
-  String get _cacheKey =>
-      'ai_insights_${Supabase.instance.client.auth.currentUser?.id ?? 'anon'}';
+  String get _cacheKey => 'ai_insights_$_userId';
 
   AIInsightsResponse? _fromCache() {
     final box = HiveService.insightsCache;
@@ -74,11 +80,17 @@ final dismissedInsightsProvider =
 );
 
 class DismissedInsightsNotifier extends Notifier<Set<String>> {
-  @override
-  Set<String> build() => _loadDismissed();
+  String _userId = 'anon';
 
-  String get _dismissKey =>
-      'dismissed_insights_${Supabase.instance.client.auth.currentUser?.id ?? 'anon'}';
+  @override
+  Set<String> build() {
+    // Read the cached user ID from the FutureProvider's last known value.
+    // Falls back to 'anon' until the async value resolves.
+    _userId = ref.watch(currentUserIdProvider).valueOrNull ?? 'anon';
+    return _loadDismissed();
+  }
+
+  String get _dismissKey => 'dismissed_insights_$_userId';
 
   Set<String> _loadDismissed() {
     final box = HiveService.insightsCache;

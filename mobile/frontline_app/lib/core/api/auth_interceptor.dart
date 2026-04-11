@@ -1,21 +1,22 @@
 import 'package:dio/dio.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:frontline_app/core/auth/auth_repository.dart';
 import 'package:frontline_app/core/api/dio_client.dart';
 
-/// Injects the Supabase access token into every request.
+/// Injects the Keycloak access token into every request.
 /// On 401, attempts a token refresh then retries once.
-/// If refresh fails, signs the user out.
+/// If refresh fails, clears stored tokens.
 class AuthInterceptor extends Interceptor {
+  final AuthRepository _repo = AuthRepository();
   bool _isRefreshing = false;
 
   @override
   void onRequest(
     RequestOptions options,
     RequestInterceptorHandler handler,
-  ) {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session != null) {
-      options.headers['Authorization'] = 'Bearer ${session.accessToken}';
+  ) async {
+    final token = await _repo.getAccessToken();
+    if (token != null) {
+      options.headers['Authorization'] = 'Bearer $token';
     }
     handler.next(options);
   }
@@ -28,22 +29,16 @@ class AuthInterceptor extends Interceptor {
     if (err.response?.statusCode == 401 && !_isRefreshing) {
       _isRefreshing = true;
       try {
-        final refreshed =
-            await Supabase.instance.client.auth.refreshSession();
-        if (refreshed.session != null) {
-          // Retry original request with new token
+        final newToken = await _repo.refreshAccessToken();
+        if (newToken != null) {
           final opts = err.requestOptions;
-          opts.headers['Authorization'] =
-              'Bearer ${refreshed.session!.accessToken}';
+          opts.headers['Authorization'] = 'Bearer $newToken';
           // Use the shared DioClient instance (correct baseUrl + options).
           // _isRefreshing is still true here, so no infinite retry.
           final response = await DioClient.instance.fetch(opts);
           handler.resolve(response);
           return;
         }
-      } catch (_) {
-        // Refresh failed — sign out
-        await Supabase.instance.client.auth.signOut();
       } finally {
         _isRefreshing = false;
       }

@@ -1,48 +1,43 @@
-import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/core/auth/auth_repository.dart';
 import 'package:frontline_app/core/offline/hive_service.dart';
 
-final authRepositoryProvider = Provider<AuthRepository>((ref) {
-  return AuthRepository();
-});
+final authRepositoryProvider = Provider<AuthRepository>((ref) => AuthRepository());
 
-/// Tracks the current Supabase session.
-final authSessionProvider = StateNotifierProvider<AuthNotifier, AsyncValue<Session?>>(
+/// True when a valid (or refreshable) token is in secure storage.
+final authSessionProvider = StateNotifierProvider<AuthNotifier, AsyncValue<bool>>(
   (ref) => AuthNotifier(ref.read(authRepositoryProvider)),
 );
 
-class AuthNotifier extends StateNotifier<AsyncValue<Session?>> {
+class AuthNotifier extends StateNotifier<AsyncValue<bool>> {
   final AuthRepository _repo;
-  late final StreamSubscription<AuthState> _authSub;
 
   AuthNotifier(this._repo) : super(const AsyncLoading()) {
-    // Hydrate from current session immediately
-    state = AsyncData(_repo.currentSession);
-    // Listen to auth state changes (sign in / sign out / token refresh)
-    _authSub = _repo.authStateChanges.listen((event) {
-      state = AsyncData(event.session);
-    });
+    _init();
   }
 
-  @override
-  void dispose() {
-    _authSub.cancel();
-    super.dispose();
+  Future<void> _init() async {
+    state = AsyncData(await _repo.isSignedIn());
   }
 
-  Future<void> signIn(String email, String password) async {
+  /// Launches browser for Keycloak login (PKCE flow).
+  Future<void> signIn() async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
-      final res = await _repo.signIn(email, password);
-      return res.session;
+      await _repo.signIn();
+      return true;
     });
   }
 
   Future<void> signOut() async {
     await HiveService.clearUserCaches();
     await _repo.signOut();
-    state = const AsyncData(null);
+    state = const AsyncData(false);
   }
 }
+
+/// Provides the current user's ID (sub claim) from the JWT.
+final currentUserIdProvider = FutureProvider<String?>((ref) async {
+  final repo = ref.read(authRepositoryProvider);
+  return repo.getCurrentUserId();
+});

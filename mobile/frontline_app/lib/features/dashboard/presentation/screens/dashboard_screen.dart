@@ -5,7 +5,6 @@ import 'package:intl/intl.dart';
 import 'package:dio/dio.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:frontline_app/core/api/dio_client.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:frontline_app/features/auth/providers/auth_provider.dart';
 import 'package:frontline_app/features/dashboard/providers/dashboard_provider.dart';
 import 'package:frontline_app/features/tasks/providers/tasks_provider.dart';
@@ -1666,8 +1665,7 @@ class _LeaderboardEntries extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final asyncEntries = ref.watch(leaderboardEntriesProvider(configId));
-    final currentUserId =
-        Supabase.instance.client.auth.currentUser?.id ?? '';
+    final currentUserId = ref.watch(currentUserIdProvider).value ?? '';
 
     return asyncEntries.when(
       loading: () => const SizedBox.shrink(),
