@@ -32,7 +32,14 @@ class Settings(BaseSettings):
 
     # ── Backend ───────────────────────────────────────────────────────────────
     backend_secret_key: str = "dev-secret-change-me"
-    allowed_origins: list[str] = ["http://localhost:3000"]
+    allowed_origins: list[str] = [
+        "http://localhost:3000",
+        "http://0.0.0.0:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://0.0.0.0:3001",
+        "http://127.0.0.1:3001",
+    ]
     environment: str = "development"
     rate_limit_per_minute: int = 60
     frontend_url: str = "http://localhost:3000"

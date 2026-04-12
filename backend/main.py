@@ -23,6 +23,7 @@ from routes import audit_trail
 from routes import shifts
 from routes import onboarding
 from routes import inbox
+from routes import chat
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ app.include_router(audit_trail.router,       prefix="/api/v1/settings",         
 app.include_router(shifts.router,            prefix="/api/v1/shifts",              tags=["shifts"])
 app.include_router(onboarding.router,        prefix="/api/v1/onboarding",          tags=["onboarding"])
 app.include_router(inbox.router,             prefix="/api/v1/inbox",               tags=["inbox"])
+app.include_router(chat.router,              prefix="/api/v1/chat",                tags=["chat"])
 
 
 @app.get("/health", tags=["health"])

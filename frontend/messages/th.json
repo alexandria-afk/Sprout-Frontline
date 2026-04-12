@@ -9,6 +9,7 @@
     "workflows": "ขั้นตอนการทำงาน",
     "announcements": "ประกาศ",
     "training": "การฝึกอบรม",
+    "teamChat": "แชททีม",
     "leaderboard": "กระดานอันดับ",
     "settings": "การตั้งค่า"
   },
@@ -267,5 +268,15 @@
     "pageSubtitle": "การจัดอันดับในองค์กรของคุณ",
     "tabRankings": "การจัดอันดับ",
     "tabMyBadges": "ป้ายของฉัน"
+  },
+  "chat": {
+    "teamChat": "แชททีม",
+    "noChats": "ไม่มีแชททีมสำหรับสาขาของคุณ",
+    "selectChat": "เลือกสาขาเพื่อเริ่มแชท",
+    "messagePlaceholder": "พิมพ์ข้อความ… (Enter เพื่อส่ง)",
+    "loadEarlier": "โหลดข้อความก่อนหน้า",
+    "noMessages": "ยังไม่มีข้อความ เริ่มทักทายได้เลย!",
+    "deleted": "ข้อความนี้ถูกลบแล้ว",
+    "attachPhoto": "แนบรูปภาพ/วิดีโอ"
   }
 }

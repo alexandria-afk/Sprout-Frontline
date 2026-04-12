@@ -9,6 +9,7 @@
     "workflows": "Workflows",
     "announcements": "Announcements",
     "training": "Training",
+    "teamChat": "Team Chat",
     "leaderboard": "Leaderboard",
     "settings": "Settings"
   },
@@ -267,5 +268,15 @@
     "pageSubtitle": "Rankings across your organisation",
     "tabRankings": "Rankings",
     "tabMyBadges": "My Badges"
+  },
+  "chat": {
+    "teamChat": "Team Chat",
+    "noChats": "No team chats available for your location.",
+    "selectChat": "Select a location to start chatting.",
+    "messagePlaceholder": "Type a message… (Enter to send)",
+    "loadEarlier": "Load earlier messages",
+    "noMessages": "No messages yet. Say hello!",
+    "deleted": "This message was deleted.",
+    "attachPhoto": "Attach photo/video"
   }
 }

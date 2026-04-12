@@ -118,6 +118,20 @@ class OrgService:
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+        # Auto-create a team chat room for this location
+        try:
+            execute_returning(
+                conn,
+                """
+                INSERT INTO location_chats (organisation_id, location_id)
+                VALUES (%s, %s)
+                ON CONFLICT (location_id) DO NOTHING
+                """,
+                (org_id, result["id"]),
+            )
+        except Exception:
+            pass  # Non-fatal — chat can be backfilled via migration
+
         return LocationResponse(**result)
 
     @staticmethod

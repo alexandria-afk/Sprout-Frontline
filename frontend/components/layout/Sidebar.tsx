@@ -6,12 +6,13 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard, ClipboardList, Megaphone, LogOut, GitBranch,
   BarChart2, AlertTriangle, Settings, Trophy, GraduationCap,
-  CalendarClock, CheckSquare, Bell, Languages,
+  CalendarClock, CheckSquare, Bell, Languages, MessageSquare,
 } from "lucide-react";
 import { clsx } from "clsx";
 import { createClient } from "@/services/supabase/client";
 import { getDashboardSummary } from "@/services/dashboard";
 import { getUnreadCount } from "@/services/notifications";
+import { getUnreadTotal } from "@/services/chat";
 import { useTranslation } from "@/lib/i18n";
 import { updateUser } from "@/services/users";
 
@@ -27,6 +28,7 @@ const NAV_ITEMS = [
   { href: "/dashboard/workflows",                labelKey: "nav.workflows",    icon: GitBranch,       roles: ["super_admin","admin","manager"] },
   { href: "/dashboard/announcements",            labelKey: "nav.announcements",icon: Megaphone,       roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/training",                 labelKey: "nav.training",     icon: GraduationCap,   roles: ["super_admin","admin","manager","staff"] },
+  { href: "/dashboard/chat",                     labelKey: "nav.teamChat",     icon: MessageSquare,   roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/safety",                   labelKey: "nav.leaderboard",  icon: Trophy,          roles: ["super_admin","admin","manager","staff"] },
   { href: "/dashboard/settings",                 labelKey: "nav.settings",     icon: Settings,        roles: ["super_admin","admin"] },
 ];
@@ -70,6 +72,7 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
 
   const [pendingCount,      setPendingCount]      = useState(0);
   const [unreadNotifCount,  setUnreadNotifCount]  = useState(0);
+  const [chatUnreadCount,   setChatUnreadCount]   = useState(0);
 
   useEffect(() => {
     if (!MANAGER_ROLES.includes(role)) return;
@@ -85,6 +88,14 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
       getUnreadCount().then((r) => setUnreadNotifCount(r.count)).catch(() => {});
     fetchCount();
     const interval = setInterval(fetchCount, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const fetchChat = () =>
+      getUnreadTotal().then(setChatUnreadCount).catch(() => {});
+    fetchChat();
+    const interval = setInterval(fetchChat, 30_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -160,6 +171,13 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
                   {pendingCount > 99 ? "99+" : pendingCount}
                 </span>
               )}
+
+              {/* Chat unread badge */}
+              {hrefPath(href) === "/dashboard/chat" && chatUnreadCount > 0 && (
+                <span className="min-w-[18px] h-[18px] px-1 rounded-full bg-sprout-green text-white text-[10px] font-bold flex items-center justify-center">
+                  {chatUnreadCount > 99 ? "99+" : chatUnreadCount}
+                </span>
+              )}
             </Link>
           ))}
         </nav>
@@ -228,6 +246,11 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
                 {hrefPath(href) === "/dashboard/forms" && pendingCount > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-red-500 text-white text-[8px] font-bold flex items-center justify-center">
                     {pendingCount > 9 ? "9+" : pendingCount}
+                  </span>
+                )}
+                {hrefPath(href) === "/dashboard/chat" && chatUnreadCount > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full bg-sprout-green text-white text-[8px] font-bold flex items-center justify-center">
+                    {chatUnreadCount > 9 ? "9+" : chatUnreadCount}
                   </span>
                 )}
               </div>
