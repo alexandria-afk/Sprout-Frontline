@@ -91,7 +91,7 @@ const TT_STYLE = {
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleDateString("en-GB", {
+    return new Date(iso).toLocaleDateString(undefined, {
       day: "2-digit",
       month: "short",
       year: "numeric",

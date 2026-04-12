@@ -96,7 +96,7 @@ function fmtDate(d: Date): string {
 }
 
 function fmtTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
 }
 
 /** Display a shift wall-clock time without timezone conversion.
@@ -1876,16 +1876,16 @@ function ManagerTemplates({
                 return (
                   <tr key={s.id} className="hover:bg-gray-50">
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {startDt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                      {startDt.toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-dark-secondary">
                       {DAY_NAMES_FULL[startDt.getDay() === 0 ? 6 : startDt.getDay() - 1]}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {startDt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                      {startDt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: true })}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
-                      {endDt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                      {endDt.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: true })}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-dark-secondary">
                       {s.role ?? <span className="italic text-gray-400">Any</span>}
@@ -2496,7 +2496,7 @@ function StaffClockIn({ locationId }: { locationId: string }) {
             </div>
             <p className="text-lg font-bold text-dark mb-1">Not clocked in</p>
             <p className="text-sm text-dark-secondary mb-6">
-              {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+              {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
             </p>
             <button onClick={handleClockIn} disabled={working}
               className={clsx(btnPrimary, "mx-auto justify-center px-8 py-3 text-base")}>
@@ -2579,7 +2579,7 @@ function StaffTimesheet() {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="font-medium text-dark">
-                        {r.clock_in_at ? new Date(r.clock_in_at).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }) : "—"}
+                        {r.clock_in_at ? new Date(r.clock_in_at).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "—"}
                       </p>
                       <p className="text-sm text-dark-secondary mt-0.5">
                         {r.clock_in_at ? fmtTime(r.clock_in_at) : "—"}

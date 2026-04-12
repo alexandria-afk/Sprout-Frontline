@@ -1138,7 +1138,7 @@ function AssignModal({ template, onClose }: { template: FormTemplate; onClose: (
   };
 
   const dueLabel = () => {
-    if (recurrence === "once") return onceDate ? new Date(onceDate).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" }) : "";
+    if (recurrence === "once") return onceDate ? new Date(onceDate).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
     if (recurrence === "daily") return dailyTime ? `Every day by ${dailyTime}` : "";
     return weeklyTime ? `Every ${DAYS_OF_WEEK[weeklyDay]} by ${weeklyTime}` : "";
   };
@@ -1365,7 +1365,7 @@ function TemplateCard({ template, onView, onAssign }: {
             <div className="col-span-2 flex flex-col gap-0.5">
               <p className="text-xs text-dark-secondary">Latest response</p>
               <p className="text-xs font-medium text-dark">
-                {new Date(stats.latest_response_at).toLocaleString("en-PH", {
+                {new Date(stats.latest_response_at).toLocaleString(undefined, {
                   month: "short", day: "numeric", year: "numeric",
                   hour: "numeric", minute: "2-digit",
                 })}
@@ -1482,7 +1482,7 @@ function SubmissionDetailModal({
             </p>
             <p className="text-xs text-dark-secondary mt-0.5">
               {detail?.profiles?.full_name ?? "Unknown user"}
-              {detail?.submitted_at && ` · ${new Date(detail.submitted_at).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })}`}
+              {detail?.submitted_at && ` · ${new Date(detail.submitted_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" })}`}
             </p>
           </div>
           {detail && <StatusBadge status={detail.status} />}
@@ -1854,7 +1854,7 @@ function AuditCAPTab() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-dark-secondary">
-                        {new Date(cap.generated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        {new Date(cap.generated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/audits/caps/${cap.id}`); }}
@@ -2158,7 +2158,7 @@ function SubmissionsTab({ initialSelectedId }: { initialSelectedId?: string | nu
                     <p className="text-xs text-dark-secondary mt-0.5">
                       {item.profiles?.full_name ?? "Unknown user"}
                       {item.submitted_at && (
-                        <> · {new Date(item.submitted_at).toLocaleDateString("en-PH", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</>
+                        <> · {new Date(item.submitted_at).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</>
                       )}
                     </p>
                     {(() => {
@@ -2361,7 +2361,7 @@ function MyAssignmentsView() {
                   <TypeBadge type={(template?.type ?? "form") as FormType} />
                   {isCompleted && a.submitted_at ? (
                     <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-sprout-green/10 text-sprout-green">
-                      Submitted {new Date(a.submitted_at).toLocaleDateString("en-PH", { month: "short", day: "numeric" })}
+                      Submitted {new Date(a.submitted_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                     </span>
                   ) : (
                     <span className={clsx(
@@ -2369,8 +2369,8 @@ function MyAssignmentsView() {
                       isOverdue ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"
                     )}>
                       {isOverdue
-                        ? `Overdue — ${due.toLocaleDateString("en-PH", { month: "short", day: "numeric" })}`
-                        : `Due ${due.toLocaleDateString("en-PH", { month: "short", day: "numeric" })}`}
+                        ? `Overdue — ${due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`
+                        : `Due ${due.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`}
                     </span>
                   )}
                   <span className="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-dark-secondary capitalize">{a.recurrence}</span>

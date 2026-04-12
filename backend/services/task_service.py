@@ -252,7 +252,7 @@ class TaskService:
         if team_user_ids:
             assignee_rows = rows(
                 conn,
-                "SELECT task_id FROM task_assignees WHERE user_id = ANY(%s) AND is_deleted = FALSE",
+                "SELECT task_id FROM task_assignees WHERE user_id = ANY(%s::uuid[]) AND is_deleted = FALSE",
                 (team_user_ids,),
             )
             filter_task_ids = list({r["task_id"] for r in assignee_rows})
@@ -273,7 +273,7 @@ class TaskService:
         params: list = [org_id]
 
         if filter_task_ids is not None:
-            conditions.append("t.id = ANY(%s)")
+            conditions.append("t.id = ANY(%s::uuid[])")
             params.append(filter_task_ids)
         if status:
             conditions.append("t.status = %s")
@@ -337,7 +337,7 @@ class TaskService:
                    pr.full_name AS assignee_full_name
             FROM task_assignees ta
             LEFT JOIN profiles pr ON pr.id = ta.user_id
-            WHERE ta.task_id = ANY(%s)
+            WHERE ta.task_id = ANY(%s::uuid[])
             """,
             (task_ids,),
         )
@@ -347,7 +347,7 @@ class TaskService:
             """
             SELECT id, task_id, user_id, created_at, is_deleted
             FROM task_messages
-            WHERE task_id = ANY(%s)
+            WHERE task_id = ANY(%s::uuid[])
             """,
             (task_ids,),
         )
@@ -366,7 +366,7 @@ class TaskService:
             try:
                 read_rows = rows(
                     conn,
-                    "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                    "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s::uuid[]) AND user_id = %s",
                     (task_ids, user_id),
                 )
                 reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
@@ -713,7 +713,7 @@ class TaskService:
                 conn,
                 """
                 SELECT task_id, created_at FROM task_messages
-                WHERE task_id = ANY(%s)
+                WHERE task_id = ANY(%s::uuid[])
                   AND user_id != %s
                   AND is_deleted = FALSE
                 """,
@@ -724,7 +724,7 @@ class TaskService:
 
             read_rows = rows(
                 conn,
-                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s::uuid[]) AND user_id = %s",
                 (task_ids, user_id),
             )
             reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
@@ -759,7 +759,7 @@ class TaskService:
                    l.name AS location_name
             FROM tasks t
             LEFT JOIN locations l ON l.id = t.location_id
-            WHERE t.id = ANY(%s)
+            WHERE t.id = ANY(%s::uuid[])
               AND t.organisation_id = %s
               AND t.is_deleted = FALSE
               AND t.status = ANY(%s)
@@ -780,7 +780,7 @@ class TaskService:
                    pr.full_name AS assignee_full_name
             FROM task_assignees ta
             LEFT JOIN profiles pr ON pr.id = ta.user_id
-            WHERE ta.task_id = ANY(%s) AND ta.is_deleted = FALSE
+            WHERE ta.task_id = ANY(%s::uuid[]) AND ta.is_deleted = FALSE
             """,
             (tids,),
         )
@@ -791,7 +791,7 @@ class TaskService:
         # Fetch messages for unread counting
         all_messages = rows(
             conn,
-            "SELECT id, task_id, user_id, created_at, is_deleted FROM task_messages WHERE task_id = ANY(%s)",
+            "SELECT id, task_id, user_id, created_at, is_deleted FROM task_messages WHERE task_id = ANY(%s::uuid[])",
             (tids,),
         )
         messages_by_task: dict = {}
@@ -803,7 +803,7 @@ class TaskService:
         try:
             read_rows = rows(
                 conn,
-                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s) AND user_id = %s",
+                "SELECT task_id, last_read_at FROM task_message_reads WHERE task_id = ANY(%s::uuid[]) AND user_id = %s",
                 (tids, user_id),
             )
             reads_map = {r["task_id"]: r["last_read_at"] for r in read_rows}
@@ -840,7 +840,7 @@ class TaskService:
             task_ids = [r["task_id"] for r in assignee_rows]
             if not task_ids:
                 return {"total": 0, "by_status": {}, "by_priority": {}, "overdue_count": 0, "overdue_tasks": [], "completion_rate": None}
-            conditions.append("id = ANY(%s)")
+            conditions.append("id = ANY(%s::uuid[])")
             params.append(task_ids)
 
         where_sql = " AND ".join(conditions)
@@ -859,7 +859,7 @@ class TaskService:
                 SELECT t.id AS task_id, l.name AS location_name
                 FROM tasks t
                 JOIN locations l ON l.id = t.location_id
-                WHERE t.id = ANY(%s)
+                WHERE t.id = ANY(%s::uuid[])
                 """,
                 (tids,),
             )

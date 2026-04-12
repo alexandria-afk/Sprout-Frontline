@@ -12,6 +12,18 @@ function getTokenFromCookie(): string | null {
   return match ? decodeURIComponent(match.slice(TOKEN_COOKIE.length + 1)) : null;
 }
 
+/** In-flight refresh promise — prevents concurrent refresh storms */
+let _refreshPromise: Promise<boolean> | null = null;
+
+async function refreshAccessToken(): Promise<boolean> {
+  if (_refreshPromise) return _refreshPromise;
+  _refreshPromise = fetch("/api/auth/refresh", { method: "POST" })
+    .then((r) => r.ok)
+    .catch(() => false)
+    .finally(() => { _refreshPromise = null; });
+  return _refreshPromise;
+}
+
 async function getAuthHeaders(): Promise<HeadersInit> {
   const token = getTokenFromCookie();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -19,7 +31,8 @@ async function getAuthHeaders(): Promise<HeadersInit> {
 
 export async function apiFetch<T>(
   path: string,
-  options: RequestInit & { rawBody?: boolean } = {}
+  options: RequestInit & { rawBody?: boolean } = {},
+  _retry = true,
 ): Promise<T> {
   const authHeaders = await getAuthHeaders();
   const { rawBody, ...fetchOptions } = options;
@@ -30,6 +43,19 @@ export async function apiFetch<T>(
     ...fetchOptions,
     headers,
   });
+
+  // Silently refresh and retry once on 401 (expired access token)
+  if (res.status === 401 && _retry) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      return apiFetch<T>(path, options, false /* no more retries */);
+    }
+    // Refresh failed — session is dead, redirect to login
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+    throw new Error("Session expired");
+  }
 
   if (res.status === 401) {
     if (typeof window !== "undefined") {

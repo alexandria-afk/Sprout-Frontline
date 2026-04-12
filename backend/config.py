@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     # ── Auth (Keycloak) ───────────────────────────────────────────────────────
     keycloak_url: str = "http://localhost:56144"
     keycloak_realm: str = "sprout"
+    # Admin API credentials — master realm admin-cli client (dev defaults)
+    keycloak_admin_client_id: str = "admin-cli"
+    keycloak_admin_username: str = "admin"
+    keycloak_admin_password: str = "admin"
 
     # ── Database ──────────────────────────────────────────────────────────────
     database_url: str = ""

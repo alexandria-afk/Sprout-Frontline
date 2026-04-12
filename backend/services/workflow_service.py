@@ -197,8 +197,31 @@ def _execute_system_stage(
     }
 
     if action_type == "notify":
-        # TODO: send FCM notification via notification service
-        logger.info(f"[notify stage] message={cfg.get('message')} roles={cfg.get('roles')}")
+        notify_message = cfg.get("message", "You have a workflow notification")
+        notify_roles = cfg.get("roles") or []
+        if isinstance(notify_roles, str):
+            notify_roles = [notify_roles]
+        instance_id = instance.get("id")
+        try:
+            from services.notification_service import notify_role as _notify_role
+            import asyncio as _asyncio
+            for _role in notify_roles:
+                _asyncio.ensure_future(
+                    _notify_role(
+                        org_id=org_id,
+                        role=_role,
+                        location_id=location_id,
+                        type="workflow_stage_assigned",
+                        title="Workflow Update",
+                        body=notify_message,
+                        entity_type="workflow_instance",
+                        entity_id=str(instance_id) if instance_id else None,
+                        send_push=True,
+                    )
+                )
+        except Exception as _e:
+            logger.warning(f"[notify stage] push failed: {_e}")
+        logger.info(f"[notify stage] dispatched to roles={notify_roles} message={notify_message}")
 
     elif action_type == "wait":
         timeout_days = cfg.get("timeout_days")

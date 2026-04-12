@@ -170,7 +170,7 @@ class GamificationService:
                 SELECT uba.user_id, bc.icon, bc.name AS badge_name
                 FROM user_badge_awards uba
                 JOIN badge_configs bc ON bc.id = uba.badge_id
-                WHERE uba.user_id = ANY(%s)
+                WHERE uba.user_id = ANY(%s::uuid[])
                   AND uba.is_deleted = FALSE
                 """,
                 (user_ids,),

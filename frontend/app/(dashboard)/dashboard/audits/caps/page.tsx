@@ -158,7 +158,7 @@ export default function CAPListPage() {
                         <StatusBadge status={cap.status} />
                       </td>
                       <td className="px-4 py-3 text-dark-secondary">
-                        {new Date(cap.generated_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        {new Date(cap.generated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button

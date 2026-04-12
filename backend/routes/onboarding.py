@@ -2217,14 +2217,19 @@ async def _provision_workspace(session_id: str, org_id: str, created_by: str = "
             location_name = emp.get("location_name")
             loc_id = location_id_map.get(location_name) if location_name else None
 
-            # TODO: integrate Keycloak admin API
-            # Previously used supabase.auth.admin.create_user() / list_users() to create
-            # auth users. Replace with Keycloak admin API calls to create users in the
-            # Keycloak realm and retrieve their IDs.
-            new_user_id = None
-            _log.warning("Skipping auth user creation for %s — Keycloak admin API not yet integrated", email)
-
-            if not new_user_id:
+            # Create the employee in Keycloak to get their real UUID.
+            # That UUID becomes profiles.id so JWT sub → profile lookup works.
+            try:
+                from services.keycloak_admin import create_keycloak_user
+                new_user_id, temp_password = await create_keycloak_user(
+                    email=email,
+                    full_name=full_name,
+                    role=role,
+                )
+                # TODO: deliver temp_password to employee via email (Resend) before prod
+                _log.info("Keycloak account created for %s (id=%s) — TEMP PW: %s", email, new_user_id, temp_password)
+            except Exception as kc_err:
+                _log.error("Keycloak user creation failed for %s during onboarding: %s — skipping", email, kc_err)
                 continue
 
             # Upsert profile so re-provisioning never fails on duplicate id.

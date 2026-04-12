@@ -1,4 +1,4 @@
 import { redirect } from "next/navigation";
 export default function TasksRedirect() {
-  redirect("/dashboard/issues");
+  redirect("/dashboard/issues?tab=tasks");
 }

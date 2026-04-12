@@ -135,12 +135,12 @@ async def check_scheduled_reminders() -> None:
                 ce.id,
                 ce.organisation_id,
                 ce.user_id,
-                ce.deadline,
+                ce.cert_expires_at AS deadline,
                 c.title AS course_title
             FROM course_enrollments ce
             LEFT JOIN courses c ON c.id = ce.course_id
-            WHERE ce.deadline >= %s
-              AND ce.deadline <= %s
+            WHERE ce.cert_expires_at >= %s
+              AND ce.cert_expires_at <= %s
               AND ce.status != ALL(%s::text[])
               AND ce.is_deleted = FALSE
             """,

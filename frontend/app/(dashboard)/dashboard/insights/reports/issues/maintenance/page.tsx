@@ -82,7 +82,7 @@ function defaultRange() {
 }
 
 function formatCost(n: number) {
-  return n.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function fmtMonth(ym: string) {
@@ -335,7 +335,7 @@ export default function MaintenanceCostsReportPage() {
                   <XAxis
                     type="number"
                     tick={{ fontSize: 11, fill: "#94A3B8" }}
-                    tickFormatter={(v: number) => `₱${v.toLocaleString("en-PH")}`}
+                    tickFormatter={(v: number) => `₱${v.toLocaleString(undefined)}`}
                   />
                   <YAxis
                     type="category"
@@ -373,7 +373,7 @@ export default function MaintenanceCostsReportPage() {
                   <XAxis
                     type="number"
                     tick={{ fontSize: 11, fill: "#94A3B8" }}
-                    tickFormatter={(v: number) => `₱${v.toLocaleString("en-PH")}`}
+                    tickFormatter={(v: number) => `₱${v.toLocaleString(undefined)}`}
                   />
                   <YAxis
                     type="category"
@@ -417,7 +417,7 @@ export default function MaintenanceCostsReportPage() {
                   <XAxis dataKey="label" tick={{ fontSize: 11, fill: "#94A3B8" }} />
                   <YAxis
                     tick={{ fontSize: 11, fill: "#94A3B8" }}
-                    tickFormatter={(v: number) => `₱${v.toLocaleString("en-PH")}`}
+                    tickFormatter={(v: number) => `₱${v.toLocaleString(undefined)}`}
                     width={80}
                   />
                   <Tooltip

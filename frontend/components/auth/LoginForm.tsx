@@ -38,10 +38,10 @@ function removeDemoWorkspace(org_id: string) {
 }
 
 const DEV_USERS = [
-  { label: "Super Admin", email: "admin@renegade.com",       color: "bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200" },
-  { label: "Admin",       email: "branchadmin@renegade.com", color: "bg-blue-100 text-blue-700 border-blue-200 hover:bg-blue-200" },
-  { label: "Manager",     email: "manager@renegade.com",     color: "bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-200" },
-  { label: "Staff",       email: "staff@renegade.com",       color: "bg-green-100 text-green-700 border-green-200 hover:bg-green-200" },
+  { label: "Super Admin", email: "super_admin@sprout.test", color: "bg-purple-100 text-purple-700 border-purple-200 hover:bg-purple-200" },
+  { label: "Admin",       email: "admin@sprout.test",       color: "bg-blue-100 text-blue-700 border-blue-200 hover:bg-blue-200" },
+  { label: "Manager",     email: "manager@sprout.test",     color: "bg-amber-100 text-amber-700 border-amber-200 hover:bg-amber-200" },
+  { label: "Staff",       email: "staff@sprout.test",       color: "bg-green-100 text-green-700 border-green-200 hover:bg-green-200" },
 ] as const;
 
 const loginSchema = z.object({
@@ -163,7 +163,7 @@ export function LoginForm() {
     setQuickLoginLoading(email);
     setServerError(null);
     try {
-      const err = await doSignIn(email, "Test1234!");
+      const err = await doSignIn(email, "Password1!");
       if (err) { setServerError(err); setQuickLoginLoading(null); return; }
       router.push("/dashboard");
       router.refresh();

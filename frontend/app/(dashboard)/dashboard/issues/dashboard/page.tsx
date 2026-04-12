@@ -51,7 +51,7 @@ const STATUS_LABELS: Record<IssueStatus, string> = {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-PH", {
+  return new Date(iso).toLocaleDateString(undefined, {
     month: "short", day: "numeric", year: "numeric",
   });
 }

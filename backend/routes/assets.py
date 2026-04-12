@@ -258,3 +258,30 @@ async def list_asset_guides(
             guide["signed_url"] = guide.get("file_url")
 
     return {"data": guides, "total": len(guides)}
+
+
+# ── Predictive Maintenance ─────────────────────────────────────────────────────
+
+@router.post("/{asset_id}/predict")
+async def predict_asset(
+    asset_id: UUID,
+    current_user: dict = Depends(require_manager_or_above),
+    conn=Depends(get_db),
+):
+    """
+    Trigger on-demand failure prediction for an asset.
+    Calls Claude with the asset's maintenance history and persists the result.
+    """
+    from services.asset_prediction_service import predict_asset_failure
+
+    org_id = (current_user.get("app_metadata") or {}).get("organisation_id")
+    try:
+        result = await predict_asset_failure(conn, str(asset_id), org_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Prediction failed: {e}")
+
+    return result

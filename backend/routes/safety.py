@@ -83,7 +83,7 @@ async def leaderboard(
             JOIN profiles p ON p.id = up.user_id
             LEFT JOIN locations l ON l.id = p.location_id
             WHERE up.organisation_id = %s
-              AND up.user_id = ANY(%s)
+              AND up.user_id = ANY(%s::uuid[])
             ORDER BY up.total_points DESC
             LIMIT %s OFFSET %s
             """,
@@ -95,7 +95,7 @@ async def leaderboard(
             SELECT COUNT(*) AS cnt
             FROM user_points
             WHERE organisation_id = %s
-              AND user_id = ANY(%s)
+              AND user_id = ANY(%s::uuid[])
             """,
             (org_id, user_ids),
         )

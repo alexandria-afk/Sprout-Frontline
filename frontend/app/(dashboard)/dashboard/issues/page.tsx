@@ -68,11 +68,11 @@ function timeAgo(iso: string) {
 
 function formatDate(iso: string | null | undefined) {
   if (!iso) return null;
-  return new Date(iso).toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric" });
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function formatDateTime(iso: string) {
-  return new Date(iso).toLocaleString("en-PH", {
+  return new Date(iso).toLocaleString(undefined, {
     month: "short", day: "numeric", year: "numeric",
     hour: "numeric", minute: "2-digit",
   });
@@ -4038,7 +4038,7 @@ function IssuesHubPageInner() {
   const tabParam = searchParams.get("tab") as "incidents" | "issues" | "tasks" | null;
   const idParam = searchParams.get("id");
 
-  const [activeTab, setActiveTab] = useState<"incidents" | "issues" | "tasks">(tabParam ?? "tasks");
+  const [activeTab, setActiveTab] = useState<"incidents" | "issues" | "tasks">(tabParam ?? "issues");
   const [role, setRole] = useState<string | null>(null); // null = not yet resolved
   const [openIssues, setOpenIssues] = useState(0);
   const [inProgressIssues, setInProgressIssues] = useState(0);
@@ -4050,10 +4050,9 @@ function IssuesHubPageInner() {
   }, [tabParam]);
 
   useEffect(() => {
-    createClient().auth.getSession().then(({ data }) => {
-      const r = data.session?.user?.app_metadata?.role as string | undefined;
-      setRole(r ?? "staff");
-    });
+    fetch("/api/auth/me").then(r => r.json()).then(data => {
+      setRole((data?.role as string | undefined) ?? "staff");
+    }).catch(() => setRole("staff"));
   }, []);
 
   useEffect(() => {
@@ -4067,35 +4066,61 @@ function IssuesHubPageInner() {
   return (
     <div className="min-h-full bg-[#F0F2F5] -m-4 md:-m-8 -mt-[4.5rem] md:-mt-8 p-4 md:p-6 pt-[4.5rem] md:pt-8 pb-24 md:pb-8">
       <div className="flex flex-col gap-4 md:gap-6 max-w-full">
-        {/* Page header */}
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
-            <ClipboardList className="w-5 h-5 text-sprout-purple" />
+        {/* Page header — switches between Tasks and Issues context */}
+        {activeTab === "tasks" ? (
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-sprout-purple/10 flex items-center justify-center">
+              <ClipboardList className="w-5 h-5 text-sprout-purple" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-dark">{t("nav.tasks")}</h1>
+              <p className="text-sm text-dark-secondary">{isManager ? t("tasks.subtitleManager") : t("tasks.subtitleStaff")}</p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-bold text-dark">{t("issues.pageTitle")}</h1>
-            <p className="text-sm text-dark-secondary">{isManager ? t("issues.pageSubtitleManager") : t("issues.pageSubtitleStaff")}</p>
+        ) : (
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-violet-100 flex items-center justify-center">
+              <AlertTriangle className="w-5 h-5 text-sprout-purple" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-dark">{t("issues.pageTitle")}</h1>
+              <p className="text-sm text-dark-secondary">{isManager ? t("issues.pageSubtitleManager") : t("issues.pageSubtitleStaff")}</p>
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* Stat cards */}
+        {/* Stat cards — tasks context shows task stats; issues context shows issue stats */}
         {role !== null && (() => {
           type TabKey = "incidents" | "issues" | "tasks";
-          const managerCards: { label: string; value: number | string; icon: React.ElementType; bg: string; color: string; tab: TabKey }[] = [
-            { label: t("issues.stats.openIssues"),   value: openIssues,                    tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
-            { label: t("issues.stats.inProgress"),   value: inProgressIssues,              tab: "issues", icon: RefreshCw,     bg: "bg-blue-50",          color: "text-blue-600"     },
-            { label: t("issues.stats.totalTasks"),   value: taskSum?.total ?? "—",          tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: t("issues.stats.overdueTasks"), value: taskSum?.overdue_count ?? "—",  tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
+          type Card = { label: string; value: number | string; icon: React.ElementType; bg: string; color: string; tab: TabKey };
+
+          if (activeTab === "tasks") {
+            const taskCards: Card[] = [
+              { label: t("issues.stats.totalTasks"),   value: taskSum?.total ?? "—",         tab: "tasks", icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
+              { label: t("issues.stats.overdueTasks"), value: taskSum?.overdue_count ?? "—", tab: "tasks", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"       },
+            ];
+            return (
+              <div className="grid grid-cols-2 gap-3">
+                {taskCards.map(({ label, value, icon: Icon, bg, color }) => (
+                  <div key={label} className="bg-white rounded-xl border border-surface-border p-4 flex flex-col gap-2">
+                    <div className={clsx("w-8 h-8 rounded-full flex items-center justify-center", bg)}>
+                      <Icon className={clsx("w-4 h-4", color)} />
+                    </div>
+                    <p className="text-xl md:text-2xl font-bold text-dark">{value}</p>
+                    <p className="text-xs text-dark-secondary">{label}</p>
+                  </div>
+                ))}
+              </div>
+            );
+          }
+
+          const issueCards: Card[] = [
+            { label: t("issues.stats.openIssues"), value: openIssues,       tab: "issues", icon: AlertTriangle, bg: "bg-red-50",  color: "text-red-500"  },
+            { label: t("issues.stats.inProgress"), value: inProgressIssues, tab: "issues", icon: RefreshCw,     bg: "bg-blue-50", color: "text-blue-600" },
           ];
-          const staffCards: typeof managerCards = [
-            { label: t("issues.stats.openIssues"),   value: openIssues,                      tab: "issues", icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
-            { label: t("issues.stats.tasks"),         value: taskSum?.total ?? "—",            tab: "tasks",  icon: ClipboardList, bg: "bg-sprout-purple/10", color: "text-sprout-purple" },
-            { label: t("issues.stats.overdueTasks"), value: taskSum?.overdue_count ?? "—",    tab: "tasks",  icon: AlertTriangle, bg: "bg-red-50",           color: "text-red-500"      },
-          ];
-          const cards = isManager ? managerCards : staffCards;
           return (
-            <div className={clsx("grid gap-3", isManager ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-3")}>
-              {cards.map(({ label, value, icon: Icon, bg, color, tab }) => (
+            <div className="grid grid-cols-2 gap-3">
+              {issueCards.map(({ label, value, icon: Icon, bg, color, tab }) => (
                 <button
                   key={label}
                   onClick={() => setActiveTab(tab)}
@@ -4112,27 +4137,20 @@ function IssuesHubPageInner() {
           );
         })()}
 
-        {/* Tab bar — staff sees Issues + Tasks only; managers see all three */}
-        {(() => {
-          type TabKey = "incidents" | "issues" | "tasks";
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {/* Tab bar — only shown on the issues/incidents view, not on tasks view */}
+        {activeTab !== "tasks" && (() => {
+          type TabKey = "incidents" | "issues";
           type TabIcon = React.ElementType<{ className?: string }> | undefined;
-          const allTabs: { key: TabKey; label: string; icon: TabIcon }[] = [
-            { key: "tasks",     label: t("issues.tabs.tasks"),           icon: ClipboardList },
-            { key: "issues",    label: t("issues.tabs.issues"),          icon: undefined     },
-            { key: "incidents", label: t("issues.tabs.incidentReports"), icon: ShieldAlert   },
+          const tabs: { key: TabKey; label: string; icon: TabIcon }[] = [
+            { key: "issues",    label: t("issues.tabs.issues"),          icon: undefined   },
+            { key: "incidents", label: t("issues.tabs.incidentReports"), icon: ShieldAlert },
           ];
-          // Tasks view has only one tab — render no tab bar
-          const isTasksView = !tabParam || tabParam === "tasks";
-          if (isTasksView) return null;
-          // Issues & Incidents view: show both issues and incidents tabs
-          const visibleTabs = allTabs.filter((tab) => tab.key !== "tasks");
           return (
             <div className="flex border-b border-surface-border">
-              {visibleTabs.map(({ key, label, icon: Icon }) => (
+              {tabs.map(({ key, label, icon: Icon }) => (
                 <button
                   key={key}
-                  onClick={() => setActiveTab(key as TabKey)}
+                  onClick={() => setActiveTab(key)}
                   className={clsx(
                     "flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors -mb-px",
                     activeTab === key

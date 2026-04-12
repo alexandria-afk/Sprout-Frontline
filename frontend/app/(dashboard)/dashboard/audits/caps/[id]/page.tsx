@@ -46,7 +46,7 @@ const TYPE_OPTIONS: { value: FollowupType; label: string; enabled: boolean }[] =
 ];
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function formatResponseValue(val: string) {

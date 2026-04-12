@@ -250,7 +250,7 @@ class DashboardService:
                         """
                         SELECT attendance_id
                         FROM break_records
-                        WHERE attendance_id = ANY(%s)
+                        WHERE attendance_id = ANY(%s::uuid[])
                           AND break_end_at IS NULL
                         """,
                         (att_ids,),
@@ -271,7 +271,7 @@ class DashboardService:
                         """
                         SELECT id, full_name
                         FROM profiles
-                        WHERE id = ANY(%s)
+                        WHERE id = ANY(%s::uuid[])
                         """,
                         (all_user_ids,),
                     )

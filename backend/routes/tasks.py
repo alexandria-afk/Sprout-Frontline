@@ -121,6 +121,7 @@ async def create_task(
     return await TaskService.create_task(conn, body, org_id, created_by)
 
 
+@router.get("")
 @router.get("/")
 async def list_tasks(
     pagination: dict = Depends(paginate),

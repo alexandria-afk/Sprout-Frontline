@@ -128,7 +128,7 @@ function DailyBriefCard() {
   const [collapsed, setCollapsed] = useState(false);
   const [cachedAt, setCachedAt]   = useState("");
 
-  const dateStr = new Date().toLocaleDateString("en-US", {
+  const dateStr = new Date().toLocaleDateString(undefined, {
     weekday: "long", month: "long", day: "numeric",
   });
 
@@ -954,7 +954,7 @@ function MyShiftCard() {
   // Attendance timestamps are real UTC — convert to the user's local timezone.
   const fmtLocal = (iso: string) => {
     try {
-      return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+      return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
     } catch { return ""; }
   };
   const isClockedIn = !!(attendance?.clock_in_at && !attendance?.clock_out_at);
@@ -1096,7 +1096,7 @@ function MiniLeaderboard({ locationId }: { locationId?: string }) {
           )}
         </div>
         <p className={clsx("text-sm font-bold shrink-0 tabular-nums", isMe ? "text-sprout-green" : "text-dark-secondary")}>
-          {entry.total_points.toLocaleString()}<span className="text-[10px] font-normal ml-0.5">pts</span>
+          {(entry.total_points ?? 0).toLocaleString()}<span className="text-[10px] font-normal ml-0.5">pts</span>
         </p>
       </div>
     );

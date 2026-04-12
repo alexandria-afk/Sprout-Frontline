@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:frontline_app/core/api/dio_client.dart';
 import 'package:frontline_app/core/theme/app_theme.dart';
 import 'package:frontline_app/features/issues/data/models/issue_models.dart';
 import 'package:frontline_app/features/issues/providers/issues_provider.dart';
@@ -359,11 +360,63 @@ class _SidekickSheet extends StatefulWidget {
 
 class _SidekickSheetState extends State<_SidekickSheet> {
   final _controller = TextEditingController();
+  final _scrollController = ScrollController();
+  final List<Map<String, String>> _messages = [];
+  bool _loading = false;
 
   @override
   void dispose() {
     _controller.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _send(String text) async {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty || _loading) return;
+    _controller.clear();
+    setState(() {
+      _messages.add({'role': 'user', 'content': trimmed});
+      _loading = true;
+    });
+    _scrollToBottom();
+
+    try {
+      final response = await DioClient.instance.post<Map<String, dynamic>>(
+        '/api/v1/ai/chat',
+        data: {
+          'messages': _messages
+              .map((m) => {'role': m['role'], 'content': m['content']})
+              .toList(),
+        },
+      );
+      final reply = (response.data?['reply'] as String?) ?? '';
+      setState(() {
+        _messages.add({'role': 'assistant', 'content': reply});
+      });
+    } catch (e) {
+      setState(() {
+        _messages.add({
+          'role': 'assistant',
+          'content': 'Sorry, something went wrong. Please try again.',
+        });
+      });
+    } finally {
+      setState(() => _loading = false);
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.animateTo(
+          _scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   @override
@@ -372,7 +425,7 @@ class _SidekickSheetState extends State<_SidekickSheet> {
       initialChildSize: 0.5,
       maxChildSize: 0.85,
       minChildSize: 0.3,
-      builder: (_, scrollCtrl) => Container(
+      builder: (_, __) => Container(
         decoration: const BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -409,29 +462,90 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                 ],
               ),
             ),
-            // Suggestion chips
-            SizedBox(
-              height: 36,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                children: [
-                  _SuggestionChip(
-                      label: 'Summarize open issues',
-                      onTap: () =>
-                          _controller.text = 'Summarize open issues'),
-                  _SuggestionChip(
-                      label: "What's overdue?",
-                      onTap: () =>
-                          _controller.text = "What's overdue?"),
-                  _SuggestionChip(
-                      label: 'SLA breaches today',
-                      onTap: () =>
-                          _controller.text = 'SLA breaches today'),
-                ],
+            // Suggestion chips — only shown when no messages yet
+            if (_messages.isEmpty)
+              SizedBox(
+                height: 36,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: [
+                    _SuggestionChip(
+                        label: 'Summarize open issues',
+                        onTap: () => _send('Summarize open issues')),
+                    _SuggestionChip(
+                        label: "What's overdue?",
+                        onTap: () => _send("What's overdue?")),
+                    _SuggestionChip(
+                        label: 'SLA breaches today',
+                        onTap: () => _send('SLA breaches today')),
+                  ],
+                ),
               ),
+            // Message list
+            Expanded(
+              child: _messages.isEmpty
+                  ? const Center(
+                      child: Text('Ask anything about your operations.',
+                          style: TextStyle(color: Colors.grey, fontSize: 13)),
+                    )
+                  : ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      itemCount: _messages.length + (_loading ? 1 : 0),
+                      itemBuilder: (_, index) {
+                        if (index == _messages.length) {
+                          return const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 8),
+                            child: Row(
+                              children: [
+                                SizedBox(width: 8),
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                ),
+                                SizedBox(width: 8),
+                                Text('Thinking...',
+                                    style: TextStyle(
+                                        color: Colors.grey, fontSize: 13)),
+                              ],
+                            ),
+                          );
+                        }
+                        final msg = _messages[index];
+                        final isUser = msg['role'] == 'user';
+                        return Align(
+                          alignment: isUser
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            constraints: BoxConstraints(
+                                maxWidth:
+                                    MediaQuery.of(context).size.width * 0.78),
+                            decoration: BoxDecoration(
+                              color: isUser
+                                  ? SproutColors.green
+                                  : const Color(0xFFF3F4F6),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              msg['content'] ?? '',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: isUser ? Colors.white : Colors.black87,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
             ),
-            const Spacer(),
             // Chat input
             Container(
               padding: EdgeInsets.only(
@@ -449,6 +563,8 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                   Expanded(
                     child: TextField(
                       controller: _controller,
+                      textInputAction: TextInputAction.send,
+                      onSubmitted: _send,
                       decoration: const InputDecoration(
                         hintText: 'Ask anything...',
                         border: InputBorder.none,
@@ -459,16 +575,10 @@ class _SidekickSheetState extends State<_SidekickSheet> {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.send,
-                        color: SproutColors.green),
-                    onPressed: () {
-                      // TODO: Wire to POST /api/v1/ai/chat
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content:
-                                Text('AI chat coming soon')),
-                      );
-                    },
+                    icon: const Icon(Icons.send, color: SproutColors.green),
+                    onPressed: _loading
+                        ? null
+                        : () => _send(_controller.text),
                   ),
                 ],
               ),

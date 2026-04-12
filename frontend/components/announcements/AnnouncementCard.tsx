@@ -163,7 +163,7 @@ export function AnnouncementCard({ a, onDelete, canManage, highlighted }: {
     if (mins < 60) return `${mins}m ago`;
     const hrs = Math.floor(mins / 60);
     if (hrs < 24) return `${hrs}h ago`;
-    return date.toLocaleDateString("en-PH", { month: "short", day: "numeric" });
+    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   })();
 
   const mediaUrls = a.media_urls ?? [];

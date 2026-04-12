@@ -66,10 +66,29 @@ async def get_current_user(
             algorithms=["RS256"],
             options={"verify_aud": False},
         )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    except Exception as first_err:
+        # If the key ID isn't in our cached JWKS (e.g. Keycloak restarted and
+        # rotated keys), reset the singleton and retry once with fresh keys.
+        from jwt.exceptions import PyJWKClientError
+        if isinstance(first_err, PyJWKClientError):
+            global _jwks_client
+            _jwks_client = None
+            try:
+                signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
+                payload = jwt.decode(
+                    token,
+                    signing_key.key,
+                    algorithms=["RS256"],
+                    options={"verify_aud": False},
+                )
+            except jwt.ExpiredSignatureError:
+                raise HTTPException(status_code=401, detail="Token has expired")
+            except Exception as e:
+                raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        elif isinstance(first_err, jwt.ExpiredSignatureError):
+            raise HTTPException(status_code=401, detail="Token has expired")
+        else:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {first_err}")
 
     user_id = payload.get("sub")
 
@@ -82,7 +101,13 @@ async def get_current_user(
         role = raw_role  # scalar fallback
 
     # Enrich with org / location / language from the profiles table.
+    # Strategy:
+    #   1. Look up by Keycloak UUID (fast path — works once the profile is linked).
+    #   2. If not found, fall back to email match (first login after migration).
+    #      On a successful email match, re-key the profile row to the Keycloak UUID
+    #      so all future requests hit the fast path automatically.
     app_meta: dict = {"role": role}
+    email = payload.get("email") or payload.get("preferred_username")
     if user_id:
         try:
             from services.db import _get_pool
@@ -90,9 +115,10 @@ async def get_current_user(
             conn = pool.getconn()
             try:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    # ── 1. Fast path: look up by Keycloak UUID ────────────────
                     cur.execute(
                         """
-                        SELECT organisation_id, role, location_id, language
+                        SELECT id, organisation_id, role, location_id, language
                         FROM profiles
                         WHERE id = %s AND is_deleted = false
                         LIMIT 1
@@ -100,8 +126,36 @@ async def get_current_user(
                         (user_id,),
                     )
                     row = cur.fetchone()
+
+                    # ── 2. Email fallback: link existing profile by email ─────
+                    if not row and email:
+                        cur.execute(
+                            """
+                            SELECT id, organisation_id, role, location_id, language
+                            FROM profiles
+                            WHERE email = %s AND is_deleted = false
+                            LIMIT 1
+                            """,
+                            (email,),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            # Re-key the profile to the Keycloak UUID so
+                            # future requests hit the fast path.
+                            old_id = row["id"]
+                            try:
+                                cur.execute(
+                                    "UPDATE profiles SET id = %s WHERE id = %s",
+                                    (user_id, str(old_id)),
+                                )
+                                conn.commit()
+                            except Exception:
+                                conn.rollback()  # FK violation? leave id as-is
+
+                conn.commit()
             finally:
                 pool.putconn(conn)
+
             if row:
                 app_meta = {
                     "role": row["role"] or role,

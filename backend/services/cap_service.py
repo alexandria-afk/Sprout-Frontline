@@ -452,7 +452,7 @@ class CAPService:
                 """
                 SELECT cap_id, COUNT(*) AS cnt
                 FROM cap_items
-                WHERE cap_id = ANY(%s) AND is_deleted = FALSE
+                WHERE cap_id = ANY(%s::uuid[]) AND is_deleted = FALSE
                 GROUP BY cap_id
                 """,
                 (cap_ids,),

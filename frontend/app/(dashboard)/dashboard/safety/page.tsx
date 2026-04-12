@@ -509,7 +509,7 @@ export default function SafetyPage() {
         {myPoints != null && (
           <div className="flex items-center gap-1.5 bg-white border border-surface-border rounded-full px-3 py-1.5 text-sm font-semibold text-sprout-purple shadow-sm shrink-0">
             <Trophy className="w-3.5 h-3.5" />
-            {myPoints.total_points.toLocaleString()} pts
+            {(myPoints.total_points ?? 0).toLocaleString()} pts
           </div>
         )}
       </div>

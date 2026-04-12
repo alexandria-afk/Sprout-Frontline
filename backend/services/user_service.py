@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 import uuid
 from uuid import UUID
 from fastapi import HTTPException
@@ -7,6 +8,14 @@ from collections import Counter
 from models.users import CreateUserRequest, UpdateUserRequest, ProfileResponse, PositionSuggestion
 from models.base import PaginatedResponse
 from services.db import row, rows, execute, execute_returning
+from services.keycloak_admin import (
+    create_keycloak_user,
+    update_keycloak_user_role,
+    disable_keycloak_user,
+    enable_keycloak_user,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class UserService:
@@ -88,12 +97,27 @@ class UserService:
                 detail=f"A user with email {body.email} already exists. Re-send the invite from the user list instead.",
             )
 
-        # TODO: create user in Keycloak admin API
-        # Previously: supabase.auth.admin.invite_user_by_email(body.email, ...)
-        # Previously: supabase.auth.admin.update_user_by_id(user_id, {"app_metadata": {...}})
-        # Generate a profile ID; the real Keycloak user ID should be used here once
-        # the Keycloak invite flow is implemented.
-        user_id = str(uuid.uuid4())
+        # Create the user in Keycloak first so we get their real UUID.
+        # That UUID becomes profiles.id — this is what makes JWT sub → profile lookup work.
+        try:
+            user_id, temp_password = await create_keycloak_user(
+                email=body.email,
+                full_name=body.full_name,
+                role=body.role,
+            )
+            logger.info(
+                "Keycloak user created for %s (id=%s). Temp password logged below — "
+                "wire Resend to deliver this via email instead.",
+                body.email, user_id,
+            )
+            # TODO: send temp_password to body.email via Resend before shipping to prod
+            logger.info("TEMP PASSWORD for %s: %s", body.email, temp_password)
+        except Exception as kc_err:
+            logger.error("Keycloak user creation failed for %s: %s", body.email, kc_err)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not create Keycloak account: {kc_err}",
+            )
 
         # Build INSERT parameters
         columns = ["id", "organisation_id", "full_name", "role", "email", "language", "is_active", "is_deleted"]
@@ -199,10 +223,29 @@ class UserService:
         if not updated_row:
             raise HTTPException(status_code=400, detail="Update failed")
 
+        # Sync role change to Keycloak so JWT claims stay accurate
         if body.role is not None:
-            # TODO: update role in Keycloak admin API
-            # Previously: supabase.auth.admin.update_user_by_id(user_id, {"app_metadata": {"role": body.role, ...}})
-            pass
+            try:
+                await update_keycloak_user_role(str(user_id), body.role)
+            except Exception as kc_err:
+                # Log but don't roll back the DB update — an admin can retry
+                logger.error(
+                    "Keycloak role sync failed for user %s (new role=%s): %s",
+                    user_id, body.role, kc_err,
+                )
+
+        # Sync is_active to Keycloak so deactivated users cannot log in
+        if body.is_active is not None:
+            try:
+                if body.is_active:
+                    await enable_keycloak_user(str(user_id))
+                else:
+                    await disable_keycloak_user(str(user_id))
+            except Exception as kc_err:
+                logger.error(
+                    "Keycloak enable/disable failed for user %s (is_active=%s): %s",
+                    user_id, body.is_active, kc_err,
+                )
 
         return ProfileResponse(**updated_row)
 
@@ -228,8 +271,14 @@ class UserService:
         if not affected:
             raise HTTPException(status_code=400, detail="Delete failed")
 
-        # TODO: disable/ban user in Keycloak admin API
-        # Previously: supabase.auth.admin.update_user_by_id(user_id, {"ban_duration": "876600h"})
+        # Disable in Keycloak so the user's existing sessions can no longer refresh
+        # and new logins are rejected. We do a soft delete in DB so data is preserved.
+        try:
+            await disable_keycloak_user(str(user_id))
+        except Exception as kc_err:
+            # Log but don't fail — the DB soft-delete succeeded; Keycloak can be
+            # cleaned up manually if needed.
+            logger.error("Keycloak disable failed for deleted user %s: %s", user_id, kc_err)
 
         return {"success": True, "message": "User deleted"}
 

@@ -40,7 +40,7 @@ const FILTERS = [
 function formatTimestamp(ts: string): string {
   if (!ts) return "—";
   try {
-    return new Intl.DateTimeFormat("en-PH", {
+    return new Intl.DateTimeFormat(undefined, {
       month: "short",
       day: "numeric",
       year: "numeric",

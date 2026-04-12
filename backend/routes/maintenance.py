@@ -229,6 +229,15 @@ async def update_ticket_status(
             except Exception:
                 pass
 
+            # Run failure prediction (awaited but non-fatal)
+            try:
+                from services.asset_prediction_service import predict_asset_failure
+
+                await predict_asset_failure(conn, asset_id, org_id)
+            except Exception as _pred_exc:
+                import logging
+                logging.getLogger(__name__).warning("Asset prediction skipped: %s", _pred_exc)
+
     set_clause = ", ".join(set_parts)
     set_values.extend([str(ticket_id), org_id])
     result = execute_returning(

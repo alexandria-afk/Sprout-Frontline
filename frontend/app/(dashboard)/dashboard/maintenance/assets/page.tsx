@@ -17,11 +17,11 @@ const inputCls =
 
 function fmt(date: string | null | undefined) {
   if (!date) return "Never";
-  return new Date(date).toLocaleDateString("en-PH", { year: "numeric", month: "short", day: "numeric" });
+  return new Date(date).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
 function currency(n: number) {
-  return `₱${n.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `₱${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function Field({

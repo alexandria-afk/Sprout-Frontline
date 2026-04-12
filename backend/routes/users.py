@@ -17,6 +17,7 @@ async def get_me(
     return await UserService.get_me(conn, user_id)
 
 
+@router.get("")
 @router.get("/")
 async def list_users(
     pagination: dict = Depends(paginate),
@@ -54,6 +55,7 @@ async def bulk_import(
     return await UserService.bulk_import(conn, csv_content, org_id)
 
 
+@router.post("")
 @router.post("/")
 async def create_user(
     body: CreateUserRequest,
