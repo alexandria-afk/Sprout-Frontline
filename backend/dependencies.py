@@ -30,12 +30,16 @@ def _get_jwks_client() -> PyJWKClient:
     return _jwks_client
 
 
-# ── Database connection (per-request) ─────────────────────────────────────────
+# ── Database connection (per-request, pooled) ─────────────────────────────────
 def get_db():
-    """Yields a psycopg2 connection for the duration of the request.
-    Commits on success, rolls back on exception, always closes the connection.
+    """Yields a pooled psycopg2 connection for the duration of the request.
+    Commits on success, rolls back on exception, returns connection to pool.
+    Uses the shared pool from services.db to avoid creating a new OS-level
+    connection per request (which blocks the async event loop).
     """
-    conn = psycopg2.connect(settings.database_url)
+    from services.db import _get_pool
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
         yield conn
         conn.commit()
@@ -43,7 +47,7 @@ def get_db():
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
