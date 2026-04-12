@@ -97,6 +97,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    # Regex covers all localhost variants regardless of port (handles 0.0.0.0 binding in dev)
+    allow_origin_regex=r"http://(localhost|0\.0\.0\.0|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
