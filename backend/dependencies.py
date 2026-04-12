@@ -1,6 +1,7 @@
 import jwt
 import psycopg2
 import psycopg2.extras
+import time
 from jwt import PyJWKClient
 from datetime import timedelta
 from fastapi import Depends, HTTPException, Query
@@ -10,6 +11,22 @@ from services.db import get_db_conn
 
 # Re-export get_db so route files can do: from dependencies import get_db
 get_db = get_db_conn
+
+# ── Profile cache ─────────────────────────────────────────────────────────────
+# get_current_user is called on every request (including every 3-second poll).
+# Caching the profile lookup by user_id for 60 seconds prevents psycopg2
+# blocking calls from saturating the async event loop under polling load.
+_profile_cache: dict[str, tuple[dict, float]] = {}
+_PROFILE_TTL = 60  # seconds
+
+def _get_cached_profile(user_id: str) -> dict | None:
+    entry = _profile_cache.get(user_id)
+    if entry and entry[1] > time.monotonic():
+        return entry[0]
+    return None
+
+def _set_cached_profile(user_id: str, profile: dict) -> None:
+    _profile_cache[user_id] = (profile, time.monotonic() + _PROFILE_TTL)
 
 security = HTTPBearer()
 
@@ -28,26 +45,6 @@ def _get_jwks_client() -> PyJWKClient:
             cache_keys=True,
         )
     return _jwks_client
-
-
-# ── Database connection (per-request, pooled) ─────────────────────────────────
-def get_db():
-    """Yields a pooled psycopg2 connection for the duration of the request.
-    Commits on success, rolls back on exception, returns connection to pool.
-    Uses the shared pool from services.db to avoid creating a new OS-level
-    connection per request (which blocks the async event loop).
-    """
-    from services.db import _get_pool
-    pool = _get_pool()
-    conn = pool.getconn()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        pool.putconn(conn)
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -111,70 +108,70 @@ async def get_current_user(
         role = raw_role  # scalar fallback
 
     # Enrich with org / location / language from the profiles table.
-    # Strategy:
-    #   1. Look up by Keycloak UUID (fast path — works once the profile is linked).
-    #   2. If not found, fall back to email match (first login after migration).
-    #      On a successful email match, re-key the profile row to the Keycloak UUID
-    #      so all future requests hit the fast path automatically.
+    # Cached for 60 s per user_id — avoids a blocking psycopg2 call on every
+    # request (including every 3-second chat poll).
     app_meta: dict = {"role": role}
     email = payload.get("email") or payload.get("preferred_username")
     if user_id:
-        try:
-            from services.db import _get_pool
-            pool = _get_pool()
-            conn = pool.getconn()
+        cached = _get_cached_profile(user_id)
+        if cached:
+            app_meta = cached
+        else:
             try:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    # ── 1. Fast path: look up by Keycloak UUID ────────────────
-                    cur.execute(
-                        """
-                        SELECT id, organisation_id, role, location_id, language
-                        FROM profiles
-                        WHERE id = %s AND is_deleted = false
-                        LIMIT 1
-                        """,
-                        (user_id,),
-                    )
-                    row = cur.fetchone()
-
-                    # ── 2. Email fallback: link existing profile by email ─────
-                    if not row and email:
+                from services.db import _get_pool
+                pool = _get_pool()
+                conn = pool.getconn()
+                try:
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        # ── 1. Fast path: look up by Keycloak UUID ───────────
                         cur.execute(
                             """
                             SELECT id, organisation_id, role, location_id, language
                             FROM profiles
-                            WHERE email = %s AND is_deleted = false
+                            WHERE id = %s AND is_deleted = false
                             LIMIT 1
                             """,
-                            (email,),
+                            (user_id,),
                         )
                         row = cur.fetchone()
-                        if row:
-                            # Re-key the profile to the Keycloak UUID so
-                            # future requests hit the fast path.
-                            old_id = row["id"]
-                            try:
-                                cur.execute(
-                                    "UPDATE profiles SET id = %s WHERE id = %s",
-                                    (user_id, str(old_id)),
-                                )
-                                conn.commit()
-                            except Exception:
-                                conn.rollback()  # FK violation? leave id as-is
 
-                conn.commit()
-            finally:
-                pool.putconn(conn)
+                        # ── 2. Email fallback: link profile by email ─────────
+                        if not row and email:
+                            cur.execute(
+                                """
+                                SELECT id, organisation_id, role, location_id, language
+                                FROM profiles
+                                WHERE email = %s AND is_deleted = false
+                                LIMIT 1
+                                """,
+                                (email,),
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                old_id = row["id"]
+                                try:
+                                    cur.execute(
+                                        "UPDATE profiles SET id = %s WHERE id = %s",
+                                        (user_id, str(old_id)),
+                                    )
+                                    conn.commit()
+                                except Exception:
+                                    conn.rollback()
 
-            if row:
-                app_meta = {
-                    "role": row["role"] or role,
-                    "organisation_id": str(row["organisation_id"]) if row["organisation_id"] else None,
-                    "location_id": row.get("location_id"),
-                    "language": row.get("language") or "en",
-                }
-        except Exception:
-            pass  # Fall back to JWT claims if DB lookup fails
+                    conn.commit()
+                finally:
+                    pool.putconn(conn)
+
+                if row:
+                    app_meta = {
+                        "role": row["role"] or role,
+                        "organisation_id": str(row["organisation_id"]) if row["organisation_id"] else None,
+                        "location_id": row.get("location_id"),
+                        "language": row.get("language") or "en",
+                    }
+                    _set_cached_profile(user_id, app_meta)
+            except Exception:
+                pass  # Fall back to JWT claims if DB lookup fails
 
     return {**payload, "app_metadata": app_meta}
 
