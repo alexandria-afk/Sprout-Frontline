@@ -235,10 +235,10 @@ async def list_messages(
             cm.media_type,
             cm.is_deleted,
             cm.created_at,
-            p.full_name  AS sender_name,
-            p.avatar_url AS sender_avatar
+            COALESCE(p.full_name, cm.sender_id::text) AS sender_name,
+            NULL::text                                 AS sender_avatar
         FROM   chat_messages cm
-        JOIN   profiles p ON p.id = cm.sender_id
+        LEFT JOIN profiles p ON p.id = cm.sender_id
         WHERE  cm.chat_id = %s::uuid
           {cursor_clause}
         ORDER  BY cm.created_at {order}
@@ -248,16 +248,21 @@ async def list_messages(
     )
 
     # Update read cursor so unread count resets
-    now_iso = datetime.now(timezone.utc).isoformat()
-    execute(
-        conn,
-        """
-        INSERT INTO chat_read_cursors (chat_id, user_id, last_read_at)
-        VALUES (%s::uuid, %s::uuid, %s)
-        ON CONFLICT (chat_id, user_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at
-        """,
-        (str(chat_id), user_id, now_iso),
-    )
+    # Wrapped in try/except: if user_id isn't in profiles yet (first login race),
+    # the FK violation should not break message delivery.
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        execute(
+            conn,
+            """
+            INSERT INTO chat_read_cursors (chat_id, user_id, last_read_at)
+            VALUES (%s::uuid, %s::uuid, %s)
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at
+            """,
+            (str(chat_id), user_id, now_iso),
+        )
+    except Exception:
+        conn.rollback()  # Reset aborted-transaction state so the response can still be sent
 
     return {"messages": [dict(m) for m in msgs]}
 
