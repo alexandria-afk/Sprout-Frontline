@@ -32,10 +32,16 @@ def _get_jwks_client() -> PyJWKClient:
 
 # ── Database connection (per-request) ─────────────────────────────────────────
 def get_db():
-    """Yields a psycopg2 connection for the duration of the request."""
+    """Yields a psycopg2 connection for the duration of the request.
+    Commits on success, rolls back on exception, always closes the connection.
+    """
     conn = psycopg2.connect(settings.database_url)
     try:
         yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
