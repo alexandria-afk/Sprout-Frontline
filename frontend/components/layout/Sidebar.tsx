@@ -91,13 +91,12 @@ export function Sidebar({ role = "staff", userId }: { role?: string; userId?: st
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch chat unread count once on mount and on every navigation.
+  // No timer — polling every 30 s on all dashboard pages was expensive.
+  // The badge refreshes naturally whenever the user moves between pages.
   useEffect(() => {
-    const fetchChat = () =>
-      getUnreadTotal().then(setChatUnreadCount).catch(() => {});
-    fetchChat();
-    const interval = setInterval(fetchChat, 30_000);
-    return () => clearInterval(interval);
-  }, []);
+    getUnreadTotal().then(setChatUnreadCount).catch(() => {});
+  }, [pathname]);
 
   async function handleSignOut() {
     window.location.href = "/api/auth/signout";

@@ -191,7 +191,7 @@ function ChatPanel({
     }
   }, [loadingHistory]);
 
-  // Poll for new messages every 3 s
+  // Poll for new messages every 30 s
   const poll = useCallback(() => {
     if (!latestRef.current) return;
     listMessages(chat.id, { after: latestRef.current, limit: 100 })
@@ -210,7 +210,7 @@ function ChatPanel({
   }, [chat.id]);
 
   useEffect(() => {
-    pollRef.current = setInterval(poll, 3000);
+    pollRef.current = setInterval(poll, 30_000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [poll]);
 
@@ -494,13 +494,8 @@ function ChatPageContent() {
       .finally(() => setLoading(false));
   }, [searchParams]);
 
-  // Refresh chat list every 30 s to keep unread counts fresh
-  useEffect(() => {
-    const id = setInterval(() => {
-      listMyChats().then(setChats).catch(() => {});
-    }, 30_000);
-    return () => clearInterval(id);
-  }, []);
+  // No interval for chat list — fetched once on mount.
+  // Unread counts update naturally when the user opens a chat (read cursor resets).
 
   function handleSelectChat(chat: ChatRoom) {
     setSelectedChat(chat);
